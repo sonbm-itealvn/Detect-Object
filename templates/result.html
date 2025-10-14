@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kết quả tìm kiếm</title>
+</head>
+<body>
+    <h2>Kết quả tìm kiếm</h2>
+    <p><b>Truy vấn:</b> {{ query }}</p>
+    <p><b>Kết quả gần nhất:</b> {{ best_match }}</p>
+    <p><b>Độ tương đồng:</b> {{ score|round(4) }}</p>
+
+    <h3>Hình ảnh nhận diện</h3>
+    <img src="{{ D:\book\PTIT\test\yolov5\demo\anh2.jpg }}" alt="Detected Image" style="max-width:100%;">
+
+    <br><br>
+    <a href="/">Tìm kiếm lại</a>
+</body>
+</html>
