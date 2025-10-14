@@ -9,6 +9,8 @@ import os
 import glob
 from sentence_transformers import SentenceTransformer, util
 
+from RL.rl_enhancement import AppReinforcementLearning
+
 class ObjectDetectionApp:
     def __init__(self, root):
         self.root = root
@@ -29,20 +31,34 @@ class ObjectDetectionApp:
         control_frame = Frame(root, bg="#f5f5f5")
         control_frame.pack(pady=(0, 20))
 
-        self.btn_select = Button(control_frame, text="📁 Chọn ảnh", command=self.select_image, 
+        self.btn_select = Button(control_frame, text="📁 Select Image", command=self.select_image, 
                                font=("Arial", 12, "bold"), bg="#3498db", fg="white", 
                                width=15, height=2, relief="flat", bd=0)
         self.btn_select.pack(side="left", padx=10)
 
-        self.btn_run = Button(control_frame, text="▶️ Chạy nhận diện", command=self.run_pipeline_thread, 
+        self.btn_run = Button(control_frame, text="▶️ Detect Object", command=self.run_pipeline_thread, 
                             font=("Arial", 12, "bold"), bg="#27ae60", fg="white", 
                             width=15, height=2, relief="flat", bd=0)
         self.btn_run.pack(side="left", padx=10)
 
-        self.btn_refresh = Button(control_frame, text="🔄 Tải lại dữ liệu", command=self.refresh_data, 
+        self.btn_refresh = Button(control_frame, text="🔄 Reload Data", command=self.refresh_data, 
                                 font=("Arial", 12, "bold"), bg="#f39c12", fg="white", 
                                 width=15, height=2, relief="flat", bd=0)
         self.btn_refresh.pack(side="left", padx=10)
+        
+        self.rl_enhancement = AppReinforcementLearning(self)
+
+        self.btn_rl_train = Button(control_frame, text="🧠 RL Training", 
+                                 command=self.run_rl_training,
+                                 font=("Arial", 12, "bold"), bg="#9b59b6", fg="white", 
+                                 width=15, height=2, relief="flat", bd=0)
+        self.btn_rl_train.pack(side="left", padx=10)
+        
+        self.btn_generate_synthetic = Button(control_frame, text="🎨 Generate Synthetic", 
+                                           command=self.generate_synthetic_data,
+                                           font=("Arial", 12, "bold"), bg="#e67e22", fg="white", 
+                                           width=15, height=2, relief="flat", bd=0)
+        self.btn_generate_synthetic.pack(side="left", padx=10)
 
         # Frame chính chứa 3 cột
         main_frame = Frame(root, bg="#f5f5f5")
@@ -489,6 +505,40 @@ class ObjectDetectionApp:
         except Exception as e:
             self.title_label.config(text=f"❌ Lỗi: {e}")
             print(f"❌ Lỗi xảy ra: {e}")
+
+    def run_rl_training(self):
+        """Run reinforcement learning training in separate thread"""
+        self.title_label.config(text="🧠 Đang chạy RL Training...")
+        
+        def rl_training_thread():
+            try:
+                results = self.rl_enhancement.run_reinforcement_learning()
+                self.title_label.config(text=f"✅ RL Training hoàn tất! Reward: {results['reward']:.3f}")
+            except Exception as e:
+                self.title_label.config(text=f"❌ RL Training lỗi: {e}")
+                print(f"❌ RL Training error: {e}")
+        
+        # Chạy RL training trong thread riêng để không block UI
+        thread = threading.Thread(target=rl_training_thread)
+        thread.daemon = True  # Thread sẽ tự động kết thúc khi app đóng
+        thread.start()
+    
+    def generate_synthetic_data(self):
+        """Generate synthetic dataset from relationships in separate thread"""
+        self.title_label.config(text="🎨 Đang tạo dữ liệu synthetic...")
+        
+        def synthetic_generation_thread():
+            try:
+                synthetic_data = self.rl_enhancement.generate_synthetic_dataset()
+                self.title_label.config(text=f"✅ Đã tạo {len(synthetic_data)} ảnh synthetic!")
+            except Exception as e:
+                self.title_label.config(text=f"❌ Tạo synthetic data lỗi: {e}")
+                print(f"❌ Synthetic data generation error: {e}")
+        
+        # Chạy synthetic data generation trong thread riêng
+        thread = threading.Thread(target=synthetic_generation_thread)
+        thread.daemon = True
+        thread.start()
 
 if __name__ == "__main__":
     root = tk.Tk()

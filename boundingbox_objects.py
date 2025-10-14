@@ -104,7 +104,7 @@ def run_reltr_inference(objects, img_path, args, output_json="relationships.json
         outputs = model(img_tensor)
 
     rel_logits = outputs["rel_logits"].softmax(-1)[0, :, :-1]
-    keep = rel_logits.max(-1).values > 0.1
+    keep = rel_logits.max(-1).values > 0.4
     rel_scores = rel_logits[keep]
     if rel_scores.numel() == 0:
         rel_scores = rel_logits
