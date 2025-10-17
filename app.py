@@ -10,6 +10,7 @@ import glob
 from sentence_transformers import SentenceTransformer, util
 
 from RL.rl_enhancement import AppReinforcementLearning
+from RL.training_evaluator import TrainingEvaluator
 
 class ObjectDetectionApp:
     def __init__(self, root):
@@ -47,6 +48,7 @@ class ObjectDetectionApp:
         self.btn_refresh.pack(side="left", padx=10)
         
         self.rl_enhancement = AppReinforcementLearning(self)
+        self.training_evaluator = TrainingEvaluator()
 
         self.btn_rl_train = Button(control_frame, text="🧠 RL Training", 
                                  command=self.run_rl_training,
@@ -59,6 +61,12 @@ class ObjectDetectionApp:
                                            font=("Arial", 12, "bold"), bg="#e67e22", fg="white", 
                                            width=15, height=2, relief="flat", bd=0)
         self.btn_generate_synthetic.pack(side="left", padx=10)
+        
+        self.btn_evaluate_training = Button(control_frame, text="📊 Evaluate Training", 
+                                          command=self.evaluate_training_results,
+                                          font=("Arial", 12, "bold"), bg="#8e44ad", fg="white", 
+                                          width=15, height=2, relief="flat", bd=0)
+        self.btn_evaluate_training.pack(side="left", padx=10)
 
         # Frame chính chứa 3 cột
         main_frame = Frame(root, bg="#f5f5f5")
@@ -537,6 +545,64 @@ class ObjectDetectionApp:
         
         # Chạy synthetic data generation trong thread riêng
         thread = threading.Thread(target=synthetic_generation_thread)
+        thread.daemon = True
+        thread.start()
+    
+    def evaluate_training_results(self):
+        """Evaluate training results and create comprehensive report"""
+        self.title_label.config(text="📊 Đang đánh giá kết quả training...")
+        
+        def evaluation_thread():
+            try:
+                # Create comprehensive evaluation report
+                report = self.training_evaluator.create_comprehensive_report()
+                
+                if 'error' in report:
+                    self.title_label.config(text=f"❌ {report['error']}")
+                    return
+                
+                # Display evaluation results
+                total_sessions = report.get('total_sessions', 0)
+                overall_analysis = report.get('overall_analysis', {})
+                
+                if total_sessions > 0:
+                    avg_reward = overall_analysis.get('average_reward', 0)
+                    total_images = overall_analysis.get('total_ai_images_generated', 0)
+                    
+                    self.title_label.config(text=f"✅ Đánh giá hoàn tất! {total_sessions} sessions, Reward: {avg_reward:.3f}, AI Images: {total_images}")
+                    
+                    # Display detailed results in console
+                    print("\n" + "="*60)
+                    print("📊 TRAINING EVALUATION RESULTS")
+                    print("="*60)
+                    print(f"Total Training Sessions: {total_sessions}")
+                    print(f"Total AI Images Generated: {total_images}")
+                    print(f"Average Reward Score: {avg_reward:.4f}")
+                    print(f"Average Detection Loss: {overall_analysis.get('average_detection_loss', 0):.4f}")
+                    print(f"Average Relationship Loss: {overall_analysis.get('average_relationship_loss', 0):.4f}")
+                    
+                    # Show recommendations
+                    recommendations = report.get('recommendations', [])
+                    if recommendations:
+                        print("\n📋 RECOMMENDATIONS:")
+                        for rec in recommendations:
+                            print(f"  {rec}")
+                    
+                    print("\n📁 Files created:")
+                    print("  - rl_training_metrics_*.json (detailed metrics)")
+                    print("  - rl_training_summary_*.json (training summaries)")
+                    print("  - training_evaluation_report_*.json (comprehensive report)")
+                    print("="*60)
+                    
+                else:
+                    self.title_label.config(text="❌ Không tìm thấy kết quả training để đánh giá")
+                    
+            except Exception as e:
+                self.title_label.config(text=f"❌ Lỗi đánh giá: {e}")
+                print(f"❌ Evaluation error: {e}")
+        
+        # Chạy evaluation trong thread riêng
+        thread = threading.Thread(target=evaluation_thread)
         thread.daemon = True
         thread.start()
 
