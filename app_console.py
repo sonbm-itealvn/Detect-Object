@@ -447,9 +447,10 @@ def main():
         print("5. Tạo dữ liệu synthetic")
         print("6. Đánh giá kết quả training")
         print("7. Quản lý Experiments")
-        print("8. Thoát")
+        print("8. Tiếp tục RL Training từ experiment trước")
+        print("9. Thoát")
         
-        choice = input("\nNhập lựa chọn (1-8): ").strip()
+        choice = input("\nNhập lựa chọn (1-9): ").strip()
         
         if choice == "1":
             image_path = input("Nhập đường dẫn ảnh: ").strip()
@@ -516,6 +517,56 @@ def main():
                     print("❌ Lựa chọn không hợp lệ!")
             
         elif choice == "8":
+            # Tiếp tục RL Training từ experiment trước
+            print("\n🔄 TIẾP TỤC RL TRAINING")
+            print("=" * 50)
+            
+            # Liệt kê experiments có sẵn
+            experiments = app.experiment_viewer.list_all_experiments()
+            if not experiments:
+                print("❌ Không có experiment nào để tiếp tục")
+                continue
+            
+            print("\nCác experiments có sẵn:")
+            for i, exp in enumerate(experiments[:5], 1):  # Hiển thị 5 experiments gần nhất
+                print(f"{i}. {exp['experiment_id']} - {exp.get('status', 'Unknown')}")
+            
+            try:
+                exp_choice = input("\nChọn experiment để tiếp tục (1-5, hoặc Enter để bỏ qua): ").strip()
+                if exp_choice and exp_choice.isdigit():
+                    idx = int(exp_choice) - 1
+                    if 0 <= idx < len(experiments):
+                        selected_exp = experiments[idx]
+                        exp_dir = selected_exp.get('path', '')
+                        
+                        if exp_dir and os.path.exists(exp_dir):
+                            print(f"\n🔄 Tiếp tục training từ: {selected_exp['experiment_id']}")
+                            
+                            epochs = input("Nhập số epochs để tiếp tục (mặc định 3): ").strip()
+                            epochs = int(epochs) if epochs.isdigit() else 3
+                            
+                            # Chạy RL training với continue_from
+                            results = app.rl_enhancement.run_reinforcement_learning(
+                                epochs=epochs, 
+                                continue_from=exp_dir
+                            )
+                            
+                            if results:
+                                print(f"\n✅ Tiếp tục training hoàn tất!")
+                                print(f"🎯 Final Reward: {results.get('reward', 0):.4f}")
+                                print(f"📈 Total AI Images: {results.get('total_ai_images', 0)}")
+                            else:
+                                print("❌ Tiếp tục training thất bại")
+                        else:
+                            print("❌ Experiment directory không tồn tại")
+                    else:
+                        print("❌ Lựa chọn không hợp lệ")
+                else:
+                    print("Đã hủy tiếp tục training")
+            except Exception as e:
+                print(f"❌ Lỗi: {e}")
+            
+        elif choice == "9":
             print("👋 Tạm biệt!")
             break
             

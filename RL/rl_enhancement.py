@@ -34,12 +34,13 @@ class AppReinforcementLearning:
         self.rl_system = RelationshipReinforcementLearning(
             detection_model=None,  # Will be loaded from YOLO pipeline
             relationship_model=None,  # Will be loaded from RelTR pipeline
-            generator=self.generator
+            generator=self.generator,
+            experiment_dir=self.experiment_manager.current_exp_dir
         )
         
         print(f"SUCCESS: RL system initialized with {len(relationships)} relationships")
     
-    def run_reinforcement_learning(self, epochs=5):
+    def run_reinforcement_learning(self, epochs=5, continue_from=None):
         """Run RL training loop with multiple epochs"""
         if not self.rl_system:
             self.setup_reinforcement_learning()
@@ -51,9 +52,21 @@ class AppReinforcementLearning:
         print(f"Starting RL Training with {epochs} epochs")
         print(f"Training on {len(relationships)} relationships")
         
-        # Bắt đầu experiment mới
-        experiment_dir = self.experiment_manager.start_new_experiment()
-        print(f"📁 Experiment directory: {experiment_dir}")
+        # Bắt đầu experiment mới hoặc tiếp tục từ experiment trước
+        if continue_from:
+            print(f"🔄 Continuing training from experiment: {continue_from}")
+            experiment_dir = continue_from
+            # Load model state từ experiment trước
+            if self.rl_system.continue_training(experiment_dir):
+                print("✅ Successfully loaded previous model state")
+            else:
+                print("⚠️ Starting fresh training")
+        else:
+            experiment_dir = self.experiment_manager.start_new_experiment()
+            print(f"📁 New experiment directory: {experiment_dir}")
+        
+        # Set experiment directory cho model manager
+        self.rl_system.model_manager.set_experiment_dir(experiment_dir)
         
         # Initialize training metrics
         training_start_time = time.time()

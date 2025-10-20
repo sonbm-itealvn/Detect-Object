@@ -5,9 +5,12 @@ from torch.optim import Adam
 import numpy as np
 from collections import deque
 import random
+import os
+import datetime
+from RL.model_manager import ModelManager
 
 class RelationshipReinforcementLearning:
-    def __init__(self, detection_model, relationship_model, generator):
+    def __init__(self, detection_model, relationship_model, generator, experiment_dir=None):
         self.detection_model = detection_model  # Can be None initially
         self.relationship_model = relationship_model  # Can be None initially
         self.generator = generator
@@ -15,6 +18,18 @@ class RelationshipReinforcementLearning:
         self.epsilon = 0.9  # Exploration rate
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
+        
+        # Model management
+        self.model_manager = ModelManager()
+        if experiment_dir:
+            self.model_manager.set_experiment_dir(experiment_dir)
+        
+        # Training history
+        self.training_history = {
+            'epochs': [],
+            'best_reward': float('-inf'),
+            'best_epoch': 0
+        }
         
     def train_episode(self, original_relationships, synthetic_data=None):
         print(f"Starting training episode with {len(original_relationships)} relationships")
@@ -54,6 +69,23 @@ class RelationshipReinforcementLearning:
         # 5. Update exploration rate
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         print(f"    Exploration rate: {self.epsilon:.4f}")
+        
+        # 6. Save model state if this is a good result
+        if reward > self.training_history['best_reward']:
+            self.training_history['best_reward'] = reward
+            self.training_history['best_epoch'] = len(self.training_history['epochs']) + 1
+            self.save_model_state(reward, detection_loss, relationship_loss)
+        
+        # 7. Update training history
+        epoch_data = {
+            'epoch': len(self.training_history['epochs']) + 1,
+            'detection_loss': detection_loss,
+            'relationship_loss': relationship_loss,
+            'reward': reward,
+            'epsilon': self.epsilon,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+        self.training_history['epochs'].append(epoch_data)
         
         print("SUCCESS: Training episode completed!")
         
@@ -164,3 +196,113 @@ class RelationshipReinforcementLearning:
         # synthetic data and original relationships
         consistency_score = random.uniform(0.6, 0.9)
         return consistency_score
+    
+    def save_model_state(self, reward, detection_loss, relationship_loss):
+        """Lưu trạng thái model khi có kết quả tốt"""
+        if not self.model_manager.current_experiment_dir:
+            print("WARNING: No experiment directory set, cannot save model state")
+            return
+        
+        try:
+            # Tạo model state (trong thực tế sẽ là actual model weights)
+            model_state = {
+                'epsilon': self.epsilon,
+                'reward': reward,
+                'detection_loss': detection_loss,
+                'relationship_loss': relationship_loss,
+                'training_step': len(self.training_history['epochs']),
+                'model_weights': self.create_mock_model_weights(),  # Mock weights
+                'optimizer_state': self.create_mock_optimizer_state()  # Mock optimizer state
+            }
+            
+            # Lưu detection model state
+            self.model_manager.save_model_state(
+                'detection_model',
+                model_state,
+                epoch=len(self.training_history['epochs']),
+                metadata={
+                    'reward': reward,
+                    'detection_loss': detection_loss,
+                    'relationship_loss': relationship_loss,
+                    'epsilon': self.epsilon
+                }
+            )
+            
+            # Lưu relationship model state
+            self.model_manager.save_model_state(
+                'relationship_model',
+                model_state,
+                epoch=len(self.training_history['epochs']),
+                metadata={
+                    'reward': reward,
+                    'detection_loss': detection_loss,
+                    'relationship_loss': relationship_loss,
+                    'epsilon': self.epsilon
+                }
+            )
+            
+            # Lưu training history
+            self.model_manager.save_training_history(self.training_history)
+            
+            print(f"Saved model state (reward: {reward:.4f})")
+            
+        except Exception as e:
+            print(f"ERROR saving model state: {e}")
+    
+    def load_model_state(self, model_name='detection_model', experiment_dir=None):
+        """Load trạng thái model từ checkpoint"""
+        try:
+            checkpoint = self.model_manager.load_model_state(model_name, experiment_dir)
+            if checkpoint:
+                # Restore model state
+                self.epsilon = checkpoint['model_state'].get('epsilon', self.epsilon)
+                
+                # Restore training history
+                if 'training_history' in checkpoint:
+                    self.training_history = checkpoint['training_history']
+                
+                print(f"Loaded model state from {model_name}")
+                return True
+            else:
+                print(f"No checkpoint found for {model_name}")
+                return False
+                
+        except Exception as e:
+            print(f"ERROR loading model state: {e}")
+            return False
+    
+    def create_mock_model_weights(self):
+        """Tạo mock model weights (trong thực tế sẽ là actual weights)"""
+        return {
+            'layer1_weight': np.random.randn(10, 10).tolist(),
+            'layer1_bias': np.random.randn(10).tolist(),
+            'layer2_weight': np.random.randn(5, 10).tolist(),
+            'layer2_bias': np.random.randn(5).tolist(),
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+    
+    def create_mock_optimizer_state(self):
+        """Tạo mock optimizer state"""
+        return {
+            'step': len(self.training_history['epochs']),
+            'learning_rate': 0.001,
+            'momentum': 0.9,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+    
+    def get_best_model(self, metric='reward'):
+        """Lấy model tốt nhất"""
+        return self.model_manager.get_best_model('detection_model', metric=metric)
+    
+    def continue_training(self, experiment_dir):
+        """Tiếp tục training từ experiment trước đó"""
+        self.model_manager.set_experiment_dir(experiment_dir)
+        
+        # Load best model từ experiment trước
+        best_model = self.get_best_model()
+        if best_model:
+            print(f"Continuing training from best model (reward: {best_model['model_state'].get('reward', 0):.4f})")
+            return True
+        else:
+            print("No previous model found, starting fresh training")
+            return False
