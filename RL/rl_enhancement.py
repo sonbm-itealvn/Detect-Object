@@ -3,11 +3,12 @@ import json
 import os
 import time
 import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from RL.ai_images_generator import RelationshipImageGenerator
 from RL.data_augmentation import RelationshipDataAugmentation
 from RL.reinforcement_learning import RelationshipReinforcementLearning
 from RL.experiment_manager import ExperimentManager
+from RL.experience_manager import ExperienceManager
 
 class AppReinforcementLearning:
     def __init__(self, app_instance):
@@ -16,6 +17,7 @@ class AppReinforcementLearning:
         self.augmentation = RelationshipDataAugmentation()
         self.rl_system = None
         self.experiment_manager = ExperimentManager()
+        self.experience_manager = ExperienceManager()
         
     def setup_reinforcement_learning(self):
         """Setup RL system after initial detection"""
@@ -76,7 +78,8 @@ class AppReinforcementLearning:
             'total_relationships': len(relationships),
             'epoch_results': [],
             'ai_generated_images': [],
-            'training_progress': []
+            'training_progress': [],
+            'experience_files': []
         }
         
         all_results = []
@@ -100,9 +103,20 @@ class AppReinforcementLearning:
                 # Run training episode with pre-generated synthetic data
                 print(f"🧠 Starting actual RL training for epoch {epoch + 1}...")
                 results = self.rl_system.train_episode(relationships, ai_images)
+                experience_batch = results.pop('experience_batch', [])
                 results['epoch'] = epoch + 1
                 results['ai_images_generated'] = len(ai_images)
                 results['epoch_duration'] = time.time() - epoch_start_time
+                experience_file = self._store_epoch_experiences(
+                    experience_batch,
+                    experiment_dir=experiment_dir,
+                    epoch_index=epoch + 1,
+                    reward=results['reward'],
+                    detection_loss=results['detection_loss'],
+                    relationship_loss=results['relationship_loss']
+                )
+                if experience_file:
+                    training_metrics['experience_files'].append(experience_file)
                 
                 all_results.append(results)
                 training_metrics['epoch_results'].append(results)
@@ -116,6 +130,8 @@ class AppReinforcementLearning:
                     'reward': results['reward'],
                     'epsilon': results['epsilon'],
                     'ai_images_count': len(ai_images),
+                    'experience_count': len(experience_batch),
+                    'experience_file': experience_file,
                     'epoch_duration': results['epoch_duration']
                 }
                 self.experiment_manager.save_training_metrics(epoch_metrics, epoch + 1)
@@ -127,7 +143,8 @@ class AppReinforcementLearning:
                     'detection_loss': results['detection_loss'],
                     'relationship_loss': results['relationship_loss'],
                     'reward': results['reward'],
-                    'ai_images_count': len(ai_images)
+                    'ai_images_count': len(ai_images),
+                    'experience_count': len(experience_batch)
                 }
                 training_metrics['training_progress'].append(progress)
                 
@@ -170,7 +187,11 @@ class AppReinforcementLearning:
             print(f"   Final Exploration Rate: {avg_results['epsilon']:.4f}")
             print(f"   Total AI Images Generated: {avg_results['total_ai_images']}")
             print(f"   Training Duration: {avg_results['training_duration']:.2f}s")
-            
+
+            buffer_stats = self.experience_manager.stats()
+            training_metrics['replay_buffer_stats'] = buffer_stats
+            print(f"[RL] Replay buffer size: {buffer_stats['buffer_size']} / {buffer_stats['capacity']}")
+
             # Save training metrics to file
             self.save_training_metrics(training_metrics)
             
@@ -190,6 +211,36 @@ class AppReinforcementLearning:
         else:
             print("ERROR: No successful training epochs completed")
             return None
+
+    def _store_epoch_experiences(
+        self,
+        experiences: List[Dict[str, Any]],
+        experiment_dir: str,
+        epoch_index: int,
+        reward: float,
+        detection_loss: float,
+        relationship_loss: float
+    ) -> Optional[str]:
+        """Persist epoch experiences and merge them into the main buffer."""
+        if not experiences:
+            return None
+
+        experiment_id = os.path.basename(experiment_dir) if experiment_dir else None
+        metadata = {
+            'experiment_dir': experiment_dir,
+            'experiment_id': experiment_id,
+            'epoch': epoch_index,
+            'reward': reward,
+            'detection_loss': detection_loss,
+            'relationship_loss': relationship_loss,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+
+        filepath = self.experience_manager.record_epoch_batch(experiences, metadata)
+        if filepath:
+            stats = self.experience_manager.stats()
+            print(f"[RL] Saved {len(experiences)} experiences -> {filepath} (buffer size: {stats['buffer_size']})")
+        return filepath
     
     def generate_synthetic_dataset(self, num_variations=5):
         """Generate synthetic dataset from current relationships"""

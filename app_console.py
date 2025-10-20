@@ -291,7 +291,9 @@ class ObjectDetectionConsoleApp:
         
         try:
             results = self.rl_enhancement.run_reinforcement_learning(epochs=epochs)
-            print(f"✅ RL Training hoàn tất! Reward: {results['reward']:.3f}")
+            print(f"�o. RL Training hoA�n t���t! Reward: {results['reward']:.3f}")
+            buffer_stats = self.rl_enhancement.experience_manager.stats()
+            print(f"[RL] Replay buffer size: {buffer_stats['buffer_size']} / {buffer_stats['capacity']}")
         except Exception as e:
             print(f"❌ RL Training lỗi: {e}")
     

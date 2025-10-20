@@ -7,6 +7,7 @@ from collections import deque
 import random
 import os
 import datetime
+from typing import Any, Dict, List
 from RL.model_manager import ModelManager
 
 class RelationshipReinforcementLearning:
@@ -89,11 +90,21 @@ class RelationshipReinforcementLearning:
         
         print("SUCCESS: Training episode completed!")
         
+        experience_batch = self._build_experience_batch(
+            original_relationships=original_relationships,
+            synthetic_data=synthetic_data,
+            epoch_index=len(self.training_history['epochs']) + 1,
+            reward=reward,
+            detection_loss=detection_loss,
+            relationship_loss=relationship_loss,
+        )
+        
         return {
             'detection_loss': detection_loss,
             'relationship_loss': relationship_loss,
             'reward': reward,
-            'epsilon': self.epsilon
+            'epsilon': self.epsilon,
+            'experience_batch': experience_batch
         }
     
     def calculate_reward(self, synthetic_data, original_relationships):
@@ -306,3 +317,94 @@ class RelationshipReinforcementLearning:
         else:
             print("No previous model found, starting fresh training")
             return False
+
+    # ------------------------------------------------------------------ #
+    # Experience helpers
+    # ------------------------------------------------------------------ #
+    def _build_experience_batch(
+        self,
+        original_relationships: List[Dict[str, Any]],
+        synthetic_data: List[Dict[str, Any]],
+        epoch_index: int,
+        reward: float,
+        detection_loss: float,
+        relationship_loss: float,
+    ) -> List[Dict[str, Any]]:
+        """Create a batch of serialized experiences for replay buffer storage."""
+        if not synthetic_data:
+            summary_state = {
+                'epoch': epoch_index,
+                'epsilon': self.epsilon,
+                'relationships_observed': len(original_relationships),
+            }
+            return [{
+                'state': summary_state,
+                'action': 'train_models',
+                'reward': reward,
+                'next_state': {**summary_state},
+                'done': True,
+                'metadata': {
+                    'detection_loss': detection_loss,
+                    'relationship_loss': relationship_loss,
+                    'timestamp': datetime.datetime.now().isoformat(),
+                }
+            }]
+
+        per_step_reward = reward / max(len(synthetic_data), 1)
+        batch: List[Dict[str, Any]] = []
+
+        for idx, data in enumerate(synthetic_data):
+            relationship_info = self._extract_relationship_info(data)
+            state = {
+                'epoch': epoch_index,
+                'step': idx,
+                'epsilon': self.epsilon,
+                'relationship': relationship_info,
+            }
+            next_state = {
+                'epoch': epoch_index,
+                'step': idx + 1,
+                'epsilon': max(self.epsilon * self.epsilon_decay, self.epsilon_min),
+                'relationship': relationship_info,
+            }
+
+            batch.append({
+                'state': state,
+                'action': 'train_relationship_models',
+                'reward': per_step_reward,
+                'next_state': next_state,
+                'done': False,
+                'metadata': {
+                    'prompt': data.get('prompt'),
+                    'is_mock': data.get('is_mock', False),
+                    'detection_loss': detection_loss,
+                    'relationship_loss': relationship_loss,
+                    'generated_at': data.get('generation_timestamp'),
+                }
+            })
+
+        if batch:
+            batch[-1]['done'] = True
+            batch[-1]['metadata']['epoch_reward'] = reward
+
+        return batch
+
+    @staticmethod
+    def _extract_relationship_info(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract a serializable snapshot of the relationship sample."""
+        relationship = data.get('original_relationship') or {}
+        cleaned_relationship = {
+            key: value
+            for key, value in relationship.items()
+            if key not in {'image', 'image_data'}
+        }
+
+        return {
+            'subject': cleaned_relationship.get('subject'),
+            'relation': cleaned_relationship.get('relation'),
+            'object': cleaned_relationship.get('object'),
+            'similarity': cleaned_relationship.get('visual_similarity'),
+            'epoch': data.get('epoch'),
+            'variation_index': data.get('variation_index'),
+            'relationship_index': data.get('relationship_index'),
+        }
