@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 
 from RL.rl_enhancement import AppReinforcementLearning
 from RL.training_evaluator import TrainingEvaluator
+from RL.experiment_viewer import ExperimentViewer
 
 class ObjectDetectionConsoleApp:
     def __init__(self):
@@ -25,6 +26,7 @@ class ObjectDetectionConsoleApp:
         # Initialize RL components
         self.rl_enhancement = AppReinforcementLearning(self)
         self.training_evaluator = TrainingEvaluator()
+        self.experiment_viewer = ExperimentViewer()
 
     def set_image_path(self, image_path):
         """Set the image path for processing"""
@@ -283,12 +285,12 @@ class ObjectDetectionConsoleApp:
         except Exception as e:
             print(f"❌ Lỗi: {e}")
 
-    def run_rl_training(self):
+    def run_rl_training(self, epochs=5):
         """Run reinforcement learning training"""
-        print("🧠 Đang chạy RL Training...")
+        print(f"🧠 Đang chạy RL Training với {epochs} epochs...")
         
         try:
-            results = self.rl_enhancement.run_reinforcement_learning()
+            results = self.rl_enhancement.run_reinforcement_learning(epochs=epochs)
             print(f"✅ RL Training hoàn tất! Reward: {results['reward']:.3f}")
         except Exception as e:
             print(f"❌ RL Training lỗi: {e}")
@@ -353,6 +355,81 @@ class ObjectDetectionConsoleApp:
                 
         except Exception as e:
             print(f"❌ Lỗi đánh giá: {e}")
+    
+    def list_experiments(self):
+        """Liệt kê tất cả experiments"""
+        print("\n🔬 QUẢN LÝ EXPERIMENTS")
+        print("=" * 50)
+        self.experiment_viewer.list_all_experiments()
+    
+    def view_experiment(self, experiment_id: str = None):
+        """Xem chi tiết experiment"""
+        if experiment_id is None:
+            experiment_id = input("Nhập experiment ID: ").strip()
+        
+        if not experiment_id:
+            print("❌ Cần nhập experiment ID")
+            return
+        
+        print(f"\n🔬 XEM CHI TIẾT EXPERIMENT: {experiment_id}")
+        print("=" * 50)
+        self.experiment_viewer.view_experiment_details(experiment_id)
+    
+    def show_experiment_plots(self, experiment_id: str = None):
+        """Xem biểu đồ experiment"""
+        if experiment_id is None:
+            experiment_id = input("Nhập experiment ID: ").strip()
+        
+        if not experiment_id:
+            print("❌ Cần nhập experiment ID")
+            return
+        
+        print(f"\n📈 BIỂU ĐỒ EXPERIMENT: {experiment_id}")
+        print("=" * 50)
+        self.experiment_viewer.show_experiment_plots(experiment_id)
+    
+    def show_experiment_images(self, experiment_id: str = None):
+        """Xem ảnh AI của experiment"""
+        if experiment_id is None:
+            experiment_id = input("Nhập experiment ID: ").strip()
+        
+        if not experiment_id:
+            print("❌ Cần nhập experiment ID")
+            return
+        
+        print(f"\n🖼️ ẢNH AI EXPERIMENT: {experiment_id}")
+        print("=" * 50)
+        self.experiment_viewer.show_ai_images(experiment_id)
+    
+    def compare_experiments(self):
+        """So sánh experiments"""
+        print("\n📊 SO SÁNH EXPERIMENTS")
+        print("=" * 50)
+        
+        exp_ids = input("Nhập experiment IDs (cách nhau bởi dấu phẩy): ").strip()
+        if not exp_ids:
+            print("❌ Cần nhập experiment IDs")
+            return
+        
+        exp_id_list = [id.strip() for id in exp_ids.split(',')]
+        self.experiment_viewer.compare_experiments(exp_id_list)
+    
+    def export_experiment(self, experiment_id: str = None):
+        """Export experiment"""
+        if experiment_id is None:
+            experiment_id = input("Nhập experiment ID: ").strip()
+        
+        if not experiment_id:
+            print("❌ Cần nhập experiment ID")
+            return
+        
+        export_dir = input("Nhập thư mục export (Enter để dùng mặc định): ").strip()
+        if not export_dir:
+            export_dir = None
+        
+        print(f"\n📤 EXPORT EXPERIMENT: {experiment_id}")
+        print("=" * 50)
+        self.experiment_viewer.export_experiment(experiment_id, export_dir)
 
 def main():
     """Main function to run the console application"""
@@ -369,9 +446,10 @@ def main():
         print("4. Chạy RL Training")
         print("5. Tạo dữ liệu synthetic")
         print("6. Đánh giá kết quả training")
-        print("7. Thoát")
+        print("7. Quản lý Experiments")
+        print("8. Thoát")
         
-        choice = input("\nNhập lựa chọn (1-7): ").strip()
+        choice = input("\nNhập lựa chọn (1-8): ").strip()
         
         if choice == "1":
             image_path = input("Nhập đường dẫn ảnh: ").strip()
@@ -387,7 +465,17 @@ def main():
             app.refresh_data()
             
         elif choice == "4":
-            app.run_rl_training()
+            print("\n🧠 RL TRAINING")
+            print("=" * 30)
+            try:
+                epochs = int(input("Nhập số epochs (mặc định 5): ") or "5")
+                if epochs <= 0:
+                    print("❌ Số epochs phải lớn hơn 0!")
+                    continue
+                app.run_rl_training(epochs)
+            except ValueError:
+                print("❌ Vui lòng nhập số hợp lệ!")
+                continue
             
         elif choice == "5":
             app.generate_synthetic_data()
@@ -396,6 +484,38 @@ def main():
             app.evaluate_training_results()
             
         elif choice == "7":
+            # Quản lý Experiments
+            while True:
+                print("\n🔬 QUẢN LÝ EXPERIMENTS")
+                print("=" * 40)
+                print("1. Liệt kê tất cả experiments")
+                print("2. Xem chi tiết experiment")
+                print("3. Xem biểu đồ experiment")
+                print("4. Xem ảnh AI experiment")
+                print("5. So sánh experiments")
+                print("6. Export experiment")
+                print("7. Quay lại menu chính")
+                
+                exp_choice = input("\nChọn chức năng (1-7): ").strip()
+                
+                if exp_choice == "1":
+                    app.list_experiments()
+                elif exp_choice == "2":
+                    app.view_experiment()
+                elif exp_choice == "3":
+                    app.show_experiment_plots()
+                elif exp_choice == "4":
+                    app.show_experiment_images()
+                elif exp_choice == "5":
+                    app.compare_experiments()
+                elif exp_choice == "6":
+                    app.export_experiment()
+                elif exp_choice == "7":
+                    break
+                else:
+                    print("❌ Lựa chọn không hợp lệ!")
+            
+        elif choice == "8":
             print("👋 Tạm biệt!")
             break
             

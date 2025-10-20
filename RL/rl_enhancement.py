@@ -7,6 +7,7 @@ from typing import Dict, List, Any
 from RL.ai_images_generator import RelationshipImageGenerator
 from RL.data_augmentation import RelationshipDataAugmentation
 from RL.reinforcement_learning import RelationshipReinforcementLearning
+from RL.experiment_manager import ExperimentManager
 
 class AppReinforcementLearning:
     def __init__(self, app_instance):
@@ -14,6 +15,7 @@ class AppReinforcementLearning:
         self.generator = RelationshipImageGenerator()
         self.augmentation = RelationshipDataAugmentation()
         self.rl_system = None
+        self.experiment_manager = ExperimentManager()
         
     def setup_reinforcement_learning(self):
         """Setup RL system after initial detection"""
@@ -49,6 +51,10 @@ class AppReinforcementLearning:
         print(f"Starting RL Training with {epochs} epochs")
         print(f"Training on {len(relationships)} relationships")
         
+        # Bắt đầu experiment mới
+        experiment_dir = self.experiment_manager.start_new_experiment()
+        print(f"📁 Experiment directory: {experiment_dir}")
+        
         # Initialize training metrics
         training_start_time = time.time()
         training_metrics = {
@@ -75,6 +81,9 @@ class AppReinforcementLearning:
                 ai_images = self.generate_ai_images_for_epoch(relationships, epoch)
                 training_metrics['ai_generated_images'].extend(ai_images)
                 
+                # Lưu ảnh AI vào experiment
+                self.experiment_manager.save_ai_images(ai_images, epoch + 1)
+                
                 # Run training episode with pre-generated synthetic data
                 print(f"🧠 Starting actual RL training for epoch {epoch + 1}...")
                 results = self.rl_system.train_episode(relationships, ai_images)
@@ -84,6 +93,19 @@ class AppReinforcementLearning:
                 
                 all_results.append(results)
                 training_metrics['epoch_results'].append(results)
+                
+                # Lưu metrics cho epoch này
+                epoch_metrics = {
+                    'epoch': epoch + 1,
+                    'timestamp': datetime.datetime.now().isoformat(),
+                    'detection_loss': results['detection_loss'],
+                    'relationship_loss': results['relationship_loss'],
+                    'reward': results['reward'],
+                    'epsilon': results['epsilon'],
+                    'ai_images_count': len(ai_images),
+                    'epoch_duration': results['epoch_duration']
+                }
+                self.experiment_manager.save_training_metrics(epoch_metrics, epoch + 1)
                 
                 # Update progress
                 progress = {
@@ -138,6 +160,18 @@ class AppReinforcementLearning:
             
             # Save training metrics to file
             self.save_training_metrics(training_metrics)
+            
+            # Tạo biểu đồ và grid ảnh
+            print("📈 Creating training plots...")
+            self.experiment_manager.create_training_plots(training_metrics)
+            
+            # Tạo grid ảnh AI
+            if training_metrics['ai_generated_images']:
+                print("🖼️ Creating AI images grid...")
+                self.experiment_manager.create_ai_images_grid(training_metrics['ai_generated_images'])
+            
+            # Hoàn thành experiment
+            self.experiment_manager.finalize_experiment(avg_results)
             
             return avg_results
         else:
