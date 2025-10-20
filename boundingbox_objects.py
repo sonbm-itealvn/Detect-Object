@@ -140,13 +140,24 @@ def run_reltr_inference(objects, img_path, args, output_json="relationships.json
                 relation_entry["visual_similarity"] = similarity
             relationships.append(relation_entry)
             pair_cursor += 1
-    # Ghi kt qu ra file JSON
+    
+    # Lọc mối quan hệ theo ngưỡng trước khi lưu file
+    threshold = 0.5  # Ngưỡng lọc mối quan hệ
+    filtered_relationships = []
+    for rel in relationships:
+        similarity = rel.get("visual_similarity", 0)
+        if similarity >= threshold:
+            filtered_relationships.append(rel)
+    
+    print(f"📊 Lọc mối quan hệ: {len(filtered_relationships)}/{len(relationships)} đạt ngưỡng {threshold}")
+    
+    # Ghi kết quả đã lọc ra file JSON
     with open(output_json, "w", encoding="utf-8") as f:
-        json.dump(relationships, f, indent=4, ensure_ascii=False)
+        json.dump(filtered_relationships, f, indent=4, ensure_ascii=False)
 
     print(f"Kt qu  c lu vo {output_json}")
 
-    return relationships
+    return filtered_relationships
 
 def draw_relationships(image_path, objects_list, relationships, output_path=None):
     image = cv2.imread(image_path)

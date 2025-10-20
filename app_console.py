@@ -87,7 +87,7 @@ class ObjectDetectionConsoleApp:
             print(f"❌ Lỗi: {str(e)}")
 
     def load_and_display_relationships(self):
-        """Tải và hiển thị danh sách mối quan hệ từ JSON"""
+        """Tải và hiển thị danh sách mối quan hệ từ JSON (đã được lọc sẵn)"""
         try:
             with open(self.relationship_json_path, "r", encoding="utf-8") as f:
                 relationships = json.load(f)
@@ -96,17 +96,19 @@ class ObjectDetectionConsoleApp:
                 print("❌ Không có mối quan hệ nào được phát hiện")
                 return
 
-            print("\n🔗 MỐI QUAN HỆ:")
+            print(f"\n🔗 MỐI QUAN HỆ (Đã lọc ngưỡng 0.5):")
             print("=" * 50)
+            print(f"📊 Hiển thị {len(relationships)} mối quan hệ")
+            print()
             
-            # Hiển thị thông tin mối quan hệ
+            # Hiển thị thông tin mối quan hệ (đã được lọc sẵn)
             for i, rel in enumerate(relationships, 1):
                 subject = rel.get("subject", "Unknown")
                 relation = rel.get("relation", "Unknown")
                 obj = rel.get("object", "Unknown")
                 similarity = rel.get("visual_similarity", 0)
                 
-                # Màu sắc dựa trên độ tin cậy (nếu có visual_similarity)
+                # Màu sắc dựa trên độ tin cậy
                 if similarity > 0:
                     confidence_color = "🟢" if similarity > 0.7 else "🟡" if similarity > 0.4 else "🔴"
                     print(f"{confidence_color} {i}. {subject.upper()}")
