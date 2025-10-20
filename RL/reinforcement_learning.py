@@ -16,38 +16,40 @@ class RelationshipReinforcementLearning:
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
         
-    def train_episode(self, original_relationships):
+    def train_episode(self, original_relationships, synthetic_data=None):
         print(f"Starting training episode with {len(original_relationships)} relationships")
         
-        # 1. Generate synthetic data from relationships
-        print("Step 1: Generating synthetic data...")
-        synthetic_data = []
-        for i, rel in enumerate(original_relationships):
-            print(f"  Processing relationship {i+1}/{len(original_relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
-            try:
-                generated_images = self.generator.generate_from_relationship(rel, num_variations=3)
-                synthetic_data.extend(generated_images)
-                print(f"    SUCCESS: Generated {len(generated_images)} images")
-            except Exception as e:
-                print(f"    ERROR: Error generating images for relationship {i+1}: {e}")
-                continue
-        
-        print(f"Total synthetic data generated: {len(synthetic_data)} images")
+        # 1. Use provided synthetic data or generate new if none provided
+        if synthetic_data is None:
+            print("Step 1: Generating synthetic data...")
+            synthetic_data = []
+            for i, rel in enumerate(original_relationships):
+                print(f"  Processing relationship {i+1}/{len(original_relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
+                try:
+                    generated_images = self.generator.generate_from_relationship(rel, num_variations=3)
+                    synthetic_data.extend(generated_images)
+                    print(f"    SUCCESS: Generated {len(generated_images)} images")
+                except Exception as e:
+                    print(f"    ERROR: Error generating images for relationship {i+1}: {e}")
+                    continue
+            print(f"Total synthetic data generated: {len(synthetic_data)} images")
+        else:
+            print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images")
         
         # 2. Train detection model
-        print("Step 2: Training detection model...")
+        print("Step 2: 🧠 Training detection model...")
         detection_loss = self.train_detection_model(synthetic_data)
-        print(f"    Detection loss: {detection_loss:.4f}")
+        print(f"    ✅ Detection loss: {detection_loss:.4f}")
         
         # 3. Train relationship model
-        print("Step 3: Training relationship model...")
+        print("Step 3: 🧠 Training relationship model...")
         relationship_loss = self.train_relationship_model(synthetic_data)
-        print(f"    Relationship loss: {relationship_loss:.4f}")
+        print(f"    ✅ Relationship loss: {relationship_loss:.4f}")
         
         # 4. Calculate reward
-        print("Step 4: Calculating reward...")
+        print("Step 4: 📊 Calculating reward...")
         reward = self.calculate_reward(synthetic_data, original_relationships)
-        print(f"    Reward: {reward:.4f}")
+        print(f"    ✅ Reward: {reward:.4f}")
         
         # 5. Update exploration rate
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)

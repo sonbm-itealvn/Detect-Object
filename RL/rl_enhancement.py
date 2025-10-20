@@ -75,8 +75,9 @@ class AppReinforcementLearning:
                 ai_images = self.generate_ai_images_for_epoch(relationships, epoch)
                 training_metrics['ai_generated_images'].extend(ai_images)
                 
-                # Run training episode
-                results = self.rl_system.train_episode(relationships)
+                # Run training episode with pre-generated synthetic data
+                print(f"🧠 Starting actual RL training for epoch {epoch + 1}...")
+                results = self.rl_system.train_episode(relationships, ai_images)
                 results['epoch'] = epoch + 1
                 results['ai_images_generated'] = len(ai_images)
                 results['epoch_duration'] = time.time() - epoch_start_time
