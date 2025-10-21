@@ -1,6 +1,7 @@
 # File: rl_enhancement.py
 import json
 import os
+import glob
 import time
 import datetime
 from typing import Dict, List, Any, Optional
@@ -18,6 +19,29 @@ class AppReinforcementLearning:
         self.rl_system = None
         self.experiment_manager = ExperimentManager()
         self.experience_manager = ExperienceManager()
+        self._cached_yolo_weights: Optional[str] = None
+    
+    def _detect_yolo_weights_path(self) -> Optional[str]:
+        """Return a YOLO weight path for detection fine-tuning."""
+        if self._cached_yolo_weights and os.path.exists(self._cached_yolo_weights):
+            return self._cached_yolo_weights
+
+        candidates = [
+            getattr(self.app, "yolo_weights_path", None),
+            os.path.join(os.getcwd(), "yolov5xu.pt"),
+            os.path.join(os.getcwd(), "yolov5s.pt"),
+        ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                self._cached_yolo_weights = os.path.abspath(path)
+                return self._cached_yolo_weights
+
+        for pattern in ("yolov5*.pt", "*.pt"):
+            matches = glob.glob(os.path.join(os.getcwd(), pattern))
+            if matches:
+                self._cached_yolo_weights = os.path.abspath(matches[0])
+                return self._cached_yolo_weights
+        return None
         
     def setup_reinforcement_learning(self):
         """Setup RL system after initial detection"""
@@ -33,11 +57,20 @@ class AppReinforcementLearning:
         # Note: These models are loaded dynamically during pipeline execution
         # detection_model = YOLO model (loaded in detect_objects.py)
         # relationship_model = RelTR model (loaded in boundingbox_objects.py)
+        data_paths = {
+            'image': os.path.abspath(self.app.image_path) if getattr(self.app, "image_path", None) else None,
+            'converted_bboxes': os.path.abspath(self.app.result_json_path),
+            'relationships': os.path.abspath(self.app.relationship_json_path),
+            'yolo_weights': self._detect_yolo_weights_path(),
+            'reltr_checkpoint': os.path.abspath(self.app.checkpoint_path) if getattr(self.app, "checkpoint_path", None) else None,
+        }
+
         self.rl_system = RelationshipReinforcementLearning(
-            detection_model=None,  # Will be loaded from YOLO pipeline
-            relationship_model=None,  # Will be loaded from RelTR pipeline
+            detection_model=None,
+            relationship_model=None,
             generator=self.generator,
-            experiment_dir=self.experiment_manager.current_exp_dir
+            experiment_dir=self.experiment_manager.current_exp_dir,
+            data_paths=data_paths,
         )
         
         print(f"SUCCESS: RL system initialized with {len(relationships)} relationships")
