@@ -1,4 +1,5 @@
 import json
+import time
 import subprocess
 import threading
 import re
@@ -68,6 +69,12 @@ class ObjectDetectionApp:
                                           width=15, height=2, relief="flat", bd=0)
         self.btn_evaluate_training.pack(side="left", padx=10)
 
+        # Đồng hồ đo thời gian chạy
+        self.timer_label = Label(control_frame, text="⏱ 00:00.0", 
+                               font=("Arial", 12, "bold"), bg="#f5f5f5", fg="#2c3e50",
+                               width=12, height=2)
+        self.timer_label.pack(side="left", padx=10)
+
         # Frame chính chứa 3 cột
         main_frame = Frame(root, bg="#f5f5f5")
         main_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
@@ -76,7 +83,7 @@ class ObjectDetectionApp:
         self.image_frame = Frame(main_frame, bg="white", relief="solid", bd=2)
         self.image_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
         
-        image_title = Label(self.image_frame, text="🖼️ Hình ảnh", font=("Arial", 14, "bold"), 
+        image_title = Label(self.image_frame, text="🖼️ Images", font=("Arial", 14, "bold"), 
                            bg="white", fg="#2c3e50")
         image_title.pack(pady=10)
         
@@ -88,7 +95,7 @@ class ObjectDetectionApp:
         self.objects_frame.pack(side="left", fill="y", padx=(0, 10))
         self.objects_frame.pack_propagate(False)
         
-        objects_title = Label(self.objects_frame, text="📦 Vật thể được phát hiện", 
+        objects_title = Label(self.objects_frame, text="📦Objects", 
                             font=("Arial", 14, "bold"), bg="white", fg="#2c3e50")
         objects_title.pack(pady=10)
         
@@ -109,7 +116,7 @@ class ObjectDetectionApp:
         self.relationships_frame.pack(side="left", fill="y")
         self.relationships_frame.pack_propagate(False)
         
-        relationships_title = Label(self.relationships_frame, text="🔗 Mối quan hệ", 
+        relationships_title = Label(self.relationships_frame, text="🔗 Relationships", 
                                   font=("Arial", 14, "bold"), bg="white", fg="#2c3e50")
         relationships_title.pack(pady=10)
         
@@ -132,19 +139,50 @@ class ObjectDetectionApp:
         self.relationship_json_path = "relationships.json"
         self.checkpoint_path = "checkpoint.pth"  # Sử dụng file checkpoint mặc định
 
+        # Nếu checkpoint mặc định không tồn tại, tự động tìm file .pth khả dụng
+        try:
+            if not os.path.exists(self.checkpoint_path):
+                candidates = glob.glob("**/*.pth", recursive=True)
+                # Ưu tiên các file trong thư mục test_restore hoặc models
+                candidates_sorted = sorted(
+                    candidates,
+                    key=lambda p: (not ("test_restore" in p or "models" in p), len(p))
+                )
+                if candidates_sorted:
+                    self.checkpoint_path = candidates_sorted[0]
+                    print(f"ℹ️ Auto-selected checkpoint: {self.checkpoint_path}")
+        except Exception as _e:
+            pass
+
         # Load model
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
 
+        # Trạng thái và thời gian đo
+        self.is_timing = False
+        self.start_time = None
+
+    def format_elapsed(self, seconds):
+        minutes = int(seconds // 60)
+        remaining = seconds - minutes * 60
+        return f"{minutes:02d}:{remaining:04.1f}"
+
+    def update_timer(self):
+        if self.is_timing and self.start_time is not None:
+            elapsed = time.time() - self.start_time
+            self.timer_label.config(text=f"⏱ {self.format_elapsed(elapsed)}")
+            # Cập nhật mỗi 100ms
+            self.root.after(100, self.update_timer)
+
     def select_image(self):
-        file_path = filedialog.askopenfilename(title="Chọn ảnh", filetypes=[("Image files", "*.jpg *.jpeg *.png")])
+        file_path = filedialog.askopenfilename(title="Select Image ", filetypes=[("Image files", "*.jpg *.jpeg *.png")])
         if file_path:
             self.image_path = file_path
             self.display_image(file_path)
             # Tự động tải lại dữ liệu JSON khi chọn ảnh mới
-            self.title_label.config(text="🔄 Đang tải dữ liệu JSON...")
+            self.title_label.config(text="🔄 Loading json data...")
             self.load_and_display_objects()
             self.load_and_display_relationships()
-            self.title_label.config(text="✅ Đã tải dữ liệu JSON cho ảnh mới!")
+            self.title_label.config(text="✅ Loaded json data for new photo!")
 
     def display_image(self, path):
         try:
@@ -172,7 +210,7 @@ class ObjectDetectionApp:
         except Exception as e:
             print(f"❌ Lỗi hiển thị ảnh: {e}")
             self.canvas.delete("all")
-            self.canvas.create_text(250, 200, text=f"❌ Lỗi tải ảnh:\n{str(e)}", 
+            self.canvas.create_text(250, 200, text=f"❌ Error uploading photos:\n{str(e)}", 
                                   font=("Arial", 12), fill="red", justify="center")
 
 
@@ -197,7 +235,7 @@ class ObjectDetectionApp:
 
             if not objects:
                 self.objects_text.delete(1.0, tk.END)
-                self.objects_text.insert(tk.END, "❌ Không có vật thể nào được phát hiện")
+                self.objects_text.insert(tk.END, "❌ No objects were deteted")
                 return
 
             # Xóa nội dung cũ
@@ -211,24 +249,24 @@ class ObjectDetectionApp:
                 if len(bbox) >= 4:
                     x, y, w, h = bbox[:4]
                     info = f"🔸 {i}. {class_name.upper()}\n"
-                    info += f"   📍 Vị trí: ({x}, {y})\n"
-                    info += f"   📏 Kích thước: {w-x} x {h-y}\n"
-                    info += f"   🎯 Độ tin cậy: {obj.get('confidence', 'N/A')}\n\n"
+                    info += f"   📍 Location: ({x}, {y})\n"
+                    info += f"   📏 Size: {w-x} x {h-y}\n"
+                    info += f"   🎯 Reliability: {obj.get('confidence', 'N/A')}\n\n"
                 else:
                     info = f"🔸 {i}. {class_name.upper()}\n"
-                    info += f"   📍 Thông tin bbox không hợp lệ\n\n"
+                    info += f"   📍 Invalid bbox information\n\n"
                 
                 self.objects_text.insert(tk.END, info)
                 
         except FileNotFoundError:
             self.objects_text.delete(1.0, tk.END)
-            self.objects_text.insert(tk.END, f"❌ Không tìm thấy file: {self.result_json_path}")
+            self.objects_text.insert(tk.END, f"❌File not found: {self.result_json_path}")
         except json.JSONDecodeError:
             self.objects_text.delete(1.0, tk.END)
-            self.objects_text.insert(tk.END, "❌ Lỗi đọc file JSON")
+            self.objects_text.insert(tk.END, "❌ Error reading json file")
         except Exception as e:
             self.objects_text.delete(1.0, tk.END)
-            self.objects_text.insert(tk.END, f"❌ Lỗi: {str(e)}")
+            self.objects_text.insert(tk.END, f"❌ Error: {str(e)}")
 
     def load_and_display_relationships(self):
         """Tải và hiển thị danh sách mối quan hệ từ JSON"""
@@ -238,7 +276,7 @@ class ObjectDetectionApp:
             
             if not relationships:
                 self.relationships_text.delete(1.0, tk.END)
-                self.relationships_text.insert(tk.END, "❌ Không có mối quan hệ nào được phát hiện")
+                self.relationships_text.insert(tk.END, "❌ No relationship was detected")
                 return
 
             # Xóa nội dung cũ
@@ -257,7 +295,7 @@ class ObjectDetectionApp:
                     info = f"{confidence_color} {i}. {subject.upper()}\n"
                     info += f"   🔗 {relation.upper()}\n"
                     info += f"   🎯 {obj.upper()}\n"
-                    info += f"   📊 Độ tin cậy: {similarity:.2f}\n\n"
+                    info += f"   📊 Reliability: {similarity:.2f}\n\n"
                 else:
                     # Nếu không có visual_similarity, hiển thị đơn giản
                     info = f"🔸 {i}. {subject.upper()}\n"
@@ -268,13 +306,13 @@ class ObjectDetectionApp:
                 
         except FileNotFoundError:
             self.relationships_text.delete(1.0, tk.END)
-            self.relationships_text.insert(tk.END, f"❌ Không tìm thấy file: {self.relationship_json_path}")
+            self.relationships_text.insert(tk.END, f"❌ File not found: {self.relationship_json_path}")
         except json.JSONDecodeError:
             self.relationships_text.delete(1.0, tk.END)
-            self.relationships_text.insert(tk.END, "❌ Lỗi đọc file JSON")
+            self.relationships_text.insert(tk.END, "❌ Error reading json file")
         except Exception as e:
             self.relationships_text.delete(1.0, tk.END)
-            self.relationships_text.insert(tk.END, f"❌ Lỗi: {str(e)}")
+            self.relationships_text.insert(tk.END, f"❌ Error: {str(e)}")
 
     def refresh_data(self):
         """Tải lại dữ liệu JSON mà không cần chạy lại pipeline"""
@@ -379,11 +417,11 @@ class ObjectDetectionApp:
             
             # Hiển thị ảnh mới
             self.display_image(result_path)
-            print(f"✅ Đã vẽ bbox mối quan hệ và lưu tại: {result_path}")
+            print(f"✅ Drawn bbox, relationship saved at: {result_path}")
             
         except Exception as e:
             print(f"❌ Lỗi khi vẽ bbox mối quan hệ: {e}")
-            self.title_label.config(text=f"❌ Lỗi vẽ bbox: {e}")
+            self.title_label.config(text=f"❌ Error drawing bbox: {e}")
 
     def draw_relationship_boxes(self, subject_name, object_name):
         try:
@@ -397,8 +435,8 @@ class ObjectDetectionApp:
 
             objects = data.get("objects", [])
 
-            print("🔍 Danh sách objects:", [obj.get("class", "") for obj in objects])
-            print("🔍 Subject cần tìm:", subject_name, "| Object cần tìm:", object_name)
+            print("🔍 List objects:", [obj.get("class", "") for obj in objects])
+            print("🔍 Subject to find:", subject_name, "| Object to find:", object_name)
 
             # Tìm subject
             subject_box = next(
@@ -413,13 +451,13 @@ class ObjectDetectionApp:
                 )
 
             if not subject_box:
-                self.label.config(text=f"❌ Không tìm thấy subject: {subject_name} trong JSON!")
-                print("❌ Lỗi tìm subject:", subject_name)
+                self.label.config(text=f"❌ No Subject found: {subject_name} in JSON!")
+                print("❌ Error finding Subject:", subject_name)
                 return
 
             if object_name and not object_box:
-                self.label.config(text=f"❌ Không tìm thấy object: {object_name} trong JSON!")
-                print("❌ Lỗi tìm object:", object_name)
+                self.label.config(text=f"❌ No Object found: {object_name} in JSON!")
+                print("❌ Error finding Object:", object_name)
                 return
 
             image = Image.open(self.image_path)
@@ -450,38 +488,42 @@ class ObjectDetectionApp:
             image.save(result_path)
             self.display_image(result_path)
 
-            self.label.config(text="✅ Đã vẽ xong box!")
+            self.label.config(text="✅ Finished drawing bbox!")
 
         except Exception as e:
-            self.label.config(text=f"❌ Lỗi khi vẽ box: {e}")
-            print(f"❌ Lỗi khi vẽ box: {e}")
+            self.label.config(text=f"❌ Error when drawing bbox: {e}")
+            print(f"❌ Error when drawing bbox: {e}")
 
     def run_pipeline_thread(self):
+        # Bắt đầu đo thời gian khi người dùng ấn Detect
+        self.is_timing = True
+        self.start_time = time.time()
+        self.update_timer()
         thread = threading.Thread(target=self.run_pipeline)
         thread.start()
 
     def run_pipeline(self):
         if not self.image_path:
-            self.title_label.config(text="❌ Hãy chọn ảnh trước!")
+            self.title_label.config(text="❌ Please choose the photo first!")
             return
 
-        self.title_label.config(text="⏳ Đang xử lý... Vui lòng chờ.")
+        self.title_label.config(text="⏳ Processing....Please wait.")
 
         try:
             # 1️⃣ Chạy detect_objects.py
-            self.title_label.config(text="🔍 Đang phát hiện vật thể...")
+            self.title_label.config(text="🔍 Being detected by objects...")
             detect_thread = threading.Thread(target=subprocess.run, args=(["python", "detect_objects.py", self.image_path],))
             detect_thread.start()
             detect_thread.join()  # Đợi detect_objects.py chạy xong
 
             # 2️⃣ Chạy convert_yolo_to_reltr.py (sau khi detect_objects.py hoàn tất)
-            self.title_label.config(text="🔄 Đang chuyển đổi dữ liệu YOLO...")
+            self.title_label.config(text="🔄 Converting data...")
             convert_thread = threading.Thread(target=subprocess.run, args=(["python", "convert_yolo_to_reltr.py", "result.json"],))
             convert_thread.start()
             convert_thread.join()  # Đợi convert_yolo_to_reltr.py chạy xong
 
             # 3️⃣ Chạy boundingbox_objects.py (sau khi convert_yolo_to_reltr.py hoàn tất)
-            self.title_label.config(text="🔗 Đang xác định mối quan hệ giữa các vật thể...")
+            self.title_label.config(text="🔗 Determining the relationship betwween objects...")
             boundingbox_thread = threading.Thread(target=subprocess.run, args=(["python", "boundingbox_objects.py", "--yolo_json", self.result_json_path,"--img_path",self.image_path,"--device","cpu", "--resume", self.checkpoint_path],))
             boundingbox_thread.start()
             boundingbox_thread.join()  # Đợi boundingbox_objects.py chạy xong
@@ -495,35 +537,46 @@ class ObjectDetectionApp:
             if output_images:
                 latest_result = max(output_images, key=os.path.getmtime)  # Lấy ảnh mới nhất nếu có nhiều ảnh trùng tên
                 self.display_image(latest_result)
-                self.title_label.config(text="✅ Hoàn tất! Đây là kết quả.")
+                # Kết thúc đo thời gian tại thời điểm có ảnh kết quả đầu tiên
+                if self.is_timing and self.start_time is not None:
+                    elapsed = time.time() - self.start_time
+                    self.is_timing = False
+                    self.timer_label.config(text=f"⏱ {self.format_elapsed(elapsed)}")
+                self.title_label.config(text="✅ Done! This is the result.")
             else:
-                print("📂 Danh sách file trong thư mục:", os.listdir(image_dir))  # Debug kiểm tra
-                self.title_label.config(text="❌ Không tìm thấy ảnh kết quả!")
+                print("📂 List of files in the folder:", os.listdir(image_dir))  # Debug kiểm tra
+                self.title_label.config(text="❌ No result photo found")
 
             # 4️⃣ Tải và hiển thị dữ liệu JSON
-            self.title_label.config(text="📊 Đang tải dữ liệu kết quả...")
+            self.title_label.config(text="📊 Loading result data...")
             self.load_and_display_objects()
             self.load_and_display_relationships()
             
             # 5️⃣ Vẽ bbox mối quan hệ trên ảnh
-            self.title_label.config(text="🎨 Đang vẽ bbox mối quan hệ...")
+            self.title_label.config(text="🎨 Drawing bbox relationship...")
             self.draw_relationship_boxes_on_image()
-            self.title_label.config(text="✅ Hoàn tất! Dữ liệu đã được tải và vẽ bbox.")
+            self.title_label.config(text="✅ Done! Data has been loaded and drawn bbox.")
             
         except Exception as e:
-            self.title_label.config(text=f"❌ Lỗi: {e}")
-            print(f"❌ Lỗi xảy ra: {e}")
+            self.title_label.config(text=f"❌ Error: {e}")
+            print(f"❌ Error occurs: {e}")
+        finally:
+            # Đảm bảo dừng đồng hồ nếu có lỗi
+            if self.is_timing and self.start_time is not None:
+                elapsed = time.time() - self.start_time
+                self.is_timing = False
+                self.timer_label.config(text=f"⏱ {self.format_elapsed(elapsed)}")
 
     def run_rl_training(self):
         """Run reinforcement learning training in separate thread"""
-        self.title_label.config(text="🧠 Đang chạy RL Training...")
+        self.title_label.config(text="🧠 Running RL Training...")
         
         def rl_training_thread():
             try:
                 results = self.rl_enhancement.run_reinforcement_learning()
-                self.title_label.config(text=f"✅ RL Training hoàn tất! Reward: {results['reward']:.3f}")
+                self.title_label.config(text=f"✅ RL Training done! Reward: {results['reward']:.3f}")
             except Exception as e:
-                self.title_label.config(text=f"❌ RL Training lỗi: {e}")
+                self.title_label.config(text=f"❌ RL Training error: {e}")
                 print(f"❌ RL Training error: {e}")
         
         # Chạy RL training trong thread riêng để không block UI
