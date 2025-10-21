@@ -75,18 +75,22 @@ class AppReinforcementLearning:
         
         print(f"SUCCESS: RL system initialized with {len(relationships)} relationships")
     
-    def run_reinforcement_learning(self, epochs=5, continue_from=None):
+    def run_reinforcement_learning(self, epochs=5, continue_from=None, image_directory: Optional[str] = None):
         """Run RL training loop with multiple epochs"""
         if not self.rl_system:
             self.setup_reinforcement_learning()
         
+        if image_directory:
+            sample_count = self.rl_system.build_dataset_from_directory(image_directory, clear_previous=True)
+            if sample_count == 0:
+                print(f"[RL] No usable samples found in directory: {image_directory}")
+            else:
+                print(f"[RL] Prepared {sample_count} samples for RL training from directory.")
+
         # Load relationships
         with open(self.app.relationship_json_path, 'r') as f:
             relationships = json.load(f)
-        
-        print(f"Starting RL Training with {epochs} epochs")
-        print(f"Training on {len(relationships)} relationships")
-        
+
         # Bắt đầu experiment mới hoặc tiếp tục từ experiment trước
         if continue_from:
             print(f"🔄 Continuing training from experiment: {continue_from}")
@@ -94,6 +98,8 @@ class AppReinforcementLearning:
             # Load model state từ experiment trước
             if self.rl_system.continue_training(experiment_dir):
                 print("✅ Successfully loaded previous model state")
+                if self.rl_system.load_dataset_snapshot():
+                    print("[RL] Loaded dataset snapshot from previous experiment.")
             else:
                 print("⚠️ Starting fresh training")
         else:
@@ -102,7 +108,19 @@ class AppReinforcementLearning:
         
         # Set experiment directory cho model manager
         self.rl_system.model_manager.set_experiment_dir(experiment_dir)
-        
+        if self.rl_system.dataset_samples:
+            self.rl_system._save_dataset_snapshot()
+
+        dataset_relationships: List[Dict[str, Any]] = []
+        if getattr(self.rl_system, "dataset_samples", None):
+            for sample in self.rl_system.dataset_samples:
+                dataset_relationships.extend(sample.get('relationships', []))
+        if dataset_relationships:
+            relationships = dataset_relationships
+
+        print(f"Starting RL Training with {epochs} epochs")
+        print(f"Training on {len(relationships)} relationships")
+
         # Initialize training metrics
         training_start_time = time.time()
         training_metrics = {

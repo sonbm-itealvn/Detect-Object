@@ -290,7 +290,9 @@ class ObjectDetectionConsoleApp:
         print(f"🧠 Đang chạy RL Training với {epochs} epochs...")
         
         try:
-            results = self.rl_enhancement.run_reinforcement_learning(epochs=epochs)
+            dataset_dir = input("Nh��-p thA� m���c ch��'a ���nh (Enter �`��� dA?ng ���nh hiA�n tA?i): ").strip()
+            dataset_dir = dataset_dir if dataset_dir else None
+            results = self.rl_enhancement.run_reinforcement_learning(epochs=epochs, image_directory=dataset_dir)
             print(f"�o. RL Training hoA�n t���t! Reward: {results['reward']:.3f}")
             buffer_stats = self.rl_enhancement.experience_manager.stats()
             print(f"[RL] Replay buffer size: {buffer_stats['buffer_size']} / {buffer_stats['capacity']}")

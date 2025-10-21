@@ -16,6 +16,8 @@ from PIL import Image
 import torchvision.transforms as T
 from ultralytics import YOLO
 
+import detect_objects as detection_pipeline
+
 from util.misc import nested_tensor_from_tensor_list
 from RL.model_manager import ModelManager
 from models import build_model
@@ -65,6 +67,7 @@ class RelationshipReinforcementLearning:
         }
 
         self.detection_dataset_dir: Optional[Path] = None
+        self.dataset_samples: List[Dict[str, Any]] = []
 
         # Model management
         self.model_manager = ModelManager()
@@ -151,7 +154,7 @@ class RelationshipReinforcementLearning:
         checkpoint_path = self.data_paths.get('reltr_checkpoint')
         if checkpoint_path and os.path.exists(checkpoint_path):
             print(f"[RL] Loading RelTR checkpoint from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=self.reltr_device)
+            checkpoint = torch.load(checkpoint_path, map_location=self.reltr_device, weights_only=False)
             state_dict = checkpoint.get('model') if isinstance(checkpoint, dict) else None
             if state_dict:
                 model.load_state_dict(state_dict, strict=False)
@@ -192,6 +195,16 @@ class RelationshipReinforcementLearning:
         with Image.open(image_path) as img:
             width, height = img.size
 
+        normalized_objects: List[Dict[str, Any]] = []
+        for obj in objects:
+            new_obj = dict(obj)
+            label_value = new_obj.get('class') or new_obj.get('label')
+            if 'class' not in new_obj and label_value:
+                new_obj['class'] = label_value
+            if 'yolo_class' not in new_obj and label_value:
+                new_obj['yolo_class'] = label_value
+            normalized_objects.append(new_obj)
+
         relationships = []
         if relationships_path and os.path.exists(relationships_path):
             with open(relationships_path, 'r', encoding='utf-8') as f:
@@ -201,7 +214,7 @@ class RelationshipReinforcementLearning:
             'image_path': image_path,
             'width': width,
             'height': height,
-            'objects': objects,
+            'objects': normalized_objects,
             'relationships': relationships,
         }
 
@@ -223,7 +236,7 @@ class RelationshipReinforcementLearning:
         lines: List[str] = []
         for obj in objects:
             bbox = obj.get('bbox')
-            class_name = obj.get('class')
+            class_name = obj.get('yolo_class') or obj.get('class')
             if not bbox or class_name is None:
                 continue
             class_idx = self._match_detection_label(class_name, names_map)
@@ -259,9 +272,13 @@ class RelationshipReinforcementLearning:
         cached = self.detection_dataset_dir
         if cached and cached.exists():
             return cached
+        if not self.dataset_samples:
+            fallback = self._load_original_detection_and_relationships()
+            if fallback:
+                self.dataset_samples = [fallback]
 
-        sample = self._load_original_detection_and_relationships()
-        if sample is None:
+        if not self.dataset_samples:
+            print("[RL] No dataset samples available for detection fine-tuning.")
             return None
 
         experiment_dir = Path(self.model_manager.current_experiment_dir or Path.cwd())
@@ -277,31 +294,88 @@ class RelationshipReinforcementLearning:
         detection_model = self._ensure_detection_model()
         names_map = detection_model.model.names if hasattr(detection_model.model, "names") else detection_model.names
 
-        image_path = Path(sample['image_path'])
-        train_image_path = dataset_dir / "images" / "train" / image_path.name
-        val_image_path = dataset_dir / "images" / "val" / image_path.name
-        shutil.copy(image_path, train_image_path)
-        shutil.copy(image_path, val_image_path)
+        samples = list(self.dataset_samples)
+        if not samples:
+            print("[RL] No samples to export for detection dataset.")
+            return None
 
-        train_label_path = dataset_dir / "labels" / "train" / (image_path.stem + ".txt")
-        val_label_path = dataset_dir / "labels" / "val" / (image_path.stem + ".txt")
+        split_index = max(1, int(len(samples) * 0.8))
+        train_samples = samples[:split_index]
+        val_samples = samples[split_index:] if split_index < len(samples) else samples[-1:]
 
-        labels_written = self._write_yolo_label_file(
-            train_label_path,
-            sample['objects'],
-            (sample['width'], sample['height']),
-            names_map,
-        )
-        if labels_written:
-            shutil.copy(train_label_path, val_label_path)
-        else:
-            print("[RL] No labels written for detection dataset.")
+        def export_split(split_name: str, split_samples: List[Dict[str, Any]]) -> int:
+            written = 0
+            for idx, sample in enumerate(split_samples):
+                image_path = Path(sample['image_path'])
+                unique_name = f"{image_path.stem}_{idx:04d}{image_path.suffix}"
+                target_image = dataset_dir / "images" / split_name / unique_name
+                shutil.copy(image_path, target_image)
+
+                label_target = dataset_dir / "labels" / split_name / f"{target_image.stem}.txt"
+                written += self._write_yolo_label_file(
+                    label_target,
+                    sample['objects'],
+                    (sample['width'], sample['height']),
+                    names_map,
+                )
+            return written
+
+        train_written = export_split("train", train_samples)
+        val_written = export_split("val", val_samples)
+
+        if train_written == 0 and val_written == 0:
+            print("[RL] Warning: no labels written for detection dataset.")
 
         yaml_path = self._create_dataset_yaml(dataset_dir, names_map)
         print(f"[RL] Detection dataset prepared at {dataset_dir} (yaml: {yaml_path})")
 
         self.detection_dataset_dir = dataset_dir
+        self._save_dataset_snapshot()
         return dataset_dir
+
+    def _dataset_snapshot_path(self) -> Optional[Path]:
+        experiment_dir = self.model_manager.current_experiment_dir
+        if not experiment_dir:
+            return None
+        snapshot_dir = Path(experiment_dir) / "dataset"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        return snapshot_dir / "samples.json"
+
+    def _save_dataset_snapshot(self) -> None:
+        path = self._dataset_snapshot_path()
+        if not path:
+            return
+        payload = {
+            "samples": self.dataset_samples,
+            "detection_dataset_dir": str(self.detection_dataset_dir) if self.detection_dataset_dir else None,
+        }
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"[RL] Warning: failed to save dataset snapshot: {exc}")
+
+    def load_dataset_snapshot(self) -> bool:
+        path = self._dataset_snapshot_path()
+        if not path or not path.exists():
+            return False
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+        except Exception as exc:
+            print(f"[RL] Warning: failed to load dataset snapshot: {exc}")
+            return False
+
+        samples = payload.get("samples") or []
+        detection_dir = payload.get("detection_dataset_dir")
+
+        self.dataset_samples = samples
+        if detection_dir and Path(detection_dir).exists():
+            self.detection_dataset_dir = Path(detection_dir)
+        else:
+            self.detection_dataset_dir = None
+
+        return bool(self.dataset_samples)
 
     def _ensure_entity_label_index(self, class_name: str) -> int:
         normalized = self._normalize_label(class_name)
@@ -419,17 +493,116 @@ class RelationshipReinforcementLearning:
             })
         return objects
 
-    def _prepare_reltr_training_sample(self) -> Optional[Tuple[torch.Tensor, Dict[str, torch.Tensor], List[Dict[str, Any]]]]:
-        sample = self._load_original_detection_and_relationships()
-        if sample is None:
+    def _run_reltr_inference(self, image_tensor: torch.Tensor, objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not objects:
+            return []
+
+        model, _ = self._ensure_relationship_model()
+        samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
+        model.eval()
+        with torch.no_grad():
+            outputs = model(samples)
+        return self._decode_relationships(outputs, objects)
+
+    def _extract_objects_with_clip(self, image_path: str) -> Optional[Dict[str, Any]]:
+        try:
+            detected_objects, yolo_labels, original_image, feature_map = detection_pipeline.detect_objects(image_path)
+        except Exception as exc:
+            print(f"[RL] Detection failed for {image_path}: {exc}")
             return None
 
-        target = self._build_reltr_target(sample)
-        if target is None:
+        if not detected_objects:
+            print(f"[RL] No objects detected in {image_path}")
             return None
 
-        image_tensor = self._load_image_tensor(sample['image_path'])
-        return image_tensor, target, sample['objects']
+        classified_results = detection_pipeline.classify_with_clip(detected_objects, yolo_labels)
+        boxes = [bbox for _, bbox in classified_results]
+        roi_features = detection_pipeline.extract_roi_features(feature_map, boxes, original_image.shape)
+
+        height, width = original_image.shape[:2]
+        objects: List[Dict[str, Any]] = []
+        for idx, (label, bbox) in enumerate(classified_results):
+            if not bbox or len(bbox) != 4:
+                continue
+
+            x1, y1, x2, y2 = map(int, bbox)
+            feature_vector = roi_features[idx] if idx < len(roi_features) else []
+            if feature_vector:
+                feature_vector = [float(v) for v in feature_vector]
+
+            objects.append({
+                'class': label.strip(),
+                'yolo_class': yolo_labels[idx] if idx < len(yolo_labels) else label.strip(),
+                'bbox': [x1, y1, x2, y2],
+                'feature': feature_vector,
+            })
+
+        if not objects:
+            print(f"[RL] No valid objects after classification in {image_path}")
+            return None
+
+        sample = {
+            'image_path': image_path,
+            'width': width,
+            'height': height,
+            'objects': objects,
+        }
+        return sample
+
+    def build_dataset_from_directory(self, image_dir: str, clear_previous: bool = True) -> int:
+        directory = Path(image_dir)
+        if not directory.exists() or not directory.is_dir():
+            print(f"[RL] Image directory not found: {image_dir}")
+            return len(self.dataset_samples)
+
+        image_paths = sorted([
+            path for path in directory.iterdir()
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}
+        ])
+
+        if not image_paths:
+            print(f"[RL] No images found in directory: {image_dir}")
+            return len(self.dataset_samples)
+
+        dataset: List[Dict[str, Any]] = [] if clear_previous else list(self.dataset_samples)
+        print(f"[RL] Building dataset from {len(image_paths)} images in {directory}")
+
+        for idx, image_path in enumerate(image_paths, start=1):
+            try:
+                sample = self._extract_objects_with_clip(str(image_path))
+                if not sample:
+                    continue
+
+                image_tensor = self._load_image_tensor(sample['image_path'])
+                relationships = self._run_reltr_inference(image_tensor, sample['objects'])
+                sample['relationships'] = relationships
+                dataset.append(sample)
+                print(f"[RL] Processed image {idx}/{len(image_paths)}: {image_path.name} "
+                      f"({len(sample['objects'])} objects, {len(relationships)} relationships)")
+            except Exception as exc:
+                print(f"[RL] Error processing {image_path}: {exc}")
+
+        if not dataset:
+            print("[RL] Dataset build produced no usable samples.")
+        self.dataset_samples = dataset
+        if self.model_manager.current_experiment_dir:
+            self._save_dataset_snapshot()
+        return len(self.dataset_samples)
+
+    def _prepare_reltr_training_samples(self) -> List[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
+        if not self.dataset_samples:
+            fallback = self._load_original_detection_and_relationships()
+            if fallback:
+                self.dataset_samples = [fallback]
+
+        prepared: List[Tuple[torch.Tensor, Dict[str, torch.Tensor]]] = []
+        for sample in self.dataset_samples:
+            target = self._build_reltr_target(sample)
+            if target is None:
+                continue
+            image_tensor = self._load_image_tensor(sample['image_path'])
+            prepared.append((image_tensor, target))
+        return prepared
 
     def _move_target_to_device(self, target: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
         return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()}
@@ -638,35 +811,41 @@ class RelationshipReinforcementLearning:
     def train_relationship_model(self, synthetic_data):
         """Fine-tune the RelTR relationship model on available relationship annotations."""
         model, criterion = self._ensure_relationship_model()
-        prepared = self._prepare_reltr_training_sample()
-        if prepared is None:
-            print("[RL] RelTR training sample unavailable, skipping relationship training.")
+        prepared_samples = self._prepare_reltr_training_samples()
+        if not prepared_samples:
+            print("[RL] RelTR training samples unavailable, skipping relationship training.")
             return 0.0
 
-        image_tensor, target, _ = prepared
-        samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
-        targets = [self._move_target_to_device(target, self.reltr_device)]
+        if self.reltr_optimizer is None:
+            self.reltr_optimizer = AdamW(
+                (param for param in model.parameters() if param.requires_grad),
+                lr=1e-5,
+                weight_decay=1e-4,
+            )
+        optimizer = self.reltr_optimizer
 
         model.train()
-        optimizer = AdamW(
-            (param for param in model.parameters() if param.requires_grad),
-            lr=1e-5,
-            weight_decay=1e-4,
-        )
-
-        outputs = model(samples)
-        loss_dict = criterion(outputs, targets)
-        weight_dict = criterion.weight_dict
-        loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
-
         optimizer.zero_grad()
-        loss.backward()
+        total_loss = 0.0
+
+        for image_tensor, target in prepared_samples:
+            samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
+            targets = [self._move_target_to_device(target, self.reltr_device)]
+
+            outputs = model(samples)
+            loss_dict = criterion(outputs, targets)
+            weight_dict = criterion.weight_dict
+            loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
+
+            loss.backward()
+            total_loss += float(loss.item())
+
         optimizer.step()
 
-        loss_value = float(loss.item())
-        print(f"[RL] Relationship loss after fine-tuning: {loss_value:.4f}")
+        average_loss = total_loss / max(len(prepared_samples), 1)
+        print(f"[RL] Relationship loss after fine-tuning: {average_loss:.4f}")
         model.eval()
-        return loss_value
+        return average_loss
     
     def predict_relationships(self, image):
         """Predict relationships from an input image using the fine-tuned RelTR model."""
