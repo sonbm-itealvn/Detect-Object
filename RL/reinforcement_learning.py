@@ -1,9 +1,12 @@
 # File: reinforcement_learning.py
 import torch
 from torch.optim import AdamW
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from collections import deque
 import random
+import math
 import os
 import json
 import shutil
@@ -81,6 +84,27 @@ class RelationshipReinforcementLearning:
             'best_epoch': 0
         }
 
+        # Deep Q-Network agent configuration
+        self.rl_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.action_space = [1, 3, 5, 7]
+        self.state_dim = 5
+        self.q_network = self._build_q_network(self.state_dim, len(self.action_space)).to(self.rl_device)
+        self.target_network = self._build_q_network(self.state_dim, len(self.action_space)).to(self.rl_device)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.q_optimizer = AdamW(self.q_network.parameters(), lr=1e-3)
+        self.gamma = 0.95
+        self.batch_size = 32
+        self.target_update_interval = 20
+        self.learn_step_counter = 0
+        self.last_metrics = {
+            'detection_loss': 1.0,
+            'relationship_loss': 1.0,
+            'reward': 0.0,
+            'dataset_size': 0,
+        }
+        self.last_state = self._build_state_vector(self.last_metrics)
+        self.last_action_index: Optional[int] = None
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
@@ -94,6 +118,62 @@ class RelationshipReinforcementLearning:
     @staticmethod
     def _normalize_label(label: str) -> str:
         return label.strip().lower().replace("_", " ").replace("-", " ")
+
+    def _build_q_network(self, input_dim: int, output_dim: int) -> nn.Module:
+        return nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim),
+        )
+
+    @staticmethod
+    def _normalize_scalar(value: float, scale: float = 1.0) -> float:
+        if scale <= 0:
+            scale = 1.0
+        return math.tanh(value / scale)
+
+    def _build_state_vector(self, metrics: Optional[Dict[str, float]] = None) -> torch.Tensor:
+        metrics = metrics or self.last_metrics
+        detection_loss = self._normalize_scalar(float(metrics.get('detection_loss', 1.0)), scale=5.0)
+        relationship_loss = self._normalize_scalar(float(metrics.get('relationship_loss', 1.0)), scale=5.0)
+        reward_value = self._normalize_scalar(float(metrics.get('reward', 0.0)), scale=1.0)
+        dataset_size = metrics.get('dataset_size', len(self.dataset_samples))
+        dataset_norm = self._normalize_scalar(float(dataset_size), scale=50.0)
+        epsilon_value = self._normalize_scalar(float(self.epsilon), scale=1.0)
+        state = torch.tensor(
+            [detection_loss, relationship_loss, reward_value, dataset_norm, epsilon_value],
+            dtype=torch.float32,
+            device=self.rl_device,
+        )
+        return state
+
+    def _select_action(self, state: torch.Tensor) -> Tuple[int, int]:
+        if random.random() < self.epsilon:
+            action_index = random.randrange(len(self.action_space))
+        else:
+            with torch.no_grad():
+                q_values = self.q_network(state.unsqueeze(0))
+                action_index = int(q_values.argmax(dim=1).item())
+        action_value = self.action_space[action_index]
+        return action_index, action_value
+
+    def decide_action(self) -> Dict[str, Any]:
+        """
+        Choose an action for the next training episode using epsilon-greedy DQN policy.
+        Returns a context dictionary that should be passed back after the episode completes.
+        """
+        state = self._build_state_vector()
+        action_index, action_value = self._select_action(state)
+        self.last_state = state
+        self.last_action_index = action_index
+        return {
+            'state': state.clone().detach(),
+            'action_index': action_index,
+            'num_variations': action_value,
+            'epsilon': self.epsilon,
+        }
 
     def _ensure_detection_model(self):
         if self.detection_model is not None:
@@ -643,17 +723,89 @@ class RelationshipReinforcementLearning:
                 pair_cursor += 1
         return relationships
         
-    def train_episode(self, original_relationships, synthetic_data=None):
+    # ------------------------------------------------------------------ #
+    # RL agent helpers
+    # ------------------------------------------------------------------ #
+    def _remember(
+        self,
+        state: Optional[torch.Tensor],
+        action_index: Optional[int],
+        reward: float,
+        next_state: Optional[torch.Tensor],
+        done: bool,
+    ) -> None:
+        if state is None or next_state is None or action_index is None:
+            return
+        experience = (
+            state.detach().cpu(),
+            int(action_index),
+            float(reward),
+            next_state.detach().cpu(),
+            float(done),
+        )
+        self.memory.append(experience)
+
+    def _optimize_q_network(self) -> Optional[float]:
+        if len(self.memory) < self.batch_size:
+            return None
+
+        batch = random.sample(self.memory, self.batch_size)
+        states = torch.stack([exp[0] for exp in batch]).to(self.rl_device)
+        actions = torch.tensor([exp[1] for exp in batch], dtype=torch.long, device=self.rl_device)
+        rewards = torch.tensor([exp[2] for exp in batch], dtype=torch.float32, device=self.rl_device)
+        next_states = torch.stack([exp[3] for exp in batch]).to(self.rl_device)
+        dones = torch.tensor([exp[4] for exp in batch], dtype=torch.float32, device=self.rl_device)
+
+        q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        with torch.no_grad():
+            next_q_values = self.target_network(next_states).max(dim=1).values
+            target_values = rewards + self.gamma * next_q_values * (1 - dones)
+
+        loss = F.mse_loss(q_values, target_values)
+        self.q_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        self.q_optimizer.step()
+        return float(loss.item())
+
+    def _finalize_rl_step(
+        self,
+        state: Optional[torch.Tensor],
+        action_index: Optional[int],
+        reward: float,
+        detection_loss: float,
+        relationship_loss: float,
+        done: bool = False,
+    ) -> Optional[float]:
+        metrics = {
+            'detection_loss': detection_loss,
+            'relationship_loss': relationship_loss,
+            'reward': reward,
+            'dataset_size': len(self.dataset_samples),
+        }
+        next_state = self._build_state_vector(metrics)
+        self._remember(state, action_index, reward, next_state, done)
+        optimization_loss = self._optimize_q_network()
+        self.learn_step_counter += 1
+        if self.learn_step_counter % self.target_update_interval == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+        self.last_metrics = metrics
+        self.last_state = next_state
+        self.last_action_index = action_index
+        return optimization_loss
+
+    def train_episode(self, original_relationships, synthetic_data=None, action_context: Optional[Dict[str, Any]] = None, done: bool = False):
         print(f"Starting training episode with {len(original_relationships)} relationships")
+        action_variations = action_context.get('num_variations', 3) if action_context else 3
         
         # 1. Use provided synthetic data or generate new if none provided
         if synthetic_data is None:
-            print("Step 1: Generating synthetic data...")
+            print(f"Step 1: Generating synthetic data (variations per relation: {action_variations})...")
             synthetic_data = []
             for i, rel in enumerate(original_relationships):
                 print(f"  Processing relationship {i+1}/{len(original_relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
                 try:
-                    generated_images = self.generator.generate_from_relationship(rel, num_variations=3)
+                    generated_images = self.generator.generate_from_relationship(rel, num_variations=action_variations)
                     synthetic_data.extend(generated_images)
                     print(f"    SUCCESS: Generated {len(generated_images)} images")
                 except Exception as e:
@@ -661,7 +813,7 @@ class RelationshipReinforcementLearning:
                     continue
             print(f"Total synthetic data generated: {len(synthetic_data)} images")
         else:
-            print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images")
+            print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images (variations per relation: {action_variations})")
         
         # 2. Train detection model
         print("Step 2: 🧠 Training detection model...")
@@ -709,13 +861,29 @@ class RelationshipReinforcementLearning:
             detection_loss=detection_loss,
             relationship_loss=relationship_loss,
         )
+
+        rl_state = action_context.get('state') if action_context else None
+        rl_action_index = action_context.get('action_index') if action_context else None
+        rl_loss = self._finalize_rl_step(
+            rl_state,
+            rl_action_index,
+            reward,
+            detection_loss,
+            relationship_loss,
+            done=done,
+        )
+        if rl_loss is not None:
+            print(f"[RL] Q-network optimization loss: {rl_loss:.6f}")
         
         return {
             'detection_loss': detection_loss,
             'relationship_loss': relationship_loss,
             'reward': reward,
             'epsilon': self.epsilon,
-            'experience_batch': experience_batch
+            'experience_batch': experience_batch,
+            'rl_action_index': rl_action_index,
+            'rl_num_variations': action_variations,
+            'rl_loss': rl_loss,
         }
     
     def calculate_reward(self, synthetic_data, original_relationships):

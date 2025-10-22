@@ -143,9 +143,14 @@ class AppReinforcementLearning:
             epoch_start_time = time.time()
             
             try:
+                action_context = self.rl_system.decide_action()
+                action_index = action_context.get('action_index')
+                num_variations = action_context.get('num_variations', 3)
+                print(f" Selected RL action {action_index} -> {num_variations} variations per relationship")
+
                 # Generate AI images for this epoch
                 print(f"🎨 Generating AI images for epoch {epoch + 1}...")
-                ai_images = self.generate_ai_images_for_epoch(relationships, epoch)
+                ai_images = self.generate_ai_images_for_epoch(relationships, epoch, num_variations=num_variations)
                 training_metrics['ai_generated_images'].extend(ai_images)
                 
                 # Lưu ảnh AI vào experiment
@@ -153,7 +158,14 @@ class AppReinforcementLearning:
                 
                 # Run training episode with pre-generated synthetic data
                 print(f"🧠 Starting actual RL training for epoch {epoch + 1}...")
-                results = self.rl_system.train_episode(relationships, ai_images)
+                results = self.rl_system.train_episode(
+                    relationships,
+                    ai_images,
+                    action_context=action_context,
+                    done=(epoch + 1 == epochs)
+                )
+                results.setdefault('rl_action_index', action_index)
+                results.setdefault('rl_num_variations', num_variations)
                 experience_batch = results.pop('experience_batch', [])
                 results['epoch'] = epoch + 1
                 results['ai_images_generated'] = len(ai_images)
@@ -183,7 +195,10 @@ class AppReinforcementLearning:
                     'ai_images_count': len(ai_images),
                     'experience_count': len(experience_batch),
                     'experience_file': experience_file,
-                    'epoch_duration': results['epoch_duration']
+                    'epoch_duration': results['epoch_duration'],
+                    'rl_action_index': results.get('rl_action_index'),
+                    'rl_num_variations': results.get('rl_num_variations'),
+                    'rl_loss': results.get('rl_loss'),
                 }
                 self.experiment_manager.save_training_metrics(epoch_metrics, epoch + 1)
                 
@@ -195,7 +210,9 @@ class AppReinforcementLearning:
                     'relationship_loss': results['relationship_loss'],
                     'reward': results['reward'],
                     'ai_images_count': len(ai_images),
-                    'experience_count': len(experience_batch)
+                    'experience_count': len(experience_batch),
+                    'rl_action_index': results.get('rl_action_index'),
+                    'rl_num_variations': results.get('rl_num_variations'),
                 }
                 training_metrics['training_progress'].append(progress)
                 
@@ -204,6 +221,9 @@ class AppReinforcementLearning:
                 print(f"   Relationship Loss: {results['relationship_loss']:.4f}")
                 print(f"   Reward: {results['reward']:.4f}")
                 print(f"   Exploration Rate: {results['epsilon']:.4f}")
+                print(f"   Selected Action: {results.get('rl_action_index')} -> {results.get('rl_num_variations')} variations")
+                if results.get('rl_loss') is not None:
+                    print(f"   Q-Network Loss: {results['rl_loss']:.6f}")
                 print(f"   AI Images Generated: {len(ai_images)}")
                 print(f"   Epoch Duration: {results['epoch_duration']:.2f}s")
                 
@@ -315,18 +335,19 @@ class AppReinforcementLearning:
         print(f"SUCCESS: Generated {len(synthetic_dataset)} synthetic images")
         return synthetic_dataset
     
-    def generate_ai_images_for_epoch(self, relationships: List[Dict], epoch: int) -> List[Dict]:
+    def generate_ai_images_for_epoch(self, relationships: List[Dict], epoch: int, num_variations: Optional[int] = None) -> List[Dict]:
         """Generate AI images for a specific training epoch"""
         print(f"🎨 Generating AI images for epoch {epoch + 1}...")
         
         ai_images = []
+        variations_per_relationship = num_variations if num_variations is not None else 3 + (epoch % 3)
+        print(f"  Using {variations_per_relationship} variations per relationship")
         for i, rel in enumerate(relationships):
             try:
                 print(f"  Processing relationship {i+1}/{len(relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
                 
                 # Generate variations for this relationship
-                num_variations = 3 + (epoch % 3)  # Vary number of variations per epoch
-                generated_images = self.generator.generate_from_relationship(rel, num_variations=num_variations)
+                generated_images = self.generator.generate_from_relationship(rel, num_variations=variations_per_relationship)
                 
                 # Add metadata to each generated image
                 for j, img_data in enumerate(generated_images):
