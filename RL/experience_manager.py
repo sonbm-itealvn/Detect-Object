@@ -53,20 +53,32 @@ class ExperienceManager:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         exp_id = metadata.get("experiment_id") if metadata else None
-        epoch = metadata.get("epoch") if metadata else None
-
-        filename_parts = []
-        if exp_id:
-            filename_parts.append(exp_id)
-        if epoch is not None:
-            filename_parts.append(f"epoch_{int(epoch):03d}")
-        filename_parts.append(timestamp)
-        filename = "_".join(filename_parts) + ".pt"
+        filename = f"{exp_id or 'default_run'}_experiences.pt"
 
         filepath = os.path.join(self.epoch_dir, filename)
+        existing_experiences: List[Dict[str, Any]] = []
+        existing_metadata: Dict[str, Any] = {}
+
+        if os.path.exists(filepath):
+            try:
+                existing_payload = torch.load(filepath, map_location="cpu")
+                existing_experiences = existing_payload.get("experiences", [])
+                existing_metadata = existing_payload.get("metadata", {})
+            except Exception:
+                existing_experiences = []
+                existing_metadata = {}
+
+        combined_experiences = existing_experiences + sanitized
+        combined_metadata = self._merge_epoch_metadata(
+            existing_metadata,
+            metadata or {},
+            total_experiences=len(combined_experiences),
+            timestamp=timestamp,
+        )
+
         payload = {
-            "metadata": metadata or {},
-            "experiences": sanitized,
+            "metadata": combined_metadata,
+            "experiences": combined_experiences,
             "saved_at": timestamp,
         }
 
@@ -165,4 +177,45 @@ class ExperienceManager:
         blacklist = {"image", "image_data", "pixel_values"}
         return {k: ExperienceManager._strip_image_keys(v) if isinstance(v, dict) else v
                 for k, v in payload.items() if k not in blacklist}
+
+    def _merge_epoch_metadata(
+        self,
+        existing: Dict[str, Any],
+        new: Dict[str, Any],
+        total_experiences: int,
+        timestamp: str,
+    ) -> Dict[str, Any]:
+        """Merge metadata across epochs into a single experiment summary."""
+        merged: Dict[str, Any] = dict(existing or {})
+
+        if new.get("experiment_id"):
+            merged["experiment_id"] = new["experiment_id"]
+        if new.get("experiment_dir"):
+            merged["experiment_dir"] = new["experiment_dir"]
+
+        history: List[Dict[str, Any]] = []
+        if isinstance(merged.get("epoch_history"), list):
+            history = list(merged["epoch_history"])
+
+        epoch_entry = {
+            key: new.get(key)
+            for key in ("epoch", "reward", "detection_loss", "relationship_loss", "timestamp")
+            if new.get(key) is not None
+        }
+        if epoch_entry:
+            epoch_value = epoch_entry.get("epoch")
+            if epoch_value is not None:
+                history = [item for item in history if item.get("epoch") != epoch_value]
+            history.append(epoch_entry)
+            history.sort(key=lambda item: item.get("epoch", float("inf")))
+            merged["latest_epoch"] = epoch_value
+            if "reward" in epoch_entry:
+                merged["last_reward"] = epoch_entry["reward"]
+
+        merged["epoch_history"] = history
+        merged["total_epochs"] = len(history)
+        merged["total_experiences"] = total_experiences
+        merged["last_updated"] = timestamp
+
+        return merged
 

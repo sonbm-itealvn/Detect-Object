@@ -166,7 +166,7 @@ class AppReinforcementLearning:
                     detection_loss=results['detection_loss'],
                     relationship_loss=results['relationship_loss']
                 )
-                if experience_file:
+                if experience_file and experience_file not in training_metrics['experience_files']:
                     training_metrics['experience_files'].append(experience_file)
                 
                 all_results.append(results)
@@ -290,7 +290,9 @@ class AppReinforcementLearning:
         filepath = self.experience_manager.record_epoch_batch(experiences, metadata)
         if filepath:
             stats = self.experience_manager.stats()
-            print(f"[RL] Saved {len(experiences)} experiences -> {filepath} (buffer size: {stats['buffer_size']})")
+            print(
+                f"[RL] Appended {len(experiences)} experiences to {filepath} (buffer size: {stats['buffer_size']})"
+            )
         return filepath
     
     def generate_synthetic_dataset(self, num_variations=5):
