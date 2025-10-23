@@ -12,11 +12,10 @@ from typing import List, Tuple
 import tkinter as tk
 from tkinter import filedialog
 
-# Load mô hình YOLOv5 (pretrained)
-yolo_model = YOLO(r"D:\DocCument\DATN\test\yolov5\yolov5xu.pt")  # Hoặc yolov5m.pt, yolov5l.pt nếu muốn model mạnh hơn
+yolo_model = YOLO(r"D:\DocCument\DATN\test\yolov5\yolov5xu.pt")
 
 # Backbone feature capture for RoIAlign descriptors
-_BACKBONE_LAYER_INDEX = 9  # SPPF layer index inside YOLOv5 backbone
+_BACKBONE_LAYER_INDEX = 9  # SPPF layer index inside YOLO backbone
 _BACKBONE_STRIDE = int(yolo_model.model.model[-1].stride[-1].item())
 _feature_map_store = {}
 

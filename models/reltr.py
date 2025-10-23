@@ -151,7 +151,7 @@ class RelTR(nn.Module):
         context_flat = context.flatten(1)
         if self.context_proj is None or self.context_proj.in_features != context_flat.shape[-1]:
             self.context_proj = nn.Linear(context_flat.shape[-1], self.hidden_dim)
-            nn.init.xavier_uniform_(self.context_proj.weight)
+            nn.init.zeros_(self.context_proj.weight)
             nn.init.zeros_(self.context_proj.bias)
         self.context_proj = self.context_proj.to(device)
         return F.relu(self.context_proj(context_flat))

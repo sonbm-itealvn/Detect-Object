@@ -8,6 +8,7 @@ import argparse
 from PIL import Image
 import torchvision.transforms as T
 from models import build_model
+import detect_objects as detection_pipeline
 
 def load_yolo_output(json_path):
     """Load object detection results from YOLOv5 JSON output."""
@@ -100,8 +101,21 @@ def run_reltr_inference(objects, img_path, args, output_json="relationships.json
     img = Image.open(img_path)
     img_tensor = transform(img).unsqueeze(0)
 
+    context_tensor = None
+    try:
+        _, _, _, _, global_context = detection_pipeline.detect_objects(img_path)
+        if global_context:
+            context_tensor = torch.tensor(global_context, dtype=torch.float32, device=device)
+            if context_tensor.ndim == 1:
+                context_tensor = context_tensor.unsqueeze(0)
+    except Exception as exc:
+        print(f"[RelTR] Unable to retrieve global context for {img_path}: {exc}")
+
     with torch.no_grad():
-        outputs = model(img_tensor)
+        if context_tensor is not None:
+            outputs = model(img_tensor, global_context=context_tensor)
+        else:
+            outputs = model(img_tensor)
 
     rel_logits = outputs["rel_logits"].softmax(-1)[0, :, :-1]
     keep = rel_logits.max(-1).values > 0.4
