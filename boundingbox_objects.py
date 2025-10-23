@@ -10,6 +10,20 @@ import torchvision.transforms as T
 from models import build_model
 from pathlib import Path
 
+
+def _resolve_device(device_arg: str) -> torch.device:
+    """Return the torch.device requested by CLI, falling back safely when unavailable."""
+    if device_arg:
+        device_arg = device_arg.lower()
+        if device_arg.startswith("cuda"):
+            if torch.cuda.is_available():
+                return torch.device(device_arg)
+            print(f"[RelTR] Requested CUDA device '{device_arg}' unavailable. Falling back to CPU.")
+            return torch.device("cpu")
+        if device_arg in ("cpu", "mps"):
+            return torch.device(device_arg)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def load_yolo_output(json_path):
     """Load object detection results from YOLO JSON output, preserving metadata."""
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -84,9 +98,10 @@ def run_reltr_inference(objects, img_path, args, global_context=None, output_jso
                    'to', 'under', 'using', 'walking in', 'walking on', 'watching', 'wearing', 'wears', 'with']
 
     model, _, _ = build_model(args)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _resolve_device(getattr(args, "device", None))
     checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model'])
+    model.to(device)
     model.eval()
 
     feature_dim = next((len(obj.get("feature", [])) for obj in objects if obj.get("feature")), 0)
@@ -102,7 +117,7 @@ def run_reltr_inference(objects, img_path, args, global_context=None, output_jso
         roi_feature_tensor = F.normalize(roi_feature_tensor, p=2, dim=1)
 
     img = Image.open(img_path)
-    img_tensor = transform(img).unsqueeze(0)
+    img_tensor = transform(img).unsqueeze(0).to(device)
 
     context_tensor = None
     if global_context:
@@ -157,8 +172,8 @@ def run_reltr_inference(objects, img_path, args, global_context=None, output_jso
     threshold = 0.5
     filtered_relationships = []
     for rel in relationships:
-        similarity = rel.get("visual_similarity", 0)
-        if similarity >= threshold:
+        similarity = rel.get("visual_similarity")
+        if similarity is None or similarity >= threshold:
             filtered_relationships.append(rel)
     
     print(f"📊 Lọc mối quan hệ: {len(filtered_relationships)}/{len(relationships)} đạt ngưỡng {threshold}")

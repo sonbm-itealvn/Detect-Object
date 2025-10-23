@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import threading
+from collections import deque
 import torch
 import torch.nn.functional as F
 import json
@@ -37,7 +39,8 @@ yolo_model = YOLO(_resolve_yolo_weights())
 # Backbone feature capture for RoIAlign descriptors
 _BACKBONE_LAYER_INDEX = 9  # SPPF layer index inside YOLO backbone
 _BACKBONE_STRIDE = int(yolo_model.model.model[-1].stride[-1].item())
-_feature_map_store = {}
+_feature_map_lock = threading.Lock()
+_feature_map_queue: deque[torch.Tensor] = deque()
 
 
 def _compute_global_context(feature_map: torch.Tensor) -> List[float]:
@@ -55,7 +58,9 @@ def _compute_global_context(feature_map: torch.Tensor) -> List[float]:
 
 def _capture_backbone_feature(module, inputs, output):
     """Store latest backbone feature map for ROI extraction."""
-    _feature_map_store["backbone"] = output.detach().cpu()
+    feature_map = output.detach().cpu()
+    with _feature_map_lock:
+        _feature_map_queue.append(feature_map)
 
 # Register hook once so every inference populates the shared store
 yolo_model.model.model[_BACKBONE_LAYER_INDEX].register_forward_hook(_capture_backbone_feature)
@@ -140,7 +145,8 @@ label_texts = list(set([label.strip() for label in (
 
 def _consume_feature_map():
     """Retrieve and remove the cached backbone feature map."""
-    feature_map = _feature_map_store.pop("backbone", None)
+    with _feature_map_lock:
+        feature_map = _feature_map_queue.popleft() if _feature_map_queue else None
     if feature_map is None:
         raise RuntimeError("Backbone feature map not captured from the latest YOLO forward pass.")
     return feature_map

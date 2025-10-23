@@ -325,10 +325,23 @@ class ObjectDetectionApp:
             draw = ImageDraw.Draw(image)
             
             # Tạo dictionary để tìm object theo tên
+            def _register_object(bucket_map, obj_entry):
+                class_name = obj_entry.get("class", "").lower()
+                if not class_name:
+                    return
+                bucket = bucket_map.setdefault(class_name, {"items": [], "cursor": 0})
+                bucket["items"].append(obj_entry)
+
+            def _next_object(bucket):
+                if not bucket or not bucket["items"]:
+                    return None
+                idx = bucket["cursor"] % len(bucket["items"])
+                bucket["cursor"] = (bucket["cursor"] + 1) % len(bucket["items"])
+                return bucket["items"][idx]
+
             objects_dict = {}
             for obj in objects:
-                class_name = obj.get("class", "").lower()
-                objects_dict[class_name] = obj
+                _register_object(objects_dict, obj)
             
             # Vẽ bbox cho từng mối quan hệ
             colors = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"]
@@ -340,8 +353,9 @@ class ObjectDetectionApp:
                 color = colors[i % len(colors)]
                 
                 # Vẽ bbox cho subject
-                if subject in objects_dict:
-                    bbox = objects_dict[subject].get("bbox", [])
+                subject_entry = _next_object(objects_dict.get(subject))
+                if subject_entry:
+                    bbox = subject_entry.get("bbox", [])
                     if len(bbox) >= 4:
                         x, y, w, h = bbox[:4]
                         # Vẽ box đậm hơn với width=6
@@ -357,8 +371,9 @@ class ObjectDetectionApp:
                         draw.text((x, y - 30), f"S: {subject.upper()}", fill=color, font=font)
                 
                 # Vẽ bbox cho object
-                if obj in objects_dict:
-                    bbox = objects_dict[obj].get("bbox", [])
+                object_entry = _next_object(objects_dict.get(obj))
+                if object_entry:
+                    bbox = object_entry.get("bbox", [])
                     if len(bbox) >= 4:
                         x, y, w, h = bbox[:4]
                         # Vẽ box đậm hơn với width=6
