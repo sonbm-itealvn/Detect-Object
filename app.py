@@ -130,7 +130,7 @@ class ObjectDetectionApp:
         self.result_image_path = "result.jpg"
         self.result_json_path = "converted_bboxes.json"
         self.relationship_json_path = "relationships.json"
-        self.checkpoint_path = "checkpoint.pth"  # Sử dụng file checkpoint mặc định
+        self.checkpoint_path = "reltr_finetuned.pth" 
 
         # Load model
         self.model = SentenceTransformer("all-MiniLM-L6-v2")

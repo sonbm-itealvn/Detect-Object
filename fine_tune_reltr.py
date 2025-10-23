@@ -58,6 +58,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to save a JSON report with training losses.",
     )
+    parser.add_argument(
+        "--relationships_dir",
+        required=False,
+        default=None,
+        help="If provided, export predicted relationships for each image as JSON before training.",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +84,37 @@ def build_agent(args: argparse.Namespace) -> RelationshipReinforcementLearning:
     return agent
 
 
+def ensure_relationship_annotations(
+    agent: RelationshipReinforcementLearning,
+    export_dir: Optional[Path] = None,
+) -> int:
+    if export_dir:
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_samples = 0
+    for sample in agent.dataset_samples:
+        relationships = sample.get("relationships") or []
+        if not relationships:
+            image_tensor = agent._load_image_tensor(sample["image_path"])
+            relationships = agent._run_reltr_inference(
+                image_tensor,
+                sample.get("objects", []),
+                sample.get("global_context"),
+            )
+            sample["relationships"] = relationships
+
+        if relationships:
+            valid_samples += 1
+
+        if export_dir is not None:
+            image_path = Path(sample["image_path"])
+            export_path = export_dir / f"{image_path.stem}_relationships.json"
+            with export_path.open("w", encoding="utf-8") as f:
+                json.dump(relationships, f, ensure_ascii=False, indent=2)
+
+    return valid_samples
+
+
 def main() -> None:
     args = parse_args()
 
@@ -93,6 +130,12 @@ def main() -> None:
         print("[FineTune] No samples prepared; aborting.")
         return
     print(f"[FineTune] Prepared {dataset_size} samples.")
+
+    relationships_dir = Path(args.relationships_dir) if args.relationships_dir else None
+    valid_relationship_samples = ensure_relationship_annotations(agent, relationships_dir)
+    print(f"[FineTune] Relationship annotations available for {valid_relationship_samples}/{dataset_size} samples.")
+    if valid_relationship_samples == 0:
+        print("[FineTune] Warning: no relationship annotations available; RelTR will not update meaningfully.")
 
     losses = []
     for epoch in range(1, args.epochs + 1):
@@ -117,6 +160,7 @@ def main() -> None:
             "epochs": args.epochs,
             "losses": losses,
             "output_checkpoint": str(Path(args.output).resolve()) if args.output else None,
+            "valid_relationship_samples": valid_relationship_samples,
         }
         with report_path.open("w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)

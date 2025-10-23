@@ -4,7 +4,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from typing import Optional
+from typing import Optional, Mapping
 from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
@@ -155,6 +155,25 @@ class RelTR(nn.Module):
             nn.init.zeros_(self.context_proj.bias)
         self.context_proj = self.context_proj.to(device)
         return F.relu(self.context_proj(context_flat))
+
+    def load_state_dict(self, state_dict: Mapping[str, torch.Tensor], strict: bool = True):
+        copied = dict(state_dict)
+        context_weight = copied.get("context_proj.weight")
+        context_bias = copied.get("context_proj.bias")
+        if context_weight is not None and context_bias is not None:
+            in_features = context_weight.shape[1]
+            if self.context_proj is None or self.context_proj.in_features != in_features:
+                self.context_proj = nn.Linear(in_features, self.hidden_dim)
+            with torch.no_grad():
+                self.context_proj.weight.copy_(context_weight)
+                self.context_proj.bias.copy_(context_bias)
+            self.context_proj = self.context_proj.to(context_weight.device)
+            return super().load_state_dict(state_dict, strict=strict)
+        else:
+            if "context_proj" in self._modules:
+                del self._modules["context_proj"]
+            self.context_proj = None
+            return super().load_state_dict(copied, strict=False)
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outputs_class_sub, outputs_coord_sub,
