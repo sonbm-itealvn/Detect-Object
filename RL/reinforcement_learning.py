@@ -4,7 +4,7 @@ from torch.optim import AdamW
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from collections import deque
+from collections import deque, Counter
 import random
 import math
 import os
@@ -104,6 +104,9 @@ class RelationshipReinforcementLearning:
         }
         self.last_state = self._build_state_vector(self.last_metrics)
         self.last_action_index: Optional[int] = None
+        self.latest_reward_components: Dict[str, float] = {}
+        self.latest_detection_metrics: Dict[str, float] = {}
+        self.latest_relationship_metrics: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -794,6 +797,232 @@ class RelationshipReinforcementLearning:
         self.last_action_index = action_index
         return optimization_loss
 
+    # ------------------------------------------------------------------ #
+    # Reward evaluation helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _compute_iou(box_a: List[float], box_b: List[float]) -> float:
+        if len(box_a) != 4 or len(box_b) != 4:
+            return 0.0
+        x1 = max(float(box_a[0]), float(box_b[0]))
+        y1 = max(float(box_a[1]), float(box_b[1]))
+        x2 = min(float(box_a[2]), float(box_b[2]))
+        y2 = min(float(box_a[3]), float(box_b[3]))
+        inter_w = max(0.0, x2 - x1)
+        inter_h = max(0.0, y2 - y1)
+        intersection = inter_w * inter_h
+        if intersection <= 0.0:
+            return 0.0
+        area_a = max(0.0, float(box_a[2]) - float(box_a[0])) * max(0.0, float(box_a[3]) - float(box_a[1]))
+        area_b = max(0.0, float(box_b[2]) - float(box_b[0])) * max(0.0, float(box_b[3]) - float(box_b[1]))
+        union = area_a + area_b - intersection
+        if union <= 0.0:
+            return 0.0
+        return intersection / union
+
+    def _match_detections(
+        self,
+        predictions: List[Dict[str, Any]],
+        ground_truths: List[Dict[str, Any]],
+        iou_threshold: float,
+    ) -> Tuple[int, int, int]:
+        if not predictions:
+            return 0, 0, len(ground_truths)
+
+        matched_gt = set()
+        tp = 0
+        fp = 0
+
+        for pred in predictions:
+            pred_bbox = pred.get('bbox')
+            pred_class = self._normalize_label(pred.get('class', ''))
+            if not pred_bbox or not pred_class:
+                fp += 1
+                continue
+
+            best_iou = 0.0
+            best_idx: Optional[int] = None
+
+            for idx, gt in enumerate(ground_truths):
+                if idx in matched_gt:
+                    continue
+                gt_bbox = gt.get('bbox')
+                gt_class = self._normalize_label(gt.get('class', ''))
+                if not gt_bbox or not gt_class or gt_class != pred_class:
+                    continue
+                iou = self._compute_iou(pred_bbox, gt_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_idx = idx
+
+            if best_idx is not None and best_iou >= iou_threshold:
+                tp += 1
+                matched_gt.add(best_idx)
+            else:
+                fp += 1
+
+        fn = len(ground_truths) - len(matched_gt)
+        return tp, fp, fn
+
+    def _evaluate_detection_metrics(
+        self,
+        samples: List[Dict[str, Any]],
+        max_samples: int = 25,
+        iou_threshold: float = 0.5,
+    ) -> Dict[str, float]:
+        if not samples:
+            return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'tp': 0, 'fp': 0, 'fn': 0, 'num_samples': 0}
+
+        total_tp = total_fp = total_fn = 0
+        evaluated = 0
+
+        subset = samples[:max_samples]
+        for sample in subset:
+            ground_truths = [
+                obj for obj in sample.get('objects', [])
+                if obj.get('bbox') and obj.get('class')
+            ]
+            if not ground_truths:
+                continue
+
+            pil_image = self._ensure_pil_image(sample.get('image_path'))
+            if pil_image is None:
+                continue
+
+            try:
+                predictions = self._detect_objects_for_image(pil_image)
+            except Exception as exc:
+                print(f"[RL] Detection evaluation failed for {sample.get('image_path')}: {exc}")
+                continue
+
+            tp, fp, fn = self._match_detections(predictions, ground_truths, iou_threshold)
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+            evaluated += 1
+
+        if evaluated == 0:
+            return {'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'tp': 0, 'fp': 0, 'fn': 0, 'num_samples': 0}
+
+        precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+        recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'tp': total_tp,
+            'fp': total_fp,
+            'fn': total_fn,
+            'num_samples': evaluated,
+        }
+
+    def _normalize_relationship_tuple(self, relationship: Optional[Dict[str, Any]]) -> Tuple[str, str, str]:
+        if not relationship:
+            return ("", "", "")
+        return (
+            self._normalize_label(relationship.get('subject', '')),
+            self._normalize_label(relationship.get('relation', '')),
+            self._normalize_label(relationship.get('object', '')),
+        )
+
+    def _compute_relationship_confusion(
+        self,
+        ground_truth: List[Tuple[str, str, str]],
+        predictions: List[Tuple[str, str, str]],
+    ) -> Tuple[int, int, int]:
+        if not ground_truth and not predictions:
+            return 0, 0, 0
+        gt_counter = Counter(ground_truth)
+        pred_counter = Counter(predictions)
+        tp = sum(min(gt_counter[key], pred_counter.get(key, 0)) for key in gt_counter)
+        fp = sum(max(pred_counter[key] - gt_counter.get(key, 0), 0) for key in pred_counter)
+        fn = sum(max(gt_counter[key] - pred_counter.get(key, 0), 0) for key in gt_counter)
+        return tp, fp, fn
+
+    def _evaluate_relationship_metrics(
+        self,
+        synthetic_data: List[Dict[str, Any]],
+        original_relationships: List[Dict[str, Any]],
+        max_samples: int = 30,
+    ) -> Dict[str, Any]:
+        if not synthetic_data:
+            return {
+                'precision': 0.0,
+                'recall': 0.0,
+                'f1': 0.0,
+                'f1_std': 0.0,
+                'tp': 0,
+                'fp': 0,
+                'fn': 0,
+                'num_samples': 0,
+                'per_sample_f1': [],
+            }
+
+        total_tp = total_fp = total_fn = 0
+        per_sample_f1: List[float] = []
+        evaluated = 0
+
+        subset = synthetic_data[:max_samples]
+        for data in subset:
+            target_rel = data.get('original_relationship')
+            image_input = data.get('image') or data.get('image_path')
+            if not target_rel or image_input is None:
+                continue
+
+            try:
+                predicted_relationships = self.predict_relationships(image_input) or []
+            except Exception as exc:
+                print(f"[RL] Relationship evaluation failed: {exc}")
+                predicted_relationships = []
+
+            gt_tuples = [self._normalize_relationship_tuple(target_rel)]
+            pred_tuples = [self._normalize_relationship_tuple(rel) for rel in predicted_relationships if rel]
+
+            tp, fp, fn = self._compute_relationship_confusion(gt_tuples, pred_tuples)
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+            per_sample_f1.append(f1)
+            evaluated += 1
+
+        if evaluated == 0:
+            return {
+                'precision': 0.0,
+                'recall': 0.0,
+                'f1': 0.0,
+                'f1_std': 0.0,
+                'tp': 0,
+                'fp': 0,
+                'fn': 0,
+                'num_samples': 0,
+                'per_sample_f1': [],
+            }
+
+        precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+        recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        mean_f1 = sum(per_sample_f1) / len(per_sample_f1) if per_sample_f1 else 0.0
+        variance = sum((score - mean_f1) ** 2 for score in per_sample_f1) / len(per_sample_f1) if per_sample_f1 else 0.0
+        std_f1 = math.sqrt(variance)
+
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'f1_std': std_f1,
+            'tp': total_tp,
+            'fp': total_fp,
+            'fn': total_fn,
+            'num_samples': evaluated,
+            'per_sample_f1': per_sample_f1,
+        }
+
     def train_episode(self, original_relationships, synthetic_data=None, action_context: Optional[Dict[str, Any]] = None, done: bool = False):
         print(f"Starting training episode with {len(original_relationships)} relationships")
         action_variations = action_context.get('num_variations', 3) if action_context else 3
@@ -829,6 +1058,17 @@ class RelationshipReinforcementLearning:
         print("Step 4: 📊 Calculating reward...")
         reward = self.calculate_reward(synthetic_data, original_relationships)
         print(f"    ✅ Reward: {reward:.4f}")
+        reward_components = dict(self.latest_reward_components or {})
+        if reward_components:
+            print(
+                "     Reward breakdown -> "
+                f"Det F1: {reward_components.get('detection_f1', 0.0):.3f}, "
+                f"Rel F1: {reward_components.get('relationship_f1', 0.0):.3f}, "
+                f"Diversity: {reward_components.get('diversity', 0.0):.3f}, "
+                f"Consistency: {reward_components.get('consistency', 0.0):.3f}"
+            )
+        detection_metrics_snapshot = dict(self.latest_detection_metrics or {})
+        relationship_metrics_snapshot = dict(self.latest_relationship_metrics or {})
         
         # 5. Update exploration rate
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
@@ -884,46 +1124,35 @@ class RelationshipReinforcementLearning:
             'rl_action_index': rl_action_index,
             'rl_num_variations': action_variations,
             'rl_loss': rl_loss,
+            'reward_components': reward_components,
+            'detection_metrics': detection_metrics_snapshot,
+            'relationship_metrics': relationship_metrics_snapshot,
         }
     
     def calculate_reward(self, synthetic_data, original_relationships):
-        # Accuracy reward
-        accuracy_reward = self.calculate_accuracy_reward(synthetic_data, original_relationships)
-        
-        # Diversity reward
+        detection_metrics = self._evaluate_detection_metrics(self.dataset_samples)
+        relationship_metrics = self._evaluate_relationship_metrics(synthetic_data, original_relationships)
+        per_sample_f1 = relationship_metrics.pop('per_sample_f1', [])
         diversity_reward = self.calculate_diversity_reward(synthetic_data)
-        
-        # Consistency reward
-        consistency_reward = self.calculate_consistency_reward(synthetic_data)
-        
-        total_reward = 0.4 * accuracy_reward + 0.3 * diversity_reward + 0.3 * consistency_reward
+        consistency_reward = self.calculate_consistency_reward(per_sample_f1, relationship_metrics.get('f1_std'))
+        detection_reward = detection_metrics.get('f1', 0.0)
+        relationship_reward = relationship_metrics.get('f1', 0.0)
+        total_reward = (
+            0.4 * detection_reward
+            + 0.4 * relationship_reward
+            + 0.1 * diversity_reward
+            + 0.1 * consistency_reward
+        )
+        self.latest_detection_metrics = detection_metrics
+        self.latest_relationship_metrics = relationship_metrics
+        self.latest_reward_components = {
+            'detection_f1': detection_reward,
+            'relationship_f1': relationship_reward,
+            'diversity': diversity_reward,
+            'consistency': consistency_reward,
+            'total_reward': total_reward,
+        }
         return total_reward
-    
-    def calculate_accuracy_reward(self, synthetic_data, original_relationships):
-        # Simulate detection and relationship prediction
-        correct_predictions = 0
-        total_predictions = 0
-        
-        for data in synthetic_data:
-            # Mock prediction (replace with actual model inference)
-            predicted_relationships = self.predict_relationships(data['image'])
-            
-            # Compare with original relationships
-            for pred_rel in predicted_relationships:
-                for orig_rel in original_relationships:
-                    if self.relationship_similarity(pred_rel, orig_rel) > 0.7:
-                        correct_predictions += 1
-                    total_predictions += 1
-        
-        return correct_predictions / max(total_predictions, 1)
-    
-    def relationship_similarity(self, rel1, rel2):
-        # Calculate similarity between two relationships
-        subject_sim = 1.0 if rel1['subject'] == rel2['subject'] else 0.0
-        relation_sim = 1.0 if rel1['relation'] == rel2['relation'] else 0.0
-        object_sim = 1.0 if rel1['object'] == rel2['object'] else 0.0
-        
-        return (subject_sim + relation_sim + object_sim) / 3.0
     
     def train_detection_model(self, synthetic_data):
         """Fine-tune the YOLO detection model on available labeled data."""
@@ -1052,16 +1281,19 @@ class RelationshipReinforcementLearning:
         diversity_score = min(len(unique_relations) / 10.0, 1.0)  # Normalize to [0,1]
         return diversity_score
     
-    def calculate_consistency_reward(self, synthetic_data):
-        """Calculate consistency reward based on synthetic data consistency"""
-        if not synthetic_data:
+    def calculate_consistency_reward(self, f1_scores: List[float], precomputed_std: Optional[float] = None) -> float:
+        """Calculate consistency reward based on the stability of relationship predictions."""
+        if not f1_scores and (precomputed_std is None or precomputed_std == 0.0):
             return 0.0
-        
-        # Mock consistency calculation
-        # In real implementation, this would check consistency between
-        # synthetic data and original relationships
-        consistency_score = random.uniform(0.6, 0.9)
-        return consistency_score
+        if precomputed_std is not None:
+            std = float(precomputed_std)
+        else:
+            if not f1_scores:
+                return 0.0
+            mean_score = sum(f1_scores) / len(f1_scores)
+            variance = sum((score - mean_score) ** 2 for score in f1_scores) / len(f1_scores)
+            std = math.sqrt(variance)
+        return max(0.0, 1.0 - min(std, 1.0))
     
     def save_model_state(self, reward, detection_loss, relationship_loss):
         """Lưu trạng thái model khi có kết quả tốt"""

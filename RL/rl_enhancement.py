@@ -199,6 +199,9 @@ class AppReinforcementLearning:
                     'rl_action_index': results.get('rl_action_index'),
                     'rl_num_variations': results.get('rl_num_variations'),
                     'rl_loss': results.get('rl_loss'),
+                    'reward_components': results.get('reward_components'),
+                    'detection_metrics': results.get('detection_metrics'),
+                    'relationship_metrics': results.get('relationship_metrics'),
                 }
                 self.experiment_manager.save_training_metrics(epoch_metrics, epoch + 1)
                 
@@ -213,6 +216,9 @@ class AppReinforcementLearning:
                     'experience_count': len(experience_batch),
                     'rl_action_index': results.get('rl_action_index'),
                     'rl_num_variations': results.get('rl_num_variations'),
+                    'detection_f1': (results.get('detection_metrics') or {}).get('f1'),
+                    'relationship_f1': (results.get('relationship_metrics') or {}).get('f1'),
+                    'reward_components': results.get('reward_components'),
                 }
                 training_metrics['training_progress'].append(progress)
                 
@@ -220,6 +226,19 @@ class AppReinforcementLearning:
                 print(f"   Detection Loss: {results['detection_loss']:.4f}")
                 print(f"   Relationship Loss: {results['relationship_loss']:.4f}")
                 print(f"   Reward: {results['reward']:.4f}")
+                det_metrics = results.get('detection_metrics') or {}
+                rel_metrics = results.get('relationship_metrics') or {}
+                print(f"   Detection F1: {det_metrics.get('f1', 0.0):.4f} (P: {det_metrics.get('precision', 0.0):.4f}, R: {det_metrics.get('recall', 0.0):.4f})")
+                print(f"   Relationship F1: {rel_metrics.get('f1', 0.0):.4f} (P: {rel_metrics.get('precision', 0.0):.4f}, R: {rel_metrics.get('recall', 0.0):.4f}, Std: {rel_metrics.get('f1_std', 0.0):.4f})")
+                reward_breakdown = results.get('reward_components') or {}
+                if reward_breakdown:
+                    print(
+                        "   Reward Breakdown -> "
+                        f"Det F1: {reward_breakdown.get('detection_f1', 0.0):.3f}, "
+                        f"Rel F1: {reward_breakdown.get('relationship_f1', 0.0):.3f}, "
+                        f"Diversity: {reward_breakdown.get('diversity', 0.0):.3f}, "
+                        f"Consistency: {reward_breakdown.get('consistency', 0.0):.3f}"
+                    )
                 print(f"   Exploration Rate: {results['epsilon']:.4f}")
                 print(f"   Selected Action: {results.get('rl_action_index')} -> {results.get('rl_num_variations')} variations")
                 if results.get('rl_loss') is not None:
