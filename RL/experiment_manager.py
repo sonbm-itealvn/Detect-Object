@@ -115,11 +115,12 @@ class ExperimentManager:
                     "original_relationship": img_data.get('original_relationship', {}),
                     "is_mock": img_data.get('is_mock', False),
                     "epoch": epoch,
-                    "saved_time": datetime.datetime.now().isoformat()
+                    "saved_time": datetime.datetime.now().isoformat(),
+                    "path": filepath
                 }
-                
+
                 saved_images.append(image_metadata)
-                
+
             except Exception as e:
                 print(f"❌ Error saving image {i}: {e}")
                 continue
@@ -273,12 +274,16 @@ class ExperimentManager:
                 break
                 
             try:
-                # Hiển thị ảnh
-                if isinstance(img_data['image'], Image.Image):
-                    axes[i].imshow(img_data['image'])
+                image_obj = img_data.get('image')
+                if isinstance(image_obj, Image.Image):
+                    axes[i].imshow(image_obj)
                 else:
-                    # Nếu là array
-                    axes[i].imshow(np.array(img_data['image']))
+                    image_path = img_data.get('path') or img_data.get('image_path') or img_data.get('saved_path')
+                    if image_path and os.path.exists(image_path):
+                        with Image.open(image_path) as loaded_image:
+                            axes[i].imshow(loaded_image)
+                    else:
+                        axes[i].imshow(np.array(img_data.get('image_data', np.zeros((10, 10, 3), dtype=np.uint8))))
                 
                 # Thêm title với prompt ngắn
                 prompt = img_data.get('prompt', '')[:30] + '...' if len(img_data.get('prompt', '')) > 30 else img_data.get('prompt', '')

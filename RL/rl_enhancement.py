@@ -151,10 +151,24 @@ class AppReinforcementLearning:
                 # Generate AI images for this epoch
                 print(f"🎨 Generating AI images for epoch {epoch + 1}...")
                 ai_images = self.generate_ai_images_for_epoch(relationships, epoch, num_variations=num_variations)
-                training_metrics['ai_generated_images'].extend(ai_images)
-                
                 # Lưu ảnh AI vào experiment
-                self.experiment_manager.save_ai_images(ai_images, epoch + 1)
+                saved_ai_metadata = self.experiment_manager.save_ai_images(ai_images, epoch + 1) or []
+                for img_entry, meta in zip(ai_images, saved_ai_metadata):
+                    image_obj = img_entry.get('image')
+                    if hasattr(image_obj, 'close'):
+                        try:
+                            image_obj.close()
+                        except Exception:
+                            pass
+                    img_entry.pop('image', None)
+                    saved_path = meta.get('path')
+                    if saved_path:
+                        img_entry['image_path'] = saved_path
+                        img_entry['saved_path'] = saved_path
+                    img_entry.setdefault('saved_metadata', meta)
+                    if not img_entry.get('original_relationship') and meta.get('original_relationship'):
+                        img_entry['original_relationship'] = meta.get('original_relationship')
+                training_metrics['ai_generated_images'].extend(saved_ai_metadata)
                 
                 # Run training episode with pre-generated synthetic data
                 print(f"🧠 Starting actual RL training for epoch {epoch + 1}...")

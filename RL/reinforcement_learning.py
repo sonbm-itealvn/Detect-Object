@@ -1,4 +1,5 @@
 # File: reinforcement_learning.py
+import copy
 import torch
 from torch.optim import AdamW
 import torch.nn as nn
@@ -21,6 +22,7 @@ from ultralytics import YOLO
 
 import detect_objects as detection_pipeline
 
+from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
 from RL.model_manager import ModelManager
 from models import build_model
@@ -231,7 +233,7 @@ class RelationshipReinforcementLearning:
         if self.relationship_model is not None and self.reltr_criterion is not None:
             return self.relationship_model, self.reltr_criterion
 
-        args = self._build_reltr_args()
+        args = self.reltr_args if self.reltr_args is not None else self._build_reltr_args()
         model, criterion, postprocessors = build_model(args)
 
         checkpoint_path = self.data_paths.get('reltr_checkpoint')
@@ -496,6 +498,29 @@ class RelationshipReinforcementLearning:
             return None
         return matches[0][0]
 
+    def _build_relationship_from_original(
+        self,
+        objects: List[Dict[str, Any]],
+        original_relationship: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not original_relationship:
+            return []
+        subject_idx = self._find_object_index(objects, original_relationship.get('subject', ''))
+        object_idx = self._find_object_index(objects, original_relationship.get('object', ''))
+        relation = original_relationship.get('relation')
+        if subject_idx is None or object_idx is None or not relation:
+            return []
+        subject_label = objects[subject_idx].get('class', original_relationship.get('subject', 'unknown'))
+        object_label = objects[object_idx].get('class', original_relationship.get('object', 'unknown'))
+        confidence = float(original_relationship.get('confidence', 1.0))
+        return [{
+            'subject': subject_label,
+            'relation': relation,
+            'object': object_label,
+            'confidence': max(0.0, min(confidence, 1.0)),
+            'source': 'original',
+        }]
+
     def _build_reltr_target(
         self,
         sample: Dict[str, Any],
@@ -560,6 +585,36 @@ class RelationshipReinforcementLearning:
             return Image.fromarray(array)
         return None
 
+    def _ensure_synthetic_image_path(self, data: Dict[str, Any], index: int) -> Optional[str]:
+        path_candidate = data.get('image_path') or data.get('saved_path')
+        if path_candidate and os.path.exists(path_candidate):
+            return path_candidate
+
+        image_obj = data.get('image')
+        if not isinstance(image_obj, Image.Image):
+            return None
+
+        experiment_dir = Path(self.model_manager.current_experiment_dir or Path.cwd())
+        target_dir = experiment_dir / "synthetic_cache"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"synthetic_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{index:04d}.jpg"
+        output_path = target_dir / filename
+        try:
+            image_obj.save(output_path, format="JPEG", quality=95)
+        except Exception as exc:
+            print(f"[RL] Failed to persist synthetic image: {exc}")
+            return None
+
+        try:
+            image_obj.close()
+        except Exception:
+            pass
+
+        resolved = str(output_path)
+        data['image_path'] = resolved
+        data['saved_path'] = resolved
+        return resolved
+
     def _prepare_global_context_tensor(self, context_vector: Optional[List[float]]) -> Optional[torch.Tensor]:
         if not context_vector:
             return None
@@ -600,6 +655,7 @@ class RelationshipReinforcementLearning:
         image_tensor: torch.Tensor,
         objects: List[Dict[str, Any]],
         global_context: Optional[List[float]] = None,
+        image_size: Optional[Tuple[int, int]] = None,
     ) -> List[Dict[str, Any]]:
         if not objects:
             return []
@@ -613,7 +669,7 @@ class RelationshipReinforcementLearning:
                 outputs = model(samples, global_context=context_tensor)
             else:
                 outputs = model(samples)
-        return self._decode_relationships(outputs, objects)
+        return self._decode_relationships(outputs, objects, image_size=image_size)
 
     def _extract_objects_with_clip(self, image_path: str) -> Optional[Dict[str, Any]]:
         try:
@@ -661,6 +717,62 @@ class RelationshipReinforcementLearning:
         }
         return sample
 
+    def _ingest_synthetic_samples(self, synthetic_data: List[Dict[str, Any]]) -> int:
+        if not synthetic_data:
+            return 0
+
+        existing_paths = {
+            str(Path(sample.get('image_path')).resolve())
+            for sample in self.dataset_samples
+            if sample.get('image_path')
+        }
+        ingested = 0
+
+        for index, data in enumerate(synthetic_data):
+            image_path = self._ensure_synthetic_image_path(data, index)
+            if not image_path or not os.path.exists(image_path):
+                continue
+
+            resolved_path = str(Path(image_path).resolve())
+            if resolved_path in existing_paths:
+                continue
+
+            sample = self._extract_objects_with_clip(image_path)
+            if not sample:
+                continue
+
+            original_relationship = data.get('original_relationship')
+            relationships = self._build_relationship_from_original(sample['objects'], original_relationship)
+            if not relationships:
+                try:
+                    image_tensor = self._load_image_tensor(sample['image_path'])
+                    relationships = self._run_reltr_inference(
+                        image_tensor,
+                        sample['objects'],
+                        sample.get('global_context'),
+                        (sample['width'], sample['height']),
+                    )
+                except Exception as exc:
+                    print(f"[RL] RelTR inference failed for synthetic image {image_path}: {exc}")
+                    relationships = []
+
+            sample['relationships'] = relationships
+            sample['source'] = 'synthetic'
+            sample['prompt'] = data.get('prompt')
+            sample['original_relationship'] = original_relationship
+            sample['generation_timestamp'] = data.get('generation_timestamp')
+            sample['image_path'] = image_path
+
+            self.dataset_samples.append(sample)
+            existing_paths.add(resolved_path)
+            ingested += 1
+
+        if ingested:
+            self.detection_dataset_dir = None
+            self._save_dataset_snapshot()
+            print(f"[RL] Ingested {ingested} synthetic sample(s) into the training dataset.")
+        return ingested
+
     def build_dataset_from_directory(self, image_dir: str, clear_previous: bool = True) -> int:
         directory = Path(image_dir)
         if not directory.exists() or not directory.is_dir():
@@ -690,6 +802,7 @@ class RelationshipReinforcementLearning:
                     image_tensor,
                     sample['objects'],
                     sample.get('global_context'),
+                    (sample['width'], sample['height']),
                 )
                 sample['relationships'] = relationships
                 dataset.append(sample)
@@ -723,14 +836,87 @@ class RelationshipReinforcementLearning:
     def _move_target_to_device(self, target: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
         return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in target.items()}
 
-    def _decode_relationships(self, outputs: Dict[str, torch.Tensor], objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _decode_relationships(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        objects: List[Dict[str, Any]],
+        image_size: Optional[Tuple[int, int]] = None,
+    ) -> List[Dict[str, Any]]:
         rel_logits = outputs.get("rel_logits")
-        if rel_logits is None:
+        if rel_logits is None or rel_logits.numel() == 0:
             return []
 
-        rel_scores = rel_logits.softmax(-1)[0, :, :-1].detach().cpu()
+        try:
+            rel_scores = rel_logits.softmax(-1)[0, :, :-1].detach().cpu()
+        except Exception:
+            return []
         if rel_scores.numel() == 0:
             return []
+
+        relationships: List[Dict[str, Any]] = []
+        width: Optional[int] = None
+        height: Optional[int] = None
+        if image_size and len(image_size) == 2:
+            width, height = image_size
+
+        use_geometric = (
+            width is not None
+            and height is not None
+            and outputs.get("sub_boxes") is not None
+            and outputs.get("obj_boxes") is not None
+            and len(objects) >= 2
+        )
+
+        if use_geometric:
+            try:
+                object_boxes = torch.tensor(
+                    [obj.get('bbox', [0.0, 0.0, 0.0, 0.0]) for obj in objects],
+                    dtype=torch.float32,
+                )
+                if object_boxes.numel() > 0:
+                    scale = torch.tensor(
+                        [width, height, width, height],
+                        dtype=torch.float32,
+                    )
+                    sub_boxes = outputs['sub_boxes'][0].detach().cpu()
+                    obj_boxes = outputs['obj_boxes'][0].detach().cpu()
+                    sub_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(sub_boxes) * scale
+                    obj_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(obj_boxes) * scale
+                    min_iou = 0.05
+                    for idx in range(rel_scores.shape[0]):
+                        rel_vector = rel_scores[idx]
+                        rel_conf, rel_idx = rel_vector.max(dim=0)
+                        if rel_conf.item() <= 0.0:
+                            continue
+                        subj_iou_vals = box_ops.box_iou(
+                            sub_boxes_xyxy[idx].unsqueeze(0),
+                            object_boxes,
+                        )[0]
+                        obj_iou_vals = box_ops.box_iou(
+                            obj_boxes_xyxy[idx].unsqueeze(0),
+                            object_boxes,
+                        )[0]
+                        subj_iou, subj_idx = subj_iou_vals.max(dim=0)
+                        obj_iou, obj_idx = obj_iou_vals.max(dim=0)
+                        if subj_iou.item() < min_iou or obj_iou.item() < min_iou:
+                            continue
+                        relation_name = RELATION_CLASSES[int(rel_idx) % len(RELATION_CLASSES)]
+                        confidence = float(
+                            rel_conf.item()
+                            * max(subj_iou.item(), min_iou)
+                            * max(obj_iou.item(), min_iou)
+                        )
+                        relationships.append({
+                            'subject': objects[int(subj_idx)].get('class', 'unknown'),
+                            'relation': relation_name,
+                            'object': objects[int(obj_idx)].get('class', 'unknown'),
+                            'confidence': min(confidence, 1.0),
+                            'source': 'model',
+                        })
+                    if relationships:
+                        return relationships
+            except Exception as exc:
+                print(f"[RL] Geometric relationship decoding failed: {exc}")
 
         keep = rel_scores.max(-1).values > 0.4
         filtered = rel_scores[keep] if keep.any() else rel_scores
@@ -739,7 +925,6 @@ class RelationshipReinforcementLearning:
             filtered = rel_scores
             num_queries = filtered.shape[0]
 
-        relationships: List[Dict[str, Any]] = []
         pair_cursor = 0
         total_objects = len(objects)
         for i in range(total_objects):
@@ -755,6 +940,7 @@ class RelationshipReinforcementLearning:
                     'relation': relation_name,
                     'object': objects[j].get('class', 'unknown'),
                     'confidence': confidence,
+                    'source': 'model_fallback',
                 })
                 pair_cursor += 1
         return relationships
@@ -1076,9 +1262,15 @@ class RelationshipReinforcementLearning:
             print(f"Total synthetic data generated: {len(synthetic_data)} images")
         else:
             print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images (variations per relation: {action_variations})")
-        
+
+        ingested_count = self._ingest_synthetic_samples(synthetic_data)
+        if ingested_count == 0:
+            print("[RL] Warning: no synthetic samples ingested into the training dataset.")
+        else:
+            print(f"[RL] Dataset now contains {len(self.dataset_samples)} sample(s).")
+
         # 2. Train detection model
-        print("Step 2: 🧠 Training detection model...")
+        print("Step 2: \U0001f9e0 Training detection model...")
         detection_loss = self.train_detection_model(synthetic_data)
         print(f"    ✅ Detection loss: {detection_loss:.4f}")
         
@@ -1283,7 +1475,7 @@ class RelationshipReinforcementLearning:
     
     def predict_relationships(self, image):
         """Predict relationships from an input image using the fine-tuned RelTR model."""
-        model, _ = self._ensure_relationship_model()
+        self._ensure_relationship_model()
         pil_image = self._ensure_pil_image(image)
         if pil_image is None:
             print("[RL] Unsupported image input for relationship prediction.")
@@ -1295,16 +1487,12 @@ class RelationshipReinforcementLearning:
             return []
 
         image_tensor = self.reltr_transform(pil_image)
-        samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
-        context_tensor = self._prepare_global_context_tensor(global_context)
-
-        model.eval()
-        with torch.no_grad():
-            if context_tensor is not None:
-                outputs = model(samples, global_context=context_tensor)
-            else:
-                outputs = model(samples)
-        return self._decode_relationships(outputs, detection_objects)
+        return self._run_reltr_inference(
+            image_tensor,
+            detection_objects,
+            global_context,
+            image_size=pil_image.size,
+        )
     
     def calculate_diversity_reward(self, synthetic_data):
         """Calculate diversity reward based on synthetic data variety"""
@@ -1336,98 +1524,158 @@ class RelationshipReinforcementLearning:
             std = math.sqrt(variance)
         return max(0.0, 1.0 - min(std, 1.0))
     
+    @staticmethod
+    def _optimizer_state_to_cpu(state_dict: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not state_dict:
+            return None
+        cpu_state = copy.deepcopy(state_dict)
+        for state in cpu_state.get('state', {}).values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.detach().cpu()
+        return cpu_state
+
     def save_model_state(self, reward, detection_loss, relationship_loss):
-        """Lưu trạng thái model khi có kết quả tốt"""
+        """Persist the current model and optimizer states when an improvement is achieved."""
         if not self.model_manager.current_experiment_dir:
             print("WARNING: No experiment directory set, cannot save model state")
             return
         
         try:
-            # Tạo model state (trong thực tế sẽ là actual model weights)
+            detection_state = None
+            if self.detection_model is not None and hasattr(self.detection_model, "model"):
+                detection_state = {
+                    key: value.detach().cpu() if torch.is_tensor(value) else value
+                    for key, value in self.detection_model.model.state_dict().items()
+                }
+
+            relationship_state = None
+            if self.relationship_model is not None:
+                relationship_state = {
+                    key: value.detach().cpu() if torch.is_tensor(value) else value
+                    for key, value in self.relationship_model.state_dict().items()
+                }
+
+            q_network_state = {
+                key: value.detach().cpu() if torch.is_tensor(value) else value
+                for key, value in self.q_network.state_dict().items()
+            }
+            target_network_state = {
+                key: value.detach().cpu() if torch.is_tensor(value) else value
+                for key, value in self.target_network.state_dict().items()
+            }
+
+            q_optimizer_state = self._optimizer_state_to_cpu(self.q_optimizer.state_dict())
+            reltr_optimizer_state = self._optimizer_state_to_cpu(
+                self.reltr_optimizer.state_dict() if self.reltr_optimizer is not None else None
+            )
+
+            reltr_args_payload = vars(self.reltr_args) if isinstance(self.reltr_args, SimpleNamespace) else self.reltr_args
+
             model_state = {
                 'epsilon': self.epsilon,
                 'reward': reward,
                 'detection_loss': detection_loss,
                 'relationship_loss': relationship_loss,
                 'training_step': len(self.training_history['epochs']),
-                'model_weights': self.create_mock_model_weights(),  # Mock weights
-                'optimizer_state': self.create_mock_optimizer_state()  # Mock optimizer state
+                'timestamp': datetime.datetime.now().isoformat(),
+                'detection_model_state': detection_state,
+                'relationship_model_state': relationship_state,
+                'q_network_state': q_network_state,
+                'target_network_state': target_network_state,
+                'q_optimizer_state': q_optimizer_state,
+                'reltr_optimizer_state': reltr_optimizer_state,
+                'reltr_args': reltr_args_payload,
+                'dataset_size': len(self.dataset_samples),
+                'training_history': self.training_history,
             }
-            
-            # Lưu detection model state
-            self.model_manager.save_model_state(
-                'detection_model',
-                model_state,
-                epoch=len(self.training_history['epochs']),
-                metadata={
-                    'reward': reward,
-                    'detection_loss': detection_loss,
-                    'relationship_loss': relationship_loss,
-                    'epsilon': self.epsilon
-                }
-            )
-            
-            # Lưu relationship model state
-            self.model_manager.save_model_state(
-                'relationship_model',
-                model_state,
-                epoch=len(self.training_history['epochs']),
-                metadata={
-                    'reward': reward,
-                    'detection_loss': detection_loss,
-                    'relationship_loss': relationship_loss,
-                    'epsilon': self.epsilon
-                }
-            )
-            
-            # Lưu training history
+
+            metadata = {
+                'reward': reward,
+                'detection_loss': detection_loss,
+                'relationship_loss': relationship_loss,
+                'epsilon': self.epsilon,
+                'dataset_size': len(self.dataset_samples),
+            }
+            epoch_index = len(self.training_history['epochs'])
+
+            self.model_manager.save_model_state('detection_model', model_state, epoch=epoch_index, metadata=metadata)
+            self.model_manager.save_model_state('relationship_model', model_state, epoch=epoch_index, metadata=metadata)
+
             self.model_manager.save_training_history(self.training_history)
-            
+            self._save_dataset_snapshot()
+
             print(f"Saved model state (reward: {reward:.4f})")
-            
+
         except Exception as e:
             print(f"ERROR saving model state: {e}")
     
     def load_model_state(self, model_name='detection_model', experiment_dir=None):
-        """Load trạng thái model từ checkpoint"""
+        """Load model and optimizer states from a saved checkpoint."""
         try:
             checkpoint = self.model_manager.load_model_state(model_name, experiment_dir)
-            if checkpoint:
-                # Restore model state
-                self.epsilon = checkpoint['model_state'].get('epsilon', self.epsilon)
-                
-                # Restore training history
-                if 'training_history' in checkpoint:
-                    self.training_history = checkpoint['training_history']
-                
-                print(f"Loaded model state from {model_name}")
-                return True
-            else:
+            if not checkpoint:
                 print(f"No checkpoint found for {model_name}")
                 return False
-                
+
+            model_state = checkpoint.get('model_state', {})
+            if not model_state:
+                print(f"[RL] Checkpoint for {model_name} is missing model state information.")
+                return False
+
+            reltr_args_payload = model_state.get('reltr_args')
+            if reltr_args_payload:
+                if isinstance(reltr_args_payload, dict):
+                    self.reltr_args = SimpleNamespace(**reltr_args_payload)
+                elif isinstance(reltr_args_payload, SimpleNamespace):
+                    self.reltr_args = reltr_args_payload
+
+            detection_state = model_state.get('detection_model_state')
+            if detection_state:
+                detection_model = self._ensure_detection_model()
+                if hasattr(detection_model, "model"):
+                    detection_model.model.load_state_dict(detection_state, strict=False)
+
+            relationship_state = model_state.get('relationship_model_state')
+            if relationship_state:
+                model, _ = self._ensure_relationship_model()
+                model.load_state_dict(relationship_state, strict=False)
+
+            q_state = model_state.get('q_network_state')
+            if q_state:
+                self.q_network.load_state_dict(q_state, strict=False)
+
+            target_state = model_state.get('target_network_state')
+            if target_state:
+                self.target_network.load_state_dict(target_state, strict=False)
+
+            q_optimizer_state = model_state.get('q_optimizer_state')
+            if q_optimizer_state:
+                self.q_optimizer.load_state_dict(q_optimizer_state)
+
+            reltr_optimizer_state = model_state.get('reltr_optimizer_state')
+            if reltr_optimizer_state:
+                if self.reltr_optimizer is None:
+                    self.reltr_optimizer = AdamW(
+                        (param for param in self.relationship_model.parameters() if param.requires_grad),
+                        lr=1e-5,
+                        weight_decay=1e-4,
+                    )
+                self.reltr_optimizer.load_state_dict(reltr_optimizer_state)
+
+            self.epsilon = model_state.get('epsilon', self.epsilon)
+
+            if 'training_history' in checkpoint:
+                self.training_history = checkpoint['training_history']
+            elif 'training_history' in model_state:
+                self.training_history = model_state['training_history']
+
+            print(f"Loaded model state from {model_name}")
+            return True
+
         except Exception as e:
             print(f"ERROR loading model state: {e}")
             return False
-    
-    def create_mock_model_weights(self):
-        """Tạo mock model weights (trong thực tế sẽ là actual weights)"""
-        return {
-            'layer1_weight': np.random.randn(10, 10).tolist(),
-            'layer1_bias': np.random.randn(10).tolist(),
-            'layer2_weight': np.random.randn(5, 10).tolist(),
-            'layer2_bias': np.random.randn(5).tolist(),
-            'timestamp': datetime.datetime.now().isoformat()
-        }
-    
-    def create_mock_optimizer_state(self):
-        """Tạo mock optimizer state"""
-        return {
-            'step': len(self.training_history['epochs']),
-            'learning_rate': 0.001,
-            'momentum': 0.9,
-            'timestamp': datetime.datetime.now().isoformat()
-        }
     
     def get_best_model(self, metric='reward'):
         """Lấy model tốt nhất"""
