@@ -1,3 +1,5 @@
+import os
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import json
@@ -8,11 +10,29 @@ import sys
 import numpy as np
 from PIL import Image
 from ultralytics import YOLO
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 import tkinter as tk
 from tkinter import filedialog
 
-yolo_model = YOLO(r"D:\DocCument\DATN\test\yolov5\yolov5xu.pt")
+def _resolve_yolo_weights() -> str:
+    """Return a usable path to YOLO weights, preferring environment override."""
+    env_path = os.getenv("YOLO_WEIGHTS_PATH")
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if candidate.exists():
+            return str(candidate)
+        print(f"[detect_objects] Warning: YOLO_WEIGHTS_PATH '{env_path}' does not exist, falling back.")
+
+    default_path = Path(__file__).resolve().parent / "yolov5xu.pt"
+    if default_path.exists():
+        return str(default_path)
+
+    raise FileNotFoundError(
+        "YOLO weights not found. Set YOLO_WEIGHTS_PATH or place 'yolov5xu.pt' in the project directory."
+    )
+
+
+yolo_model = YOLO(_resolve_yolo_weights())
 
 # Backbone feature capture for RoIAlign descriptors
 _BACKBONE_LAYER_INDEX = 9  # SPPF layer index inside YOLO backbone
@@ -253,9 +273,9 @@ def run_pipeline(image_path=None):
         image_path = filedialog.askopenfilename(title="Chọn file ảnh", filetypes=[("Image files", "*.jpg *.jpeg *.png")])
         if not image_path:
             print("❌ Không có file nào được chọn!")
-            return
+            return {}
 
-    detected_objects, yolo_labels, original_image, feature_map, _ = detect_objects(image_path)
+    detected_objects, yolo_labels, original_image, feature_map, global_context = detect_objects(image_path)
     classified_results = classify_with_clip(detected_objects, yolo_labels)
 
     boxes = [bbox for _, bbox in classified_results]
@@ -280,13 +300,20 @@ def run_pipeline(image_path=None):
         if feature_vector:
             feature_vector = [float(v) for v in feature_vector]
         results_json.append({"label": label, "bbox": [int(x1), int(y1), int(x2), int(y2)], "feature": feature_vector})
-        print(f"✅ Đối tượng {idx+1} | Class: {label} | BBox: [{x1}, {y1}, {x2}, {y2}]")
+        print(f"�o. Đối tượng {idx+1} | Class: {label} | BBox: [{x1}, {y1}, {x2}, {y2}]")
 
-    with open("result.json", "w") as json_file:
-        json.dump(results_json, json_file, indent=4)
+    results_payload = {
+        "image_path": str(image_path),
+        "objects": results_json,
+        "global_context": [float(v) for v in (global_context or [])],
+    }
+
+    with open("result.json", "w", encoding="utf-8") as json_file:
+        json.dump(results_payload, json_file, indent=4)
 
     cv2.imwrite("result.jpg", original_image)
     print("✅ Nhận diện hoàn tất! Kết quả đã lưu.")
+    return results_payload
 
 if __name__ == "__main__":
     image_path = sys.argv[1] if len(sys.argv) > 1 else None

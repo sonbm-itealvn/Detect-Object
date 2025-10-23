@@ -8,29 +8,33 @@ import argparse
 from PIL import Image
 import torchvision.transforms as T
 from models import build_model
-import detect_objects as detection_pipeline
+from pathlib import Path
 
 def load_yolo_output(json_path):
-    """Load object detection results from YOLOv5 JSON output."""
-    with open(json_path, 'r') as f:
+    """Load object detection results from YOLO JSON output, preserving metadata."""
+    with open(json_path, 'r', encoding='utf-8') as f:
         yolo_data = json.load(f)
 
-    all_objects = []  # Danh sch cha tt c cc i tng sau khi x l
-
+    entries = []
     for image_entry in yolo_data:
-        image_id = image_entry.get("image_id", "unknown")  # Ly tn nh, nu thiu th gn 'unknown'
-        objects_list = image_entry.get("objects", [])  # Ly danh sch objects, nu khng c th gn []
+        image_id = image_entry.get("image_id", "unknown")
+        objects_list = image_entry.get("objects", [])
+        image_path = image_entry.get("image_path", "")
+        global_context = image_entry.get("global_context", [])
 
-        print(f"Processing image: {image_id}")  # Debug
-
-        # Nu khng c objects, tip tc vng lp
+        print(f"Processing image: {image_id}")
         if not objects_list:
             print(f"LI: Khng c objects trong nh {image_id}")
             continue
 
-        all_objects.append((image_id, objects_list))  # Lu danh sch objects cng vi image_id
+        entries.append({
+            "image_id": image_id,
+            "image_path": image_path,
+            "objects": objects_list,
+            "global_context": global_context,
+        })
 
-    return all_objects
+    return entries
 
 def convert_yolo_to_reltr(objects_list, img_size):
     """Convert YOLO bounding boxes to RelTR format (normalized cx, cy, w, h)."""
@@ -60,7 +64,7 @@ def convert_yolo_to_reltr(objects_list, img_size):
         })
     return objects
 
-def run_reltr_inference(objects, img_path, args, output_json="relationships.json"):
+def run_reltr_inference(objects, img_path, args, global_context=None, output_json="relationships.json"):
     """Run RelTR to infer relationships between detected objects and save results to a JSON file."""
     if len(objects) < 2:
         print("Lu : Khng  vt th  d on quan h!")
@@ -97,19 +101,14 @@ def run_reltr_inference(objects, img_path, args, output_json="relationships.json
         roi_feature_tensor = torch.tensor(feature_matrix, device=device, dtype=torch.float32)
         roi_feature_tensor = F.normalize(roi_feature_tensor, p=2, dim=1)
 
-
     img = Image.open(img_path)
     img_tensor = transform(img).unsqueeze(0)
 
     context_tensor = None
-    try:
-        _, _, _, _, global_context = detection_pipeline.detect_objects(img_path)
-        if global_context:
-            context_tensor = torch.tensor(global_context, dtype=torch.float32, device=device)
-            if context_tensor.ndim == 1:
-                context_tensor = context_tensor.unsqueeze(0)
-    except Exception as exc:
-        print(f"[RelTR] Unable to retrieve global context for {img_path}: {exc}")
+    if global_context:
+        context_tensor = torch.tensor(global_context, dtype=torch.float32, device=device)
+        if context_tensor.ndim == 1:
+            context_tensor = context_tensor.unsqueeze(0)
 
     with torch.no_grad():
         if context_tensor is not None:
@@ -155,8 +154,7 @@ def run_reltr_inference(objects, img_path, args, output_json="relationships.json
             relationships.append(relation_entry)
             pair_cursor += 1
     
-    # Lọc mối quan hệ theo ngưỡng trước khi lưu file
-    threshold = 0.5  # Ngưỡng lọc mối quan hệ
+    threshold = 0.5
     filtered_relationships = []
     for rel in relationships:
         similarity = rel.get("visual_similarity", 0)
@@ -165,7 +163,6 @@ def run_reltr_inference(objects, img_path, args, output_json="relationships.json
     
     print(f"📊 Lọc mối quan hệ: {len(filtered_relationships)}/{len(relationships)} đạt ngưỡng {threshold}")
     
-    # Ghi kết quả đã lọc ra file JSON
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(filtered_relationships, f, indent=4, ensure_ascii=False)
 
@@ -218,11 +215,10 @@ def draw_relationships(image_path, objects_list, relationships, output_path=None
 
 def main():
     parser = argparse.ArgumentParser('YOLO-RelTR Pipeline')
-    parser.add_argument('--yolo_json', type=str, default='bboxes_for_reltr.json', help='Path to YOLOv5 JSON output')
+    parser.add_argument('--yolo_json', type=str, default='bboxes_for_reltr.json', help='Path to YOLO JSON output')
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--dataset', default='vg', type=str, help='Dataset type (vg or oi)')
-    parser.add_argument('--img_path', type=str, required=True, help='Path to input image')  #  Thm ng dn nh t `app.py`
-
+    parser.add_argument('--img_path', type=str, required=False, help='Fallback path to input image')
 
     # * Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -272,60 +268,64 @@ def main():
     parser.add_argument('--eos_coef', default=0.1, type=float,
                         help="Relative classification weight of the no-object class")
 
-
     # distributed training parameters
     parser.add_argument('--return_interm_layers', action='store_true',
                         help="Return the fpn if there is the tag")
 
     args = parser.parse_args()
 
-     # Kim tra file JSON u vo
     if not os.path.exists(args.yolo_json):
         print(f" Khng tm thy file JSON: {args.yolo_json}")
         return
 
-    print(f" S dng file JSON: {args.yolo_json}")
-
-    # Kim tra checkpoint c tn ti khng
     if not os.path.exists(args.resume):
         print(f" Khng tm thy checkpoint: {args.resume}")
         return
 
-    print(f" S dng checkpoint: {args.resume}")
-
-      # Kim tra nh u vo
-    if not os.path.exists(args.img_path):
-        print(f" Khng tm thy nh: {args.img_path}")
+    if args.img_path and not os.path.exists(args.img_path):
+        print(f" Khng tm thy nh fallback: {args.img_path}")
         return
 
-    # c file JSON
-    with open(args.yolo_json, "r") as file:
-        yolo_data = json.load(file)
-
-    print(f" c thnh cng {len(yolo_data[0]['objects'])} i tng t {args.yolo_json}")
-
-    
     yolo_data = load_yolo_output(args.yolo_json)
-    
-    all_relationships = {}  # Dictionary  lu kt qu ca tng nh
 
-    for image_id, objects_list in yolo_data:
-        img = Image.open(args.img_path)  #  Load nh t `app.py`
-        objects = convert_yolo_to_reltr(objects_list, img.size)  # Chuyn i format
+    if not yolo_data:
+        print("⚠️ Không có dữ liệu hợp lệ trong JSON đầu vào.")
+        return
+
+    all_relationships = {}
+
+    for entry in yolo_data:
+        image_id = entry['image_id']
+        objects_list = entry['objects']
+        image_path = entry.get('image_path') or args.img_path
+
+        if not image_path:
+            print(f"⚠️ Bỏ qua {image_id}: thiếu đường dẫn ảnh.")
+            continue
+        if not os.path.exists(image_path):
+            print(f"⚠️ Bỏ qua {image_id}: đường dẫn ảnh không tồn tại ({image_path}).")
+            continue
+
+        img = Image.open(image_path)
+        objects = convert_yolo_to_reltr(objects_list, img.size)
 
         if len(objects) < 2:
-            print(f"Lu : nh {image_id} c {len(objects)} vt th, b qua!")  
-            continue  # B qua nh ny nu khng c  vt th
+            print(f"Lu : nh {image_id} c {len(objects)} vt th, b qua!")
+            continue
 
-        relationships = run_reltr_inference(objects, args.img_path, args)  # Chy RelTR
+        relationships = run_reltr_inference(
+            objects,
+            image_path,
+            args,
+            global_context=entry.get('global_context'),
+        )
         all_relationships[image_id] = relationships
 
-        image_id = os.path.splitext(os.path.basename(args.img_path))[0]  # Xa phn m rng .jpg
-        output_path = f"output_{image_id}.jpg"
-        draw_relationships(args.img_path, objects_list, relationships, output_path)
+        output_path = f"output_{Path(image_path).stem}.jpg"
+        draw_relationships(image_path, objects_list, relationships, output_path)
 
-    
-    print(json.dumps(all_relationships, indent=2))
+    print(json.dumps(all_relationships, indent=2, ensure_ascii=False))
+
 
 if __name__ == '__main__':
     main()

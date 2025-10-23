@@ -289,10 +289,12 @@ class RelationshipReinforcementLearning:
             normalized_objects.append(new_obj)
 
         relationships = []
-        try:
-            _, _, _, _, global_context = detection_pipeline.detect_objects(image_path)
-        except Exception:
-            global_context = []
+        global_context = detection_data[0].get('global_context', [])
+        if not global_context:
+            try:
+                _, _, _, _, global_context = detection_pipeline.detect_objects(image_path)
+            except Exception:
+                global_context = []
         if relationships_path and os.path.exists(relationships_path):
             with open(relationships_path, 'r', encoding='utf-8') as f:
                 relationships = json.load(f)

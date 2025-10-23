@@ -1,64 +1,85 @@
 import json
 import sys
 import os
+from pathlib import Path
+
+
+def _normalize_entry(entry):
+    label = (entry.get('label') or entry.get('class') or '').strip()
+    bbox = entry.get('bbox', [])
+    feature = entry.get('feature', [])
+    return label, bbox, feature
+
 
 def convert_yolo_to_reltr(input_json="result.json", output_json="converted_bboxes.json"):
-    # Kiểm tra file đầu vào có tồn tại không
     if not os.path.exists(input_json):
         print(f"❌ Không tìm thấy file JSON: {input_json}")
         return
 
-    # Đọc dữ liệu từ result.json
     try:
-        with open(input_json, 'r') as file:
+        with open(input_json, 'r', encoding='utf-8') as file:
             result_data = json.load(file)
-    except json.JSONDecodeError as e:
-        print(f"❌ Lỗi đọc file JSON: {e}")
+    except json.JSONDecodeError as exc:
+        print(f"❌ Lỗi đọc file JSON: {exc}")
         return
 
-    # Khởi tạo cấu trúc dữ liệu mới
-    data_output = [{
-        "image_id": "result_image.jpg",
-        "objects": []
-    }]
+    entries = []
+    if isinstance(result_data, dict):
+        entries = [result_data]
+    elif isinstance(result_data, list):
+        entries = [item for item in result_data if isinstance(item, dict)]
 
-    # Chuyển đổi từng đối tượng
-    for idx, item in enumerate(result_data):
-        try:
-            label = item.get('label', '').strip()
-            bbox = item.get('bbox', [])
+    if not entries:
+        print("⚠️ Không có dữ liệu hợp lệ để chuyển đổi.")
+        return
 
-            # Kiểm tra tính hợp lệ của nhãn và bbox
+    converted: list[dict] = []
+    for entry_index, entry in enumerate(entries):
+        raw_objects = entry.get('objects') or []
+        if not raw_objects:
+            print(f"⚠️ Bỏ qua entry {entry_index + 1}: không có đối tượng nào.")
+            continue
+
+        converted_objects = []
+        for obj_index, obj in enumerate(raw_objects, start=1):
+            label, bbox, feature = _normalize_entry(obj)
             if not label:
-                print(f"⚠️ Cảnh báo: Đối tượng thứ {idx+1} thiếu nhãn, bỏ qua.")
+                print(f"⚠️ Đối tượng {obj_index} thiếu nhãn, bỏ qua.")
                 continue
-
             if len(bbox) != 4 or not all(isinstance(x, (int, float)) for x in bbox):
-                print(f"⚠️ Cảnh báo: Bbox của đối tượng '{label}' không hợp lệ, bỏ qua.")
+                print(f"⚠️ BBox của '{label}' không hợp lệ, bỏ qua.")
                 continue
-
-            # Thêm đối tượng hợp lệ vào danh sách output
-            data_output[0]["objects"].append({
+            converted_objects.append({
                 "class": label,
                 "bbox": bbox,
-                "feature": item.get("feature", [])
+                "feature": feature,
             })
-        
-        except Exception as e:
-            print(f"❌ Lỗi xử lý đối tượng thứ {idx+1}: {e}")
 
-    # Kiểm tra nếu không có đối tượng hợp lệ nào
-    if not data_output[0]["objects"]:
-        print("❌ Không có đối tượng nào hợp lệ để lưu.")
+        if not converted_objects:
+            print(f"⚠️ Entry {entry_index + 1} không có đối tượng hợp lệ để lưu.")
+            continue
+
+        image_path = entry.get('image_path') or ''
+        image_name = Path(image_path).name if image_path else f"image_{entry_index + 1}.jpg"
+
+        converted.append({
+            "image_id": image_name,
+            "image_path": image_path,
+            "objects": converted_objects,
+            "global_context": entry.get('global_context', []),
+        })
+
+    if not converted:
+        print("⚠️ Không có entry nào được ghi ra file.")
         return
 
-    # Ghi dữ liệu ra file mới
-    with open(output_json, 'w') as output_file:
-        json.dump(data_output, output_file, indent=4)
+    with open(output_json, 'w', encoding='utf-8') as output_file:
+        json.dump(converted, output_file, indent=4)
 
-    print(f"Done. Data converted to RelTR format and saved to {output_json}")
+    print(f"✅ Đã lưu dữ liệu chuyển đổi vào {output_json}")
+
 
 if __name__ == "__main__":
-    # Nếu có tham số dòng lệnh, sử dụng file JSON từ đối số
     input_json = sys.argv[1] if len(sys.argv) > 1 else "result.json"
-    convert_yolo_to_reltr(input_json)
+    output_json = sys.argv[2] if len(sys.argv) > 2 else "converted_bboxes.json"
+    convert_yolo_to_reltr(input_json, output_json)
