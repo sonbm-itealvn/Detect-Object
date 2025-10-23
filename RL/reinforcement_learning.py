@@ -289,6 +289,10 @@ class RelationshipReinforcementLearning:
             normalized_objects.append(new_obj)
 
         relationships = []
+        try:
+            _, _, _, _, global_context = detection_pipeline.detect_objects(image_path)
+        except Exception:
+            global_context = []
         if relationships_path and os.path.exists(relationships_path):
             with open(relationships_path, 'r', encoding='utf-8') as f:
                 relationships = json.load(f)
@@ -299,6 +303,7 @@ class RelationshipReinforcementLearning:
             'height': height,
             'objects': normalized_objects,
             'relationships': relationships,
+            'global_context': global_context,
         }
 
     def _match_detection_label(self, class_name: str, names_map: Dict[int, str]) -> Optional[int]:
@@ -553,8 +558,20 @@ class RelationshipReinforcementLearning:
             return Image.fromarray(array)
         return None
 
-    def _detect_objects_for_image(self, pil_image: Image.Image) -> List[Dict[str, Any]]:
+    def _prepare_global_context_tensor(self, context_vector: Optional[List[float]]) -> Optional[torch.Tensor]:
+        if not context_vector:
+            return None
+        tensor = torch.tensor(context_vector, dtype=torch.float32, device=self.reltr_device)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        return tensor
+
+    def _detect_objects_for_image(self, pil_image: Image.Image) -> Tuple[List[Dict[str, Any]], Optional[List[float]]]:
         detection_model = self._ensure_detection_model()
+        try:
+            _, _, _, _, global_context = detection_pipeline.detect_objects(pil_image)
+        except Exception:
+            global_context = []
         results = detection_model.predict(
             pil_image,
             imgsz=640,
@@ -563,7 +580,7 @@ class RelationshipReinforcementLearning:
             device=self.detection_device,
         )
         if not results:
-            return []
+            return [], global_context
         result = results[0]
         names_map = detection_model.model.names if hasattr(detection_model.model, "names") else detection_model.names
         boxes_xyxy = result.boxes.xyxy.cpu().numpy()
@@ -574,22 +591,31 @@ class RelationshipReinforcementLearning:
                 'bbox': bbox.tolist(),
                 'class': names_map[int(cls_id)],
             })
-        return objects
+        return objects, global_context
 
-    def _run_reltr_inference(self, image_tensor: torch.Tensor, objects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _run_reltr_inference(
+        self,
+        image_tensor: torch.Tensor,
+        objects: List[Dict[str, Any]],
+        global_context: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
         if not objects:
             return []
 
         model, _ = self._ensure_relationship_model()
         samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
+        context_tensor = self._prepare_global_context_tensor(global_context)
         model.eval()
         with torch.no_grad():
-            outputs = model(samples)
+            if context_tensor is not None:
+                outputs = model(samples, global_context=context_tensor)
+            else:
+                outputs = model(samples)
         return self._decode_relationships(outputs, objects)
 
     def _extract_objects_with_clip(self, image_path: str) -> Optional[Dict[str, Any]]:
         try:
-            detected_objects, yolo_labels, original_image, feature_map = detection_pipeline.detect_objects(image_path)
+            detected_objects, yolo_labels, original_image, feature_map, global_context = detection_pipeline.detect_objects(image_path)
         except Exception as exc:
             print(f"[RL] Detection failed for {image_path}: {exc}")
             return None
@@ -629,6 +655,7 @@ class RelationshipReinforcementLearning:
             'width': width,
             'height': height,
             'objects': objects,
+            'global_context': global_context,
         }
         return sample
 
@@ -657,7 +684,11 @@ class RelationshipReinforcementLearning:
                     continue
 
                 image_tensor = self._load_image_tensor(sample['image_path'])
-                relationships = self._run_reltr_inference(image_tensor, sample['objects'])
+                relationships = self._run_reltr_inference(
+                    image_tensor,
+                    sample['objects'],
+                    sample.get('global_context'),
+                )
                 sample['relationships'] = relationships
                 dataset.append(sample)
                 print(f"[RL] Processed image {idx}/{len(image_paths)}: {image_path.name} "
@@ -672,19 +703,19 @@ class RelationshipReinforcementLearning:
             self._save_dataset_snapshot()
         return len(self.dataset_samples)
 
-    def _prepare_reltr_training_samples(self) -> List[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
+    def _prepare_reltr_training_samples(self) -> List[Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[List[float]]]]:
         if not self.dataset_samples:
             fallback = self._load_original_detection_and_relationships()
             if fallback:
                 self.dataset_samples = [fallback]
 
-        prepared: List[Tuple[torch.Tensor, Dict[str, torch.Tensor]]] = []
+        prepared: List[Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[List[float]]]] = []
         for sample in self.dataset_samples:
             target = self._build_reltr_target(sample)
             if target is None:
                 continue
             image_tensor = self._load_image_tensor(sample['image_path'])
-            prepared.append((image_tensor, target))
+            prepared.append((image_tensor, target, sample.get('global_context')))
         return prepared
 
     def _move_target_to_device(self, target: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
@@ -890,7 +921,7 @@ class RelationshipReinforcementLearning:
                 continue
 
             try:
-                predictions = self._detect_objects_for_image(pil_image)
+                predictions, _ = self._detect_objects_for_image(pil_image)
             except Exception as exc:
                 print(f"[RL] Detection evaluation failed for {sample.get('image_path')}: {exc}")
                 continue
@@ -1225,11 +1256,15 @@ class RelationshipReinforcementLearning:
         optimizer.zero_grad()
         total_loss = 0.0
 
-        for image_tensor, target in prepared_samples:
+        for image_tensor, target, global_context in prepared_samples:
             samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
             targets = [self._move_target_to_device(target, self.reltr_device)]
 
-            outputs = model(samples)
+            context_tensor = self._prepare_global_context_tensor(global_context)
+            if context_tensor is not None:
+                outputs = model(samples, global_context=context_tensor)
+            else:
+                outputs = model(samples)
             loss_dict = criterion(outputs, targets)
             weight_dict = criterion.weight_dict
             loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
@@ -1252,17 +1287,21 @@ class RelationshipReinforcementLearning:
             print("[RL] Unsupported image input for relationship prediction.")
             return []
 
-        detection_objects = self._detect_objects_for_image(pil_image)
+        detection_objects, global_context = self._detect_objects_for_image(pil_image)
         if not detection_objects:
             print("[RL] No objects detected; skipping relationship prediction.")
             return []
 
         image_tensor = self.reltr_transform(pil_image)
         samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
+        context_tensor = self._prepare_global_context_tensor(global_context)
 
         model.eval()
         with torch.no_grad():
-            outputs = model(samples)
+            if context_tensor is not None:
+                outputs = model(samples, global_context=context_tensor)
+            else:
+                outputs = model(samples)
         return self._decode_relationships(outputs, detection_objects)
     
     def calculate_diversity_reward(self, synthetic_data):

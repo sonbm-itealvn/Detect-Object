@@ -4,6 +4,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from typing import Optional
 from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
@@ -37,6 +38,7 @@ class RelTR(nn.Module):
         self.entity_embed = nn.Embedding(num_entities, hidden_dim*2)
         self.triplet_embed = nn.Embedding(num_triplets, hidden_dim*3)
         self.so_embed = nn.Embedding(2, hidden_dim) # subject and object encoding
+        self.context_proj: Optional[nn.Linear] = None
 
         # entity prediction
         self.entity_class_embed = nn.Linear(hidden_dim, num_classes + 1)
@@ -65,7 +67,7 @@ class RelTR(nn.Module):
         self.obj_bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
 
 
-    def forward(self, samples: NestedTensor):
+    def forward(self, samples: NestedTensor, global_context: Optional[torch.Tensor] = None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -98,6 +100,9 @@ class RelTR(nn.Module):
         so_masks = self.so_mask_fc(so_masks)
 
         hs_sub, hs_obj = torch.split(hs_t, self.hidden_dim, dim=-1)
+        batch_size, num_queries = hs_sub.shape[1], hs_sub.shape[2]
+        context_features = self._prepare_context_features(global_context, batch_size, hs_sub)
+        context_expand = context_features.unsqueeze(0).unsqueeze(2).expand(hs_sub.shape[0], batch_size, num_queries, self.hidden_dim)
 
         outputs_class = self.entity_class_embed(hs)
         outputs_coord = self.entity_bbox_embed(hs).sigmoid()
@@ -108,7 +113,10 @@ class RelTR(nn.Module):
         outputs_class_obj = self.obj_class_embed(hs_obj)
         outputs_coord_obj = self.obj_bbox_embed(hs_obj).sigmoid()
 
-        outputs_class_rel = self.rel_class_embed(torch.cat((hs_sub, hs_obj, so_masks), dim=-1))
+        rel_sub = hs_sub + context_expand
+        rel_obj = hs_obj + context_expand
+        rel_repr = torch.cat((rel_sub, rel_obj, so_masks), dim=-1)
+        outputs_class_rel = self.rel_class_embed(rel_repr)
 
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1],
                'sub_logits': outputs_class_sub[-1], 'sub_boxes': outputs_coord_sub[-1],
@@ -118,6 +126,35 @@ class RelTR(nn.Module):
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, outputs_class_sub, outputs_coord_sub,
                                                     outputs_class_obj, outputs_coord_obj, outputs_class_rel)
         return out
+
+    def _prepare_context_features(self, global_context: Optional[torch.Tensor], batch_size: int, reference: torch.Tensor) -> torch.Tensor:
+        device = reference.device
+        dtype = reference.dtype
+        if global_context is None:
+            return reference.new_zeros((batch_size, self.hidden_dim))
+        if not isinstance(global_context, torch.Tensor):
+            global_context = torch.as_tensor(global_context, device=device, dtype=dtype)
+        if global_context.dim() == 1:
+            global_context = global_context.unsqueeze(0)
+        global_context = global_context.to(device=device, dtype=dtype)
+        projected = self._project_context(global_context, device)
+        if projected.shape[0] == 1 and batch_size > 1:
+            projected = projected.expand(batch_size, -1).contiguous()
+        elif projected.shape[0] > batch_size:
+            projected = projected[:batch_size]
+        elif projected.shape[0] < batch_size:
+            pad = reference.new_zeros((batch_size - projected.shape[0], self.hidden_dim))
+            projected = torch.cat((projected, pad), dim=0)
+        return projected
+
+    def _project_context(self, context: torch.Tensor, device: torch.device) -> torch.Tensor:
+        context_flat = context.flatten(1)
+        if self.context_proj is None or self.context_proj.in_features != context_flat.shape[-1]:
+            self.context_proj = nn.Linear(context_flat.shape[-1], self.hidden_dim)
+            nn.init.xavier_uniform_(self.context_proj.weight)
+            nn.init.zeros_(self.context_proj.bias)
+        self.context_proj = self.context_proj.to(device)
+        return F.relu(self.context_proj(context_flat))
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outputs_class_sub, outputs_coord_sub,

@@ -20,6 +20,20 @@ _BACKBONE_LAYER_INDEX = 9  # SPPF layer index inside YOLOv5 backbone
 _BACKBONE_STRIDE = int(yolo_model.model.model[-1].stride[-1].item())
 _feature_map_store = {}
 
+
+def _compute_global_context(feature_map: torch.Tensor) -> List[float]:
+    """Return an L2-normalized global context vector pooled from the backbone feature map."""
+    if feature_map is None or feature_map.numel() == 0:
+        return []
+    with torch.no_grad():
+        if feature_map.dim() == 4:
+            pooled = feature_map.mean(dim=(2, 3), keepdim=False)
+        else:
+            pooled = feature_map
+        pooled = pooled.flatten(start_dim=1)
+        pooled = F.normalize(pooled, p=2, dim=1)
+    return pooled.squeeze(0).cpu().tolist()
+
 def _capture_backbone_feature(module, inputs, output):
     """Store latest backbone feature map for ROI extraction."""
     _feature_map_store["backbone"] = output.detach().cpu()
@@ -159,10 +173,24 @@ def add_padding(image, bbox, padding=10):
     return image[max(0, y1-padding):min(y2+padding, img_height), max(0, x1-padding):min(x2+padding, img_width)]
 
 # Detect objects with YOLO
-def detect_objects(image_path):
-    image = cv2.imread(image_path)
-    results = yolo_model(image_path)
+def detect_objects(image_source):
+    if isinstance(image_source, str):
+        image = cv2.imread(image_source)
+        if image is None:
+            raise FileNotFoundError(f"Unable to load image from path: {image_source}")
+        inference_input = image_source
+    elif isinstance(image_source, Image.Image):
+        image = cv2.cvtColor(np.array(image_source.convert("RGB")), cv2.COLOR_RGB2BGR)
+        inference_input = image
+    elif isinstance(image_source, np.ndarray):
+        image = image_source.copy()
+        inference_input = image
+    else:
+        raise TypeError(f"Unsupported image source type: {type(image_source)}")
+
+    results = yolo_model(inference_input)
     feature_map = _consume_feature_map()
+    global_context = _compute_global_context(feature_map)
     detected_objects, yolo_labels = [], []
 
     for result in results:
@@ -176,7 +204,7 @@ def detect_objects(image_path):
             cropped_pil = Image.fromarray(cv2.cvtColor(add_padding(image, (x1, y1, x2, y2)), cv2.COLOR_BGR2RGB))
             detected_objects.append((cropped_pil, (x1, y1, x2, y2)))
             yolo_labels.append(results[0].names[int(cls)])
-    return detected_objects, yolo_labels, image, feature_map
+    return detected_objects, yolo_labels, image, feature_map, global_context
 
 # Phân loại với CLIP, fallback về YOLO nếu confidence thấp
 def classify_with_clip(detected_objects, yolo_labels):
@@ -228,7 +256,7 @@ def run_pipeline(image_path=None):
             print("❌ Không có file nào được chọn!")
             return
 
-    detected_objects, yolo_labels, original_image, feature_map = detect_objects(image_path)
+    detected_objects, yolo_labels, original_image, feature_map, _ = detect_objects(image_path)
     classified_results = classify_with_clip(detected_objects, yolo_labels)
 
     boxes = [bbox for _, bbox in classified_results]
