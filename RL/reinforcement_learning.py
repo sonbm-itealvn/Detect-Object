@@ -1428,8 +1428,8 @@ class RelationshipReinforcementLearning:
         detection_reward = detection_metrics.get('f1', 0.0)
         relationship_reward = relationship_metrics.get('f1', 0.0)
         total_reward = (
-            0.4 * detection_reward
-            + 0.4 * relationship_reward
+            0.2 * detection_reward
+            + 0.6 * relationship_reward
             + 0.1 * diversity_reward
             + 0.1 * consistency_reward
         )
