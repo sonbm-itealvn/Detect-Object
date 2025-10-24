@@ -530,6 +530,7 @@ class RelationshipReinforcementLearning:
         relationships = sample.get('relationships', [])
 
         if not objects:
+            print("[RL] No objects found in sample")
             return None
 
         boxes = []
@@ -543,6 +544,7 @@ class RelationshipReinforcementLearning:
             labels.append(self._ensure_entity_label_index(class_name))
 
         if not boxes:
+            print("[RL] No valid bounding boxes found in sample")
             return None
 
         rel_annotations = []
@@ -551,13 +553,17 @@ class RelationshipReinforcementLearning:
             obj_idx = self._find_object_index(objects, rel.get('object', ''))
             rel_idx = self._relation_to_index(rel.get('relation', ''))
             if subj_idx is None or obj_idx is None or rel_idx is None:
+                print(f"[RL] Skipping invalid relationship: {rel} (subj_idx={subj_idx}, obj_idx={obj_idx}, rel_idx={rel_idx})")
                 continue
             rel_annotations.append([subj_idx, obj_idx, rel_idx])
 
         if not rel_annotations:
-            print("[RL] No valid relationship annotations found for RelTR training.")
+            print(f"[RL] No valid relationship annotations found for RelTR training. Found {len(relationships)} relationships but none were valid.")
+            print(f"[RL] Objects in sample: {[obj.get('class', 'unknown') for obj in objects]}")
+            print(f"[RL] Relationships: {relationships}")
             return None
 
+        print(f"[RL] Successfully created {len(rel_annotations)} valid relationship annotations")
         target = {
             'boxes': torch.tensor(boxes, dtype=torch.float32),
             'labels': torch.tensor(labels, dtype=torch.long),
@@ -719,6 +725,7 @@ class RelationshipReinforcementLearning:
 
     def _ingest_synthetic_samples(self, synthetic_data: List[Dict[str, Any]]) -> int:
         if not synthetic_data:
+            print("[RL] No synthetic data provided for ingestion")
             return 0
 
         existing_paths = {
@@ -728,23 +735,35 @@ class RelationshipReinforcementLearning:
         }
         ingested = 0
 
+        print(f"[RL] Processing {len(synthetic_data)} synthetic samples for ingestion")
         for index, data in enumerate(synthetic_data):
             image_path = self._ensure_synthetic_image_path(data, index)
             if not image_path or not os.path.exists(image_path):
+                print(f"[RL] Skipping sample {index+1}: invalid image path")
                 continue
 
             resolved_path = str(Path(image_path).resolve())
             if resolved_path in existing_paths:
+                print(f"[RL] Skipping sample {index+1}: already exists")
                 continue
 
+            print(f"[RL] Processing synthetic sample {index+1}/{len(synthetic_data)}")
             sample = self._extract_objects_with_clip(image_path)
             if not sample:
+                print(f"[RL] Skipping sample {index+1}: failed to extract objects")
                 continue
 
             original_relationship = data.get('original_relationship')
+            print(f"[RL] Sample {index+1} original relationship: {original_relationship}")
+            
+            # First try to build relationship from original
             relationships = self._build_relationship_from_original(sample['objects'], original_relationship)
+            print(f"[RL] Sample {index+1} built {len(relationships)} relationships from original")
+            
+            # If no relationships from original, try RelTR inference
             if not relationships:
                 try:
+                    print(f"[RL] Sample {index+1}: attempting RelTR inference for relationship prediction")
                     image_tensor = self._load_image_tensor(sample['image_path'])
                     relationships = self._run_reltr_inference(
                         image_tensor,
@@ -752,9 +771,23 @@ class RelationshipReinforcementLearning:
                         sample.get('global_context'),
                         (sample['width'], sample['height']),
                     )
+                    print(f"[RL] Sample {index+1} RelTR inference produced {len(relationships)} relationships")
                 except Exception as exc:
                     print(f"[RL] RelTR inference failed for synthetic image {image_path}: {exc}")
                     relationships = []
+            
+            # If still no relationships, create a fallback relationship from original_relationship
+            if not relationships and original_relationship:
+                print(f"[RL] Sample {index+1}: creating fallback relationship from original")
+                fallback_relationship = {
+                    'subject': original_relationship.get('subject', 'unknown'),
+                    'relation': original_relationship.get('relation', 'unknown'),
+                    'object': original_relationship.get('object', 'unknown'),
+                    'confidence': 0.5,  # Low confidence for fallback
+                    'source': 'fallback'
+                }
+                relationships = [fallback_relationship]
+                print(f"[RL] Sample {index+1} created fallback relationship: {fallback_relationship}")
 
             sample['relationships'] = relationships
             sample['source'] = 'synthetic'
@@ -763,6 +796,7 @@ class RelationshipReinforcementLearning:
             sample['generation_timestamp'] = data.get('generation_timestamp')
             sample['image_path'] = image_path
 
+            print(f"[RL] Sample {index+1} final relationships: {len(relationships)}")
             self.dataset_samples.append(sample)
             existing_paths.add(resolved_path)
             ingested += 1
@@ -770,7 +804,9 @@ class RelationshipReinforcementLearning:
         if ingested:
             self.detection_dataset_dir = None
             self._save_dataset_snapshot()
-            print(f"[RL] Ingested {ingested} synthetic sample(s) into the training dataset.")
+            print(f"[RL] Successfully ingested {ingested} synthetic sample(s) into the training dataset.")
+        else:
+            print("[RL] No synthetic samples were successfully ingested")
         return ingested
 
     def build_dataset_from_directory(self, image_dir: str, clear_previous: bool = True) -> int:
@@ -820,17 +856,37 @@ class RelationshipReinforcementLearning:
 
     def _prepare_reltr_training_samples(self) -> List[Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[List[float]]]]:
         if not self.dataset_samples:
+            print("[RL] No dataset samples available, trying to load original data")
             fallback = self._load_original_detection_and_relationships()
             if fallback:
                 self.dataset_samples = [fallback]
+                print(f"[RL] Loaded {len(self.dataset_samples)} fallback samples")
 
+        if not self.dataset_samples:
+            print("[RL] No dataset samples available for RelTR training")
+            return []
+
+        print(f"[RL] Preparing RelTR training samples from {len(self.dataset_samples)} dataset samples")
         prepared: List[Tuple[torch.Tensor, Dict[str, torch.Tensor], Optional[List[float]]]] = []
-        for sample in self.dataset_samples:
+        valid_samples = 0
+        
+        for i, sample in enumerate(self.dataset_samples):
+            print(f"[RL] Processing sample {i+1}/{len(self.dataset_samples)}")
             target = self._build_reltr_target(sample)
             if target is None:
+                print(f"[RL] Skipping sample {i+1}: no valid RelTR target")
                 continue
-            image_tensor = self._load_image_tensor(sample['image_path'])
-            prepared.append((image_tensor, target, sample.get('global_context')))
+            
+            try:
+                image_tensor = self._load_image_tensor(sample['image_path'])
+                prepared.append((image_tensor, target, sample.get('global_context')))
+                valid_samples += 1
+                print(f"[RL] Sample {i+1} prepared successfully")
+            except Exception as exc:
+                print(f"[RL] Failed to load image tensor for sample {i+1}: {exc}")
+                continue
+        
+        print(f"[RL] Successfully prepared {valid_samples} RelTR training samples")
         return prepared
 
     def _move_target_to_device(self, target: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
@@ -1167,6 +1223,7 @@ class RelationshipReinforcementLearning:
         max_samples: int = 30,
     ) -> Dict[str, Any]:
         if not synthetic_data:
+            print("[RL] No synthetic data provided for relationship evaluation")
             return {
                 'precision': 0.0,
                 'recall': 0.0,
@@ -1179,21 +1236,26 @@ class RelationshipReinforcementLearning:
                 'per_sample_f1': [],
             }
 
+        print(f"[RL] Evaluating relationship metrics on {len(synthetic_data)} synthetic samples")
         total_tp = total_fp = total_fn = 0
         per_sample_f1: List[float] = []
         evaluated = 0
 
         subset = synthetic_data[:max_samples]
-        for data in subset:
+        for i, data in enumerate(subset):
             target_rel = data.get('original_relationship')
             image_input = data.get('image') or data.get('image_path')
             if not target_rel or image_input is None:
+                print(f"[RL] Skipping sample {i+1}: missing target relationship or image input")
                 continue
 
             try:
+                # Ensure relationship model is loaded
+                self._ensure_relationship_model()
                 predicted_relationships = self.predict_relationships(image_input) or []
+                print(f"[RL] Sample {i+1}: predicted {len(predicted_relationships)} relationships")
             except Exception as exc:
-                print(f"[RL] Relationship evaluation failed: {exc}")
+                print(f"[RL] Relationship evaluation failed for sample {i+1}: {exc}")
                 predicted_relationships = []
 
             gt_tuples = [self._normalize_relationship_tuple(target_rel)]
@@ -1204,6 +1266,7 @@ class RelationshipReinforcementLearning:
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
+            print(f"[RL] Sample {i+1} metrics: TP={tp}, FP={fp}, FN={fn}, F1={f1:.3f}")
             total_tp += tp
             total_fp += fp
             total_fn += fn
@@ -1211,6 +1274,7 @@ class RelationshipReinforcementLearning:
             evaluated += 1
 
         if evaluated == 0:
+            print("[RL] No samples were successfully evaluated")
             return {
                 'precision': 0.0,
                 'recall': 0.0,
@@ -1230,6 +1294,7 @@ class RelationshipReinforcementLearning:
         variance = sum((score - mean_f1) ** 2 for score in per_sample_f1) / len(per_sample_f1) if per_sample_f1 else 0.0
         std_f1 = math.sqrt(variance)
 
+        print(f"[RL] Relationship evaluation completed: P={precision:.3f}, R={recall:.3f}, F1={f1:.3f} (evaluated {evaluated} samples)")
         return {
             'precision': precision,
             'recall': recall,
@@ -1432,12 +1497,14 @@ class RelationshipReinforcementLearning:
     
     def train_relationship_model(self, synthetic_data):
         """Fine-tune the RelTR relationship model on available relationship annotations."""
+        print("[RL] Starting relationship model training...")
         model, criterion = self._ensure_relationship_model()
         prepared_samples = self._prepare_reltr_training_samples()
         if not prepared_samples:
             print("[RL] RelTR training samples unavailable, skipping relationship training.")
             return 0.0
 
+        print(f"[RL] Training RelTR model with {len(prepared_samples)} samples")
         if self.reltr_optimizer is None:
             self.reltr_optimizer = AdamW(
                 (param for param in model.parameters() if param.requires_grad),
@@ -1450,21 +1517,28 @@ class RelationshipReinforcementLearning:
         optimizer.zero_grad()
         total_loss = 0.0
 
-        for image_tensor, target, global_context in prepared_samples:
-            samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
-            targets = [self._move_target_to_device(target, self.reltr_device)]
+        for i, (image_tensor, target, global_context) in enumerate(prepared_samples):
+            print(f"[RL] Training on sample {i+1}/{len(prepared_samples)}")
+            try:
+                samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
+                targets = [self._move_target_to_device(target, self.reltr_device)]
 
-            context_tensor = self._prepare_global_context_tensor(global_context)
-            if context_tensor is not None:
-                outputs = model(samples, global_context=context_tensor)
-            else:
-                outputs = model(samples)
-            loss_dict = criterion(outputs, targets)
-            weight_dict = criterion.weight_dict
-            loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
+                context_tensor = self._prepare_global_context_tensor(global_context)
+                if context_tensor is not None:
+                    outputs = model(samples, global_context=context_tensor)
+                else:
+                    outputs = model(samples)
+                
+                loss_dict = criterion(outputs, targets)
+                weight_dict = criterion.weight_dict
+                loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
 
-            loss.backward()
-            total_loss += float(loss.item())
+                loss.backward()
+                total_loss += float(loss.item())
+                print(f"[RL] Sample {i+1} loss: {loss.item():.4f}")
+            except Exception as exc:
+                print(f"[RL] Error training on sample {i+1}: {exc}")
+                continue
 
         optimizer.step()
 
