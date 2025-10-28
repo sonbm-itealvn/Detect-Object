@@ -94,17 +94,16 @@ class AppReinforcementLearning:
         # Bắt đầu experiment mới hoặc tiếp tục từ experiment trước
         if continue_from:
             print(f"🔄 Continuing training from experiment: {continue_from}")
-            experiment_dir = continue_from
+            
+            # Tạo experiment mới để tiếp tục từ experiment cũ
+            experiment_dir = self.experiment_manager.start_continuation_experiment(continue_from)
+            print(f"📁 New continuation experiment directory: {experiment_dir}")
+            
             # Load model state từ experiment trước
-            if self.rl_system.continue_training(experiment_dir):
+            if self.rl_system.continue_training(continue_from):
                 print("✅ Successfully loaded previous model state")
-                if self.rl_system.load_dataset_snapshot():
+                if self.rl_system.load_dataset_snapshot(from_experiment_dir=continue_from):
                     print("[RL] Loaded dataset snapshot from previous experiment.")
-                # Gắn ExperimentManager vào thư mục experiment hiện có để tránh cảnh báo
-                try:
-                    self.experiment_manager.set_experiment_dir(experiment_dir)
-                except Exception:
-                    pass
             else:
                 print("⚠️ Starting fresh training")
         else:

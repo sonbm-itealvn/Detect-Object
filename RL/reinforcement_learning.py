@@ -467,27 +467,56 @@ class RelationshipReinforcementLearning:
         except Exception as exc:
             print(f"[RL] Warning: failed to save dataset snapshot: {exc}")
 
-    def load_dataset_snapshot(self) -> bool:
-        path = self._dataset_snapshot_path()
-        if not path or not path.exists():
-            return False
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                payload = json.load(f)
-        except Exception as exc:
-            print(f"[RL] Warning: failed to load dataset snapshot: {exc}")
-            return False
-
-        samples = payload.get("samples") or []
-        detection_dir = payload.get("detection_dataset_dir")
-
-        self.dataset_samples = samples
-        if detection_dir and Path(detection_dir).exists():
-            self.detection_dataset_dir = Path(detection_dir)
+    def load_dataset_snapshot(self, from_experiment_dir: str = None) -> bool:
+        """Load dataset snapshot từ experiment directory được chỉ định hoặc từ experiment hiện tại"""
+        if from_experiment_dir:
+            # Load từ experiment cũ
+            old_snapshot_path = Path(from_experiment_dir) / "dataset" / "samples.json"
+            if not old_snapshot_path.exists():
+                print(f"[RL] No dataset snapshot found in {from_experiment_dir}")
+                return False
+            
+            try:
+                with open(old_snapshot_path, 'r', encoding='utf-8') as f:
+                    payload = json.load(f)
+                
+                samples = payload.get("samples") or []
+                detection_dir = payload.get("detection_dataset_dir")
+                
+                self.dataset_samples = samples
+                if detection_dir and Path(detection_dir).exists():
+                    self.detection_dataset_dir = Path(detection_dir)
+                else:
+                    self.detection_dataset_dir = None
+                
+                print(f"[RL] Loaded {len(samples)} samples from previous experiment")
+                return bool(self.dataset_samples)
+                
+            except Exception as exc:
+                print(f"[RL] Warning: failed to load dataset snapshot from {from_experiment_dir}: {exc}")
+                return False
         else:
-            self.detection_dataset_dir = None
+            # Load từ experiment hiện tại
+            path = self._dataset_snapshot_path()
+            if not path or not path.exists():
+                return False
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    payload = json.load(f)
+            except Exception as exc:
+                print(f"[RL] Warning: failed to load dataset snapshot: {exc}")
+                return False
 
-        return bool(self.dataset_samples)
+            samples = payload.get("samples") or []
+            detection_dir = payload.get("detection_dataset_dir")
+
+            self.dataset_samples = samples
+            if detection_dir and Path(detection_dir).exists():
+                self.detection_dataset_dir = Path(detection_dir)
+            else:
+                self.detection_dataset_dir = None
+
+            return bool(self.dataset_samples)
 
     def _ensure_entity_label_index(self, class_name: str) -> int:
         normalized = self._normalize_label(class_name)
@@ -2282,6 +2311,8 @@ class RelationshipReinforcementLearning:
     
     def continue_training(self, experiment_dir):
         """Tiếp tục training từ experiment trước đó"""
+        # Tạm thời set experiment directory để load model
+        original_experiment_dir = self.model_manager.current_experiment_dir
         self.model_manager.set_experiment_dir(experiment_dir)
         
         # Load best model từ experiment trước
@@ -2292,9 +2323,16 @@ class RelationshipReinforcementLearning:
             # Kiểm tra và sửa dataset_samples nếu cần
             self._validate_and_fix_dataset_samples()
             
+            # Khôi phục experiment directory gốc
+            if original_experiment_dir:
+                self.model_manager.set_experiment_dir(original_experiment_dir)
+            
             return True
         else:
             print("No previous model found, starting fresh training")
+            # Khôi phục experiment directory gốc
+            if original_experiment_dir:
+                self.model_manager.set_experiment_dir(original_experiment_dir)
             return False
     
     def _validate_and_fix_dataset_samples(self):

@@ -102,6 +102,80 @@ class ExperimentManager:
         
         return self.current_exp_dir
     
+    def start_continuation_experiment(self, base_experiment_dir: str, experiment_name: str = None) -> str:
+        """Tạo experiment mới để tiếp tục từ experiment cũ"""
+        if experiment_name is None:
+            # Tạo tên experiment mới với suffix "_cont"
+            base_name = os.path.basename(base_experiment_dir)
+            experiment_name = f"{base_name}_cont_{self.current_exp_num:03d}"
+        
+        self.current_exp_dir = os.path.join(self.base_dir, experiment_name)
+        
+        # Tạo cấu trúc thư mục
+        dirs_to_create = [
+            self.current_exp_dir,
+            os.path.join(self.current_exp_dir, "ai_images"),
+            os.path.join(self.current_exp_dir, "metrics"),
+            os.path.join(self.current_exp_dir, "plots"),
+            os.path.join(self.current_exp_dir, "models"),
+            os.path.join(self.current_exp_dir, "logs")
+        ]
+        
+        for dir_path in dirs_to_create:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # Copy model files từ experiment cũ
+        old_models_dir = os.path.join(base_experiment_dir, "models")
+        new_models_dir = os.path.join(self.current_exp_dir, "models")
+        
+        if os.path.exists(old_models_dir):
+            try:
+                # Copy tất cả file model từ experiment cũ
+                for filename in os.listdir(old_models_dir):
+                    if filename.endswith('.pth'):
+                        old_file = os.path.join(old_models_dir, filename)
+                        new_file = os.path.join(new_models_dir, filename)
+                        shutil.copy2(old_file, new_file)
+                        print(f"📋 Copied model file: {filename}")
+            except Exception as e:
+                print(f"⚠️ Error copying model files: {e}")
+        
+        # Copy dataset snapshot từ experiment cũ
+        old_dataset_dir = os.path.join(base_experiment_dir, "dataset")
+        new_dataset_dir = os.path.join(self.current_exp_dir, "dataset")
+        
+        if os.path.exists(old_dataset_dir):
+            try:
+                os.makedirs(new_dataset_dir, exist_ok=True)
+                for filename in os.listdir(old_dataset_dir):
+                    if filename.endswith('.json'):
+                        old_file = os.path.join(old_dataset_dir, filename)
+                        new_file = os.path.join(new_dataset_dir, filename)
+                        shutil.copy2(old_file, new_file)
+                        print(f"📋 Copied dataset file: {filename}")
+            except Exception as e:
+                print(f"⚠️ Error copying dataset files: {e}")
+        
+        # Tạo file metadata với thông tin về experiment gốc
+        metadata = {
+            "experiment_id": experiment_name,
+            "start_time": datetime.datetime.now().isoformat(),
+            "status": "running",
+            "description": f"Continuation of Reinforcement Learning Experiment from {os.path.basename(base_experiment_dir)}",
+            "version": "1.0",
+            "base_experiment": base_experiment_dir,
+            "is_continuation": True
+        }
+        
+        with open(os.path.join(self.current_exp_dir, "metadata.json"), 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print(f"🔄 Started continuation experiment: {experiment_name}")
+        print(f"📁 New experiment directory: {self.current_exp_dir}")
+        print(f"📋 Based on experiment: {base_experiment_dir}")
+        
+        return self.current_exp_dir
+    
     def save_ai_images(self, ai_images: List[Dict], epoch: int = None):
         """Lưu ảnh AI được tạo ra"""
         if not self.current_exp_dir:
