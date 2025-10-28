@@ -18,6 +18,30 @@ class ExperimentManager:
         # Tạo thư mục experiments nếu chưa có
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
+
+    def set_experiment_dir(self, experiment_dir: str) -> None:
+        """Register an existing experiment directory as the active one.
+
+        This is used when resuming from a previous experiment so that saving
+        metrics, images and plots does not complain about a missing active
+        experiment.
+        """
+        if not experiment_dir:
+            print("❌ No experiment directory provided to set_experiment_dir().")
+            return
+        # If an absolute path is provided, use it directly; otherwise assume
+        # it is relative to the base experiments folder.
+        if os.path.isabs(experiment_dir):
+            candidate = experiment_dir
+        else:
+            candidate = os.path.join(self.base_dir, experiment_dir)
+
+        if not os.path.isdir(candidate):
+            print(f"⚠️ Experiment directory does not exist: {candidate}")
+            return
+
+        self.current_exp_dir = candidate
+        print(f"🔗 Attached to existing experiment: {self.current_exp_dir}")
     
     def get_next_experiment_number(self) -> int:
         """Lấy số experiment tiếp theo"""

@@ -1238,12 +1238,12 @@ class RelationshipReinforcementLearning:
 
     def _evaluate_relationship_metrics(
         self,
-        synthetic_data: List[Dict[str, Any]],
+        evaluation_data: List[Dict[str, Any]],
         original_relationships: List[Dict[str, Any]],
         max_samples: int = 30,
     ) -> Dict[str, Any]:
-        if not synthetic_data:
-            print("[RL] No synthetic data provided for relationship evaluation")
+        if not evaluation_data:
+            print("[RL] No evaluation data provided for relationship evaluation")
             return {
                 'precision': 0.0,
                 'recall': 0.0,
@@ -1256,14 +1256,26 @@ class RelationshipReinforcementLearning:
                 'per_sample_f1': [],
             }
 
-        print(f"[RL] Evaluating relationship metrics on {len(synthetic_data)} synthetic samples")
+        print(f"[RL] Evaluating relationship metrics on {len(evaluation_data)} samples")
+        
+        # Debug: Kiểm tra loại dữ liệu
+        dataset_samples_count = sum(1 for data in evaluation_data if 'relationships' in data)
+        synthetic_samples_count = sum(1 for data in evaluation_data if 'original_relationship' in data)
+        print(f"[RL] Debug - Dataset samples: {dataset_samples_count}, Synthetic samples: {synthetic_samples_count}")
+        
         total_tp = total_fp = total_fn = 0
         per_sample_f1: List[float] = []
         evaluated = 0
 
-        subset = synthetic_data[:max_samples]
+        subset = evaluation_data[:max_samples]
         for i, data in enumerate(subset):
-            target_rel = data.get('original_relationship')
+            # Đối với dataset_samples, lấy relationship từ relationships field
+            # Đối với synthetic_data, lấy từ original_relationship field
+            if 'relationships' in data and data['relationships']:
+                target_rel = data['relationships'][0]  # Lấy relationship đầu tiên
+            else:
+                target_rel = data.get('original_relationship')
+            
             image_input = data.get('image') or data.get('image_path')
             if not target_rel or image_input is None:
                 print(f"[RL] Skipping sample {i+1}: missing target relationship or image input")
@@ -1274,6 +1286,11 @@ class RelationshipReinforcementLearning:
                 self._ensure_relationship_model()
                 predicted_relationships = self.predict_relationships(image_input) or []
                 print(f"[RL] Sample {i+1}: predicted {len(predicted_relationships)} relationships")
+                
+                # Debug: In ra target relationship để kiểm tra
+                print(f"[RL] Sample {i+1} target: {target_rel}")
+                if predicted_relationships:
+                    print(f"[RL] Sample {i+1} predicted: {predicted_relationships[0] if predicted_relationships else 'None'}")
             except Exception as exc:
                 print(f"[RL] Relationship evaluation failed for sample {i+1}: {exc}")
                 predicted_relationships = []
@@ -1466,7 +1483,11 @@ class RelationshipReinforcementLearning:
         
         # 1. Thu thập các chỉ số cơ bản
         detection_metrics = self._evaluate_detection_metrics(self.dataset_samples)
-        relationship_metrics = self._evaluate_relationship_metrics(synthetic_data, original_relationships)
+        
+        # Sử dụng dataset_samples thay vì chỉ synthetic_data để đánh giá relationship
+        # Điều này đảm bảo đánh giá trên toàn bộ dữ liệu training, không chỉ ảnh mới
+        evaluation_samples = self.dataset_samples if self.dataset_samples else synthetic_data
+        relationship_metrics = self._evaluate_relationship_metrics(evaluation_samples, original_relationships)
         per_sample_f1 = relationship_metrics.pop('per_sample_f1', [])
         
         # Debug metrics
@@ -2267,10 +2288,39 @@ class RelationshipReinforcementLearning:
         best_model = self.get_best_model()
         if best_model:
             print(f"Continuing training from best model (reward: {best_model['model_state'].get('reward', 0):.4f})")
+            
+            # Kiểm tra và sửa dataset_samples nếu cần
+            self._validate_and_fix_dataset_samples()
+            
             return True
         else:
             print("No previous model found, starting fresh training")
             return False
+    
+    def _validate_and_fix_dataset_samples(self):
+        """Kiểm tra và sửa dataset_samples để đảm bảo có đủ thông tin relationship"""
+        if not self.dataset_samples:
+            print("[RL] No dataset samples to validate")
+            return
+        
+        print(f"[RL] Validating {len(self.dataset_samples)} dataset samples...")
+        
+        fixed_count = 0
+        for i, sample in enumerate(self.dataset_samples):
+            # Kiểm tra xem có relationships không
+            if 'relationships' not in sample or not sample['relationships']:
+                # Nếu không có relationships, thử tạo từ original_relationship
+                if 'original_relationship' in sample and sample['original_relationship']:
+                    sample['relationships'] = [sample['original_relationship']]
+                    fixed_count += 1
+                    print(f"[RL] Fixed sample {i+1}: added relationship from original_relationship")
+                else:
+                    print(f"[RL] Warning: Sample {i+1} has no relationships or original_relationship")
+        
+        if fixed_count > 0:
+            print(f"[RL] Fixed {fixed_count} samples with missing relationships")
+            # Lưu lại dataset snapshot
+            self._save_dataset_snapshot()
 
     # ------------------------------------------------------------------ #
     # Experience helpers
@@ -2496,6 +2546,73 @@ class RelationshipReinforcementLearning:
             print(f"  ✓ {algorithm}")
         
         print("\n" + "="*80)
+    
+    def test_relationship_evaluation(self, evaluation_data: List[Dict[str, Any]], original_relationships: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Test relationship evaluation để debug vấn đề Relationship F1 = 0.
+        """
+        print("\n" + "="*80)
+        print("🔍 TEST RELATIONSHIP EVALUATION")
+        print("="*80)
+        
+        if not evaluation_data:
+            print("❌ No evaluation data provided")
+            return {}
+        
+        print(f"📊 Evaluation data count: {len(evaluation_data)}")
+        
+        # Phân tích loại dữ liệu
+        dataset_samples_count = sum(1 for data in evaluation_data if 'relationships' in data)
+        synthetic_samples_count = sum(1 for data in evaluation_data if 'original_relationship' in data)
+        print(f"📊 Dataset samples: {dataset_samples_count}, Synthetic samples: {synthetic_samples_count}")
+        
+        # Kiểm tra từng sample
+        valid_samples = 0
+        for i, data in enumerate(evaluation_data[:5]):  # Chỉ kiểm tra 5 samples đầu
+            print(f"\n🔍 Sample {i+1}:")
+            print(f"  - Has relationships: {'relationships' in data}")
+            print(f"  - Has original_relationship: {'original_relationship' in data}")
+            print(f"  - Has image_path: {'image_path' in data}")
+            print(f"  - Has image: {'image' in data}")
+            
+            if 'relationships' in data and data['relationships']:
+                print(f"  - Relationships: {data['relationships']}")
+                valid_samples += 1
+            elif 'original_relationship' in data and data['original_relationship']:
+                print(f"  - Original relationship: {data['original_relationship']}")
+                valid_samples += 1
+            else:
+                print(f"  - ❌ No valid relationship data")
+        
+        print(f"\n✅ Valid samples: {valid_samples}/{min(5, len(evaluation_data))}")
+        
+        # Test relationship prediction
+        if valid_samples > 0:
+            print(f"\n🧠 Testing relationship prediction...")
+            try:
+                self._ensure_relationship_model()
+                test_sample = evaluation_data[0]
+                image_input = test_sample.get('image') or test_sample.get('image_path')
+                
+                if image_input:
+                    predicted_relationships = self.predict_relationships(image_input) or []
+                    print(f"  - Predicted relationships: {len(predicted_relationships)}")
+                    if predicted_relationships:
+                        print(f"  - First prediction: {predicted_relationships[0]}")
+                    else:
+                        print(f"  - ❌ No relationships predicted")
+                else:
+                    print(f"  - ❌ No image input available")
+            except Exception as exc:
+                print(f"  - ❌ Prediction failed: {exc}")
+        
+        print("\n" + "="*80)
+        return {
+            'total_samples': len(evaluation_data),
+            'dataset_samples': dataset_samples_count,
+            'synthetic_samples': synthetic_samples_count,
+            'valid_samples': valid_samples
+        }
     
     def test_new_scoring_system(self, synthetic_data: List[Dict[str, Any]], original_relationships: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

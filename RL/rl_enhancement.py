@@ -100,6 +100,11 @@ class AppReinforcementLearning:
                 print("✅ Successfully loaded previous model state")
                 if self.rl_system.load_dataset_snapshot():
                     print("[RL] Loaded dataset snapshot from previous experiment.")
+                # Gắn ExperimentManager vào thư mục experiment hiện có để tránh cảnh báo
+                try:
+                    self.experiment_manager.set_experiment_dir(experiment_dir)
+                except Exception:
+                    pass
             else:
                 print("⚠️ Starting fresh training")
         else:
