@@ -1715,25 +1715,215 @@ class RelationshipReinforcementLearning:
         return max(0.0, min(final_score, 1.0))
     
     def _calculate_spatial_diversity(self, synthetic_data: List[Dict[str, Any]]) -> float:
-        """Tính đa dạng không gian dựa trên vị trí của các objects."""
+        """
+        Tính đa dạng không gian dựa trên vị trí thực tế của các objects.
+        Sử dụng thuật toán Spatial Distribution Analysis với các metrics:
+        - Position Diversity: Đa dạng về vị trí trung tâm
+        - Size Diversity: Đa dạng về kích thước bounding box
+        - Coverage Diversity: Đa dạng về độ phủ của ảnh
+        """
         if not synthetic_data:
             return 0.0
         
-        # Thu thập tất cả bbox từ synthetic data
+        # Thu thập tất cả bounding boxes thực tế
         all_bboxes = []
+        image_sizes = []
+        
         for data in synthetic_data:
-            if 'image' in data and hasattr(data['image'], 'size'):
-                width, height = data['image'].size
-                # Giả sử có thông tin về vị trí objects trong data
-                # Đây là một implementation đơn giản
-                all_bboxes.append([0.0, 0.0, width, height])  # Placeholder
+            # Lấy thông tin từ objects trong data
+            objects = data.get('objects', [])
+            if not objects:
+                continue
+                
+            # Lấy kích thước ảnh
+            image_path = data.get('image_path') or data.get('saved_path')
+            if image_path and os.path.exists(image_path):
+                try:
+                    with Image.open(image_path) as img:
+                        width, height = img.size
+                        image_sizes.append((width, height))
+                except Exception:
+                    continue
+            
+            # Thu thập bounding boxes từ objects
+            for obj in objects:
+                bbox = obj.get('bbox')
+                if bbox and len(bbox) == 4:
+                    all_bboxes.append(bbox)
         
         if len(all_bboxes) < 2:
             return 0.0
         
-        # Tính độ phân tán của các bbox
-        # Đây là một metric đơn giản, có thể cải thiện thêm
-        return min(len(all_bboxes) / 10.0, 1.0)
+        # Tính các thành phần đa dạng không gian
+        position_diversity = self._calculate_position_diversity(all_bboxes, image_sizes)
+        size_diversity = self._calculate_size_diversity(all_bboxes)
+        coverage_diversity = self._calculate_coverage_diversity(all_bboxes, image_sizes)
+        
+        # Kết hợp các thành phần với trọng số
+        spatial_score = (
+            0.4 * position_diversity +
+            0.3 * size_diversity +
+            0.3 * coverage_diversity
+        )
+        
+        return max(0.0, min(spatial_score, 1.0))
+    
+    def _calculate_position_diversity(self, bboxes: List[List[float]], image_sizes: List[Tuple[int, int]]) -> float:
+        """
+        Tính đa dạng vị trí dựa trên phân bố của center points.
+        Sử dụng thuật toán Spatial Clustering Analysis.
+        """
+        if not bboxes or not image_sizes:
+            return 0.0
+        
+        # Normalize bboxes về [0,1] dựa trên kích thước ảnh trung bình
+        avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
+        avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
+        
+        normalized_centers = []
+        for bbox in bboxes:
+            x1, y1, x2, y2 = bbox
+            center_x = (x1 + x2) / 2.0 / avg_width
+            center_y = (y1 + y2) / 2.0 / avg_height
+            normalized_centers.append([center_x, center_y])
+        
+        # Tính độ phân tán của center points
+        if len(normalized_centers) < 2:
+            return 0.0
+        
+        # Tính variance của x và y coordinates
+        x_coords = [center[0] for center in normalized_centers]
+        y_coords = [center[1] for center in normalized_centers]
+        
+        x_mean = sum(x_coords) / len(x_coords)
+        y_mean = sum(y_coords) / len(y_coords)
+        
+        x_variance = sum((x - x_mean) ** 2 for x in x_coords) / len(x_coords)
+        y_variance = sum((y - y_mean) ** 2 for y in y_coords) / len(y_coords)
+        
+        # Tính độ phân tán tổng hợp
+        total_variance = x_variance + y_variance
+        
+        # Normalize về [0,1] - variance cao = đa dạng cao
+        # Sử dụng tanh để smooth và giới hạn trong [0,1]
+        position_diversity = math.tanh(total_variance * 4)  # Scale factor 4
+        
+        return position_diversity
+    
+    def _calculate_size_diversity(self, bboxes: List[List[float]]) -> float:
+        """
+        Tính đa dạng kích thước dựa trên area và aspect ratio của bounding boxes.
+        Sử dụng thuật toán Size Distribution Analysis.
+        """
+        if not bboxes:
+            return 0.0
+        
+        areas = []
+        aspect_ratios = []
+        
+        for bbox in bboxes:
+            x1, y1, x2, y2 = bbox
+            width = x2 - x1
+            height = y2 - y1
+            
+            # Tính area
+            area = width * height
+            areas.append(area)
+            
+            # Tính aspect ratio
+            if height > 0:
+                aspect_ratio = width / height
+                aspect_ratios.append(aspect_ratio)
+        
+        if not areas or not aspect_ratios:
+            return 0.0
+        
+        # Tính coefficient of variation cho area
+        area_mean = sum(areas) / len(areas)
+        area_std = math.sqrt(sum((area - area_mean) ** 2 for area in areas) / len(areas))
+        area_cv = area_std / area_mean if area_mean > 0 else 0
+        
+        # Tính coefficient of variation cho aspect ratio
+        ar_mean = sum(aspect_ratios) / len(aspect_ratios)
+        ar_std = math.sqrt(sum((ar - ar_mean) ** 2 for ar in aspect_ratios) / len(aspect_ratios))
+        ar_cv = ar_std / ar_mean if ar_mean > 0 else 0
+        
+        # Kết hợp area và aspect ratio diversity
+        size_diversity = 0.6 * min(area_cv, 2.0) / 2.0 + 0.4 * min(ar_cv, 3.0) / 3.0
+        
+        return max(0.0, min(size_diversity, 1.0))
+    
+    def _calculate_coverage_diversity(self, bboxes: List[List[float]], image_sizes: List[Tuple[int, int]]) -> float:
+        """
+        Tính đa dạng độ phủ dựa trên việc phân chia ảnh thành grid và đếm coverage.
+        Sử dụng thuật toán Grid-Based Coverage Analysis.
+        """
+        if not bboxes or not image_sizes:
+            return 0.0
+        
+        # Sử dụng kích thước ảnh trung bình để tính grid
+        avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
+        avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
+        
+        # Chia ảnh thành grid 4x4 = 16 cells
+        grid_size = 4
+        cell_width = avg_width / grid_size
+        cell_height = avg_height / grid_size
+        
+        # Đếm số cells được cover bởi ít nhất một bbox
+        covered_cells = set()
+        
+        for bbox in bboxes:
+            x1, y1, x2, y2 = bbox
+            
+            # Tìm các cells mà bbox này cover
+            start_col = max(0, int(x1 // cell_width))
+            end_col = min(grid_size - 1, int(x2 // cell_width))
+            start_row = max(0, int(y1 // cell_height))
+            end_row = min(grid_size - 1, int(y2 // cell_height))
+            
+            for row in range(start_row, end_row + 1):
+                for col in range(start_col, end_col + 1):
+                    covered_cells.add((row, col))
+        
+        # Tính coverage ratio
+        total_cells = grid_size * grid_size
+        coverage_ratio = len(covered_cells) / total_cells
+        
+        # Tính distribution balance - các cells được cover đều hay không
+        if len(covered_cells) < 2:
+            return coverage_ratio
+        
+        # Tính entropy của distribution
+        cell_counts = {}
+        for bbox in bboxes:
+            x1, y1, x2, y2 = bbox
+            start_col = max(0, int(x1 // cell_width))
+            end_col = min(grid_size - 1, int(x2 // cell_width))
+            start_row = max(0, int(y1 // cell_height))
+            end_row = min(grid_size - 1, int(y2 // cell_height))
+            
+            for row in range(start_row, end_row + 1):
+                for col in range(start_col, end_col + 1):
+                    cell = (row, col)
+                    cell_counts[cell] = cell_counts.get(cell, 0) + 1
+        
+        # Tính entropy
+        total_bboxes = len(bboxes)
+        entropy = 0.0
+        for count in cell_counts.values():
+            if count > 0:
+                p = count / total_bboxes
+                entropy -= p * math.log2(p)
+        
+        # Normalize entropy (max entropy = log2(total_cells))
+        max_entropy = math.log2(total_cells)
+        normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
+        
+        # Kết hợp coverage ratio và distribution entropy
+        coverage_diversity = 0.7 * coverage_ratio + 0.3 * normalized_entropy
+        
+        return max(0.0, min(coverage_diversity, 1.0))
     
     def _calculate_consistency_score(self, f1_scores: List[float], precomputed_std: Optional[float] = None) -> float:
         """
@@ -2173,6 +2363,140 @@ class RelationshipReinforcementLearning:
             'variation_index': data.get('variation_index'),
             'relationship_index': data.get('relationship_index'),
         }
+    
+    def get_spatial_diversity_analysis(self, synthetic_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Phân tích chi tiết về spatial diversity để hiểu rõ cách tính toán.
+        """
+        if not synthetic_data:
+            return {
+                'status': 'No synthetic data available',
+                'message': 'Provide synthetic data to analyze spatial diversity'
+            }
+        
+        # Thu thập dữ liệu
+        all_bboxes = []
+        image_sizes = []
+        
+        for data in synthetic_data:
+            objects = data.get('objects', [])
+            if not objects:
+                continue
+                
+            image_path = data.get('image_path') or data.get('saved_path')
+            if image_path and os.path.exists(image_path):
+                try:
+                    with Image.open(image_path) as img:
+                        width, height = img.size
+                        image_sizes.append((width, height))
+                except Exception:
+                    continue
+            
+            for obj in objects:
+                bbox = obj.get('bbox')
+                if bbox and len(bbox) == 4:
+                    all_bboxes.append(bbox)
+        
+        if len(all_bboxes) < 2:
+            return {
+                'status': 'Insufficient data',
+                'message': f'Need at least 2 bounding boxes, found {len(all_bboxes)}',
+                'bbox_count': len(all_bboxes),
+                'image_count': len(image_sizes)
+            }
+        
+        # Tính các thành phần
+        position_diversity = self._calculate_position_diversity(all_bboxes, image_sizes)
+        size_diversity = self._calculate_size_diversity(all_bboxes)
+        coverage_diversity = self._calculate_coverage_diversity(all_bboxes, image_sizes)
+        
+        # Tính tổng điểm
+        total_spatial_diversity = (
+            0.4 * position_diversity +
+            0.3 * size_diversity +
+            0.3 * coverage_diversity
+        )
+        
+        # Phân tích chi tiết
+        analysis = {
+            'total_spatial_diversity': total_spatial_diversity,
+            'components': {
+                'position_diversity': {
+                    'value': position_diversity,
+                    'weight': 0.4,
+                    'contribution': 0.4 * position_diversity,
+                    'description': 'Diversity of object center positions using variance analysis'
+                },
+                'size_diversity': {
+                    'value': size_diversity,
+                    'weight': 0.3,
+                    'contribution': 0.3 * size_diversity,
+                    'description': 'Diversity of bounding box areas and aspect ratios using coefficient of variation'
+                },
+                'coverage_diversity': {
+                    'value': coverage_diversity,
+                    'weight': 0.3,
+                    'contribution': 0.3 * coverage_diversity,
+                    'description': 'Diversity of spatial coverage using grid-based analysis and entropy'
+                }
+            },
+            'data_summary': {
+                'total_bboxes': len(all_bboxes),
+                'total_images': len(image_sizes),
+                'avg_image_size': (
+                    sum(size[0] for size in image_sizes) / len(image_sizes),
+                    sum(size[1] for size in image_sizes) / len(image_sizes)
+                ) if image_sizes else (0, 0),
+                'bboxes_per_image': len(all_bboxes) / len(image_sizes) if image_sizes else 0
+            },
+            'algorithms_used': [
+                'Spatial Clustering Analysis for position diversity',
+                'Coefficient of Variation for size diversity',
+                'Grid-Based Coverage Analysis for coverage diversity',
+                'Shannon Entropy for distribution balance',
+                'Tanh Normalization for smooth scaling'
+            ]
+        }
+        
+        return analysis
+    
+    def print_spatial_diversity_breakdown(self, synthetic_data: List[Dict[str, Any]]) -> None:
+        """In ra phân tích chi tiết về spatial diversity."""
+        analysis = self.get_spatial_diversity_analysis(synthetic_data)
+        
+        if analysis.get('status'):
+            print(f"[SPATIAL DIVERSITY] {analysis['message']}")
+            return
+        
+        print("\n" + "="*80)
+        print("🌍 PHÂN TÍCH SPATIAL DIVERSITY")
+        print("="*80)
+        print(f"🎯 Tổng điểm Spatial Diversity: {analysis['total_spatial_diversity']:.4f}")
+        
+        print("\n📊 CHI TIẾT CÁC THÀNH PHẦN:")
+        print("-" * 60)
+        
+        for component_name, component_data in analysis['components'].items():
+            print(f"\n{component_name.upper().replace('_', ' ')}:")
+            print(f"  • Giá trị: {component_data['value']:.4f}")
+            print(f"  • Trọng số: {component_data['weight']:.3f}")
+            print(f"  • Đóng góp: {component_data['contribution']:.4f}")
+            print(f"  • Mô tả: {component_data['description']}")
+        
+        print("\n📈 THÔNG TIN DỮ LIỆU:")
+        print("-" * 30)
+        data_summary = analysis['data_summary']
+        print(f"  • Tổng số bounding boxes: {data_summary['total_bboxes']}")
+        print(f"  • Tổng số ảnh: {data_summary['total_images']}")
+        print(f"  • Kích thước ảnh trung bình: {data_summary['avg_image_size'][0]:.0f}x{data_summary['avg_image_size'][1]:.0f}")
+        print(f"  • Bboxes trung bình/ảnh: {data_summary['bboxes_per_image']:.2f}")
+        
+        print("\n⚙️  THUẬT TOÁN ĐƯỢC SỬ DỤNG:")
+        print("-" * 30)
+        for algorithm in analysis['algorithms_used']:
+            print(f"  ✓ {algorithm}")
+        
+        print("\n" + "="*80)
     
     def get_scoring_analysis(self) -> Dict[str, Any]:
         """
