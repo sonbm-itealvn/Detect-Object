@@ -1368,7 +1368,11 @@ class RelationshipReinforcementLearning:
         print("Step 4: 📊 Calculating reward...")
         reward = self.calculate_reward(synthetic_data, original_relationships)
         print(f"    ✅ Reward: {reward:.4f}")
+        
+        # Debug: Kiểm tra reward components
         reward_components = dict(self.latest_reward_components or {})
+        print(f"    🔍 Debug - Reward components keys: {list(reward_components.keys())}")
+        
         if reward_components:
             print(
                 "     Reward breakdown -> "
@@ -1378,10 +1382,16 @@ class RelationshipReinforcementLearning:
                 f"Consistency: {reward_components.get('consistency_score', 0.0):.3f}, "
                 f"Improvement: {reward_components.get('improvement_score', 0.0):.3f}"
             )
-            print(f"     Dynamic weights -> Detection: {reward_components.get('dynamic_weights', {}).get('detection', 0.0):.3f}, "
-                  f"Relationship: {reward_components.get('dynamic_weights', {}).get('relationship', 0.0):.3f}, "
-                  f"Diversity: {reward_components.get('dynamic_weights', {}).get('diversity', 0.0):.3f}, "
-                  f"Consistency: {reward_components.get('dynamic_weights', {}).get('consistency', 0.0):.3f}")
+            dynamic_weights = reward_components.get('dynamic_weights', {})
+            if dynamic_weights:
+                print(f"     Dynamic weights -> Detection: {dynamic_weights.get('detection', 0.0):.3f}, "
+                      f"Relationship: {dynamic_weights.get('relationship', 0.0):.3f}, "
+                      f"Diversity: {dynamic_weights.get('diversity', 0.0):.3f}, "
+                      f"Consistency: {dynamic_weights.get('consistency', 0.0):.3f}")
+            else:
+                print("     ⚠️  No dynamic weights found!")
+        else:
+            print("     ⚠️  No reward components found!")
         detection_metrics_snapshot = dict(self.latest_detection_metrics or {})
         relationship_metrics_snapshot = dict(self.latest_relationship_metrics or {})
         
@@ -1449,10 +1459,19 @@ class RelationshipReinforcementLearning:
         Tính điểm dựa trên thuật toán thích ứng và các chỉ số khách quan.
         Thay thế công thức chủ quan bằng hệ thống đánh giá có thể đo lường được.
         """
+        # Debug information
+        print(f"    🔍 Debug - Synthetic data count: {len(synthetic_data) if synthetic_data else 0}")
+        print(f"    🔍 Debug - Dataset samples count: {len(self.dataset_samples)}")
+        print(f"    🔍 Debug - Original relationships count: {len(original_relationships) if original_relationships else 0}")
+        
         # 1. Thu thập các chỉ số cơ bản
         detection_metrics = self._evaluate_detection_metrics(self.dataset_samples)
         relationship_metrics = self._evaluate_relationship_metrics(synthetic_data, original_relationships)
         per_sample_f1 = relationship_metrics.pop('per_sample_f1', [])
+        
+        # Debug metrics
+        print(f"    🔍 Debug - Detection metrics: {detection_metrics}")
+        print(f"    🔍 Debug - Relationship metrics: {relationship_metrics}")
         
         # 2. Tính toán các thành phần điểm với thuật toán cụ thể
         detection_score = self._calculate_detection_score(detection_metrics)
@@ -1460,6 +1479,13 @@ class RelationshipReinforcementLearning:
         diversity_score = self._calculate_diversity_score(synthetic_data)
         consistency_score = self._calculate_consistency_score(per_sample_f1, relationship_metrics.get('f1_std'))
         improvement_score = self._calculate_improvement_score()
+        
+        # Debug scores
+        print(f"    🔍 Debug - Detection score: {detection_score:.4f}")
+        print(f"    🔍 Debug - Relationship score: {relationship_score:.4f}")
+        print(f"    🔍 Debug - Diversity score: {diversity_score:.4f}")
+        print(f"    🔍 Debug - Consistency score: {consistency_score:.4f}")
+        print(f"    🔍 Debug - Improvement score: {improvement_score:.4f}")
         
         # 3. Tính trọng số động dựa trên hiệu suất hiện tại
         dynamic_weights = self._calculate_dynamic_weights(
@@ -2073,35 +2099,8 @@ class RelationshipReinforcementLearning:
         # Cập nhật scaling factor
         self.scaling_factor = self._get_current_scaling_factor()
     
-    def calculate_diversity_reward(self, synthetic_data):
-        """Calculate diversity reward based on synthetic data variety"""
-        if not synthetic_data:
-            return 0.0
-        
-        # Count unique relationship types
-        unique_relations = set()
-        for data in synthetic_data:
-            if 'original_relationship' in data:
-                rel = data['original_relationship']
-                unique_relations.add(rel.get('relation', ''))
-        
-        # Diversity reward based on number of unique relations
-        diversity_score = min(len(unique_relations) / 10.0, 1.0)  # Normalize to [0,1]
-        return diversity_score
-    
-    def calculate_consistency_reward(self, f1_scores: List[float], precomputed_std: Optional[float] = None) -> float:
-        """Calculate consistency reward based on the stability of relationship predictions."""
-        if not f1_scores and (precomputed_std is None or precomputed_std == 0.0):
-            return 0.0
-        if precomputed_std is not None:
-            std = float(precomputed_std)
-        else:
-            if not f1_scores:
-                return 0.0
-            mean_score = sum(f1_scores) / len(f1_scores)
-            variance = sum((score - mean_score) ** 2 for score in f1_scores) / len(f1_scores)
-            std = math.sqrt(variance)
-        return max(0.0, 1.0 - min(std, 1.0))
+    # Các phương thức cũ đã được thay thế bằng hệ thống mới
+    # calculate_diversity_reward và calculate_consistency_reward đã được tích hợp vào hệ thống mới
     
     @staticmethod
     def _optimizer_state_to_cpu(state_dict: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -2497,6 +2496,77 @@ class RelationshipReinforcementLearning:
             print(f"  ✓ {algorithm}")
         
         print("\n" + "="*80)
+    
+    def test_new_scoring_system(self, synthetic_data: List[Dict[str, Any]], original_relationships: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Test hệ thống tính điểm mới để đảm bảo nó hoạt động đúng.
+        """
+        print("\n" + "="*80)
+        print("🧪 TEST HỆ THỐNG TÍNH ĐIỂM MỚI")
+        print("="*80)
+        
+        # Test từng thành phần
+        print("\n1️⃣ TEST DETECTION SCORING:")
+        detection_metrics = self._evaluate_detection_metrics(self.dataset_samples)
+        detection_score = self._calculate_detection_score(detection_metrics)
+        print(f"   Detection metrics: {detection_metrics}")
+        print(f"   Detection score: {detection_score:.4f}")
+        
+        print("\n2️⃣ TEST RELATIONSHIP SCORING:")
+        relationship_metrics = self._evaluate_relationship_metrics(synthetic_data, original_relationships)
+        per_sample_f1 = relationship_metrics.pop('per_sample_f1', [])
+        relationship_score = self._calculate_relationship_score(relationship_metrics)
+        print(f"   Relationship metrics: {relationship_metrics}")
+        print(f"   Relationship score: {relationship_score:.4f}")
+        
+        print("\n3️⃣ TEST DIVERSITY SCORING:")
+        diversity_score = self._calculate_diversity_score(synthetic_data)
+        print(f"   Diversity score: {diversity_score:.4f}")
+        
+        print("\n4️⃣ TEST CONSISTENCY SCORING:")
+        consistency_score = self._calculate_consistency_score(per_sample_f1, relationship_metrics.get('f1_std'))
+        print(f"   Consistency score: {consistency_score:.4f}")
+        
+        print("\n5️⃣ TEST IMPROVEMENT SCORING:")
+        improvement_score = self._calculate_improvement_score()
+        print(f"   Improvement score: {improvement_score:.4f}")
+        
+        print("\n6️⃣ TEST DYNAMIC WEIGHTS:")
+        dynamic_weights = self._calculate_dynamic_weights(
+            detection_score, relationship_score, diversity_score, consistency_score
+        )
+        print(f"   Dynamic weights: {dynamic_weights}")
+        
+        print("\n7️⃣ TEST TOTAL REWARD:")
+        total_reward = (
+            dynamic_weights['detection'] * detection_score +
+            dynamic_weights['relationship'] * relationship_score +
+            dynamic_weights['diversity'] * diversity_score +
+            dynamic_weights['consistency'] * consistency_score +
+            dynamic_weights['improvement'] * improvement_score
+        )
+        scaled_reward = self._apply_reward_scaling(total_reward)
+        print(f"   Raw reward: {total_reward:.4f}")
+        print(f"   Scaled reward: {scaled_reward:.4f}")
+        
+        # Tạo test result
+        test_result = {
+            'detection_score': detection_score,
+            'relationship_score': relationship_score,
+            'diversity_score': diversity_score,
+            'consistency_score': consistency_score,
+            'improvement_score': improvement_score,
+            'dynamic_weights': dynamic_weights,
+            'total_reward': scaled_reward,
+            'raw_reward': total_reward,
+            'scaling_factor': self.scaling_factor,
+            'baseline_performance': self.baseline_performance,
+        }
+        
+        print("\n✅ TEST HOÀN THÀNH!")
+        print("="*80)
+        
+        return test_result
     
     def get_scoring_analysis(self) -> Dict[str, Any]:
         """

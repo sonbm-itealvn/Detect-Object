@@ -248,11 +248,23 @@ class AppReinforcementLearning:
                 if reward_breakdown:
                     print(
                         "   Reward Breakdown -> "
-                        f"Det F1: {reward_breakdown.get('detection_f1', 0.0):.3f}, "
-                        f"Rel F1: {reward_breakdown.get('relationship_f1', 0.0):.3f}, "
-                        f"Diversity: {reward_breakdown.get('diversity', 0.0):.3f}, "
-                        f"Consistency: {reward_breakdown.get('consistency', 0.0):.3f}"
+                        f"Detection: {reward_breakdown.get('detection_score', 0.0):.3f}, "
+                        f"Relationship: {reward_breakdown.get('relationship_score', 0.0):.3f}, "
+                        f"Diversity: {reward_breakdown.get('diversity_score', 0.0):.3f}, "
+                        f"Consistency: {reward_breakdown.get('consistency_score', 0.0):.3f}, "
+                        f"Improvement: {reward_breakdown.get('improvement_score', 0.0):.3f}"
                     )
+                    # Hiển thị dynamic weights nếu có
+                    dynamic_weights = reward_breakdown.get('dynamic_weights', {})
+                    if dynamic_weights:
+                        print(
+                            "   Dynamic Weights -> "
+                            f"Detection: {dynamic_weights.get('detection', 0.0):.3f}, "
+                            f"Relationship: {dynamic_weights.get('relationship', 0.0):.3f}, "
+                            f"Diversity: {dynamic_weights.get('diversity', 0.0):.3f}, "
+                            f"Consistency: {dynamic_weights.get('consistency', 0.0):.3f}, "
+                            f"Improvement: {dynamic_weights.get('improvement', 0.0):.3f}"
+                        )
                 print(f"   Exploration Rate: {results['epsilon']:.4f}")
                 print(f"   Selected Action: {results.get('rl_action_index')} -> {results.get('rl_num_variations')} variations")
                 if results.get('rl_loss') is not None:
