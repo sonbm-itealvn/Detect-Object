@@ -85,6 +85,26 @@ class RelationshipReinforcementLearning:
             'best_reward': float('-inf'),
             'best_epoch': 0
         }
+        
+        # Performance tracking for adaptive scoring
+        self.performance_history = {
+            'rewards': deque(maxlen=50),  # Last 50 rewards
+            'detection_scores': deque(maxlen=50),
+            'relationship_scores': deque(maxlen=50),
+            'diversity_scores': deque(maxlen=50),
+            'consistency_scores': deque(maxlen=50),
+            'improvement_trend': deque(maxlen=20),  # Last 20 improvement scores
+            'weight_history': deque(maxlen=20),  # Track weight changes
+        }
+        
+        # Adaptive scoring parameters
+        self.scaling_factor = 1.0
+        self.baseline_performance = {
+            'detection': 0.3,
+            'relationship': 0.7,
+            'diversity': 0.3,
+            'consistency': 0.5,
+        }
 
         # Deep Q-Network agent configuration
         self.rl_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1352,11 +1372,16 @@ class RelationshipReinforcementLearning:
         if reward_components:
             print(
                 "     Reward breakdown -> "
-                f"Det F1: {reward_components.get('detection_f1', 0.0):.3f}, "
-                f"Rel F1: {reward_components.get('relationship_f1', 0.0):.3f}, "
-                f"Diversity: {reward_components.get('diversity', 0.0):.3f}, "
-                f"Consistency: {reward_components.get('consistency', 0.0):.3f}"
+                f"Detection: {reward_components.get('detection_score', 0.0):.3f}, "
+                f"Relationship: {reward_components.get('relationship_score', 0.0):.3f}, "
+                f"Diversity: {reward_components.get('diversity_score', 0.0):.3f}, "
+                f"Consistency: {reward_components.get('consistency_score', 0.0):.3f}, "
+                f"Improvement: {reward_components.get('improvement_score', 0.0):.3f}"
             )
+            print(f"     Dynamic weights -> Detection: {reward_components.get('dynamic_weights', {}).get('detection', 0.0):.3f}, "
+                  f"Relationship: {reward_components.get('dynamic_weights', {}).get('relationship', 0.0):.3f}, "
+                  f"Diversity: {reward_components.get('dynamic_weights', {}).get('diversity', 0.0):.3f}, "
+                  f"Consistency: {reward_components.get('dynamic_weights', {}).get('consistency', 0.0):.3f}")
         detection_metrics_snapshot = dict(self.latest_detection_metrics or {})
         relationship_metrics_snapshot = dict(self.latest_relationship_metrics or {})
         
@@ -1420,28 +1445,56 @@ class RelationshipReinforcementLearning:
         }
     
     def calculate_reward(self, synthetic_data, original_relationships):
+        """
+        Tính điểm dựa trên thuật toán thích ứng và các chỉ số khách quan.
+        Thay thế công thức chủ quan bằng hệ thống đánh giá có thể đo lường được.
+        """
+        # 1. Thu thập các chỉ số cơ bản
         detection_metrics = self._evaluate_detection_metrics(self.dataset_samples)
         relationship_metrics = self._evaluate_relationship_metrics(synthetic_data, original_relationships)
         per_sample_f1 = relationship_metrics.pop('per_sample_f1', [])
-        diversity_reward = self.calculate_diversity_reward(synthetic_data)
-        consistency_reward = self.calculate_consistency_reward(per_sample_f1, relationship_metrics.get('f1_std'))
-        detection_reward = detection_metrics.get('f1', 0.0)
-        relationship_reward = relationship_metrics.get('f1', 0.0)
-        total_reward = (
-            0.2 * detection_reward
-            + 0.6 * relationship_reward
-            + 0.1 * diversity_reward
-            + 0.1 * consistency_reward
+        
+        # 2. Tính toán các thành phần điểm với thuật toán cụ thể
+        detection_score = self._calculate_detection_score(detection_metrics)
+        relationship_score = self._calculate_relationship_score(relationship_metrics)
+        diversity_score = self._calculate_diversity_score(synthetic_data)
+        consistency_score = self._calculate_consistency_score(per_sample_f1, relationship_metrics.get('f1_std'))
+        improvement_score = self._calculate_improvement_score()
+        
+        # 3. Tính trọng số động dựa trên hiệu suất hiện tại
+        dynamic_weights = self._calculate_dynamic_weights(
+            detection_score, relationship_score, diversity_score, consistency_score
         )
+        
+        # 4. Tính điểm tổng hợp với trọng số thích ứng
+        total_reward = (
+            dynamic_weights['detection'] * detection_score +
+            dynamic_weights['relationship'] * relationship_score +
+            dynamic_weights['diversity'] * diversity_score +
+            dynamic_weights['consistency'] * consistency_score +
+            dynamic_weights['improvement'] * improvement_score
+        )
+        
+        # 5. Áp dụng hàm điều chỉnh để đảm bảo điểm trong khoảng hợp lý
+        total_reward = self._apply_reward_scaling(total_reward)
+        
+        # 6. Lưu trữ thông tin để phân tích
         self.latest_detection_metrics = detection_metrics
         self.latest_relationship_metrics = relationship_metrics
         self.latest_reward_components = {
-            'detection_f1': detection_reward,
-            'relationship_f1': relationship_reward,
-            'diversity': diversity_reward,
-            'consistency': consistency_reward,
+            'detection_score': detection_score,
+            'relationship_score': relationship_score,
+            'diversity_score': diversity_score,
+            'consistency_score': consistency_score,
+            'improvement_score': improvement_score,
+            'dynamic_weights': dynamic_weights,
             'total_reward': total_reward,
+            'scaling_factor': self._get_current_scaling_factor(),
         }
+        
+        # 7. Cập nhật lịch sử để học từ kinh nghiệm
+        self._update_performance_history(total_reward, dynamic_weights)
+        
         return total_reward
     
     def train_detection_model(self, synthetic_data):
@@ -1567,6 +1620,268 @@ class RelationshipReinforcementLearning:
             global_context,
             image_size=pil_image.size,
         )
+    
+    def _calculate_detection_score(self, detection_metrics: Dict[str, float]) -> float:
+        """
+        Tính điểm detection dựa trên các chỉ số khách quan.
+        Sử dụng F1-score làm chỉ số chính với điều chỉnh cho precision và recall.
+        """
+        f1 = detection_metrics.get('f1', 0.0)
+        precision = detection_metrics.get('precision', 0.0)
+        recall = detection_metrics.get('recall', 0.0)
+        num_samples = detection_metrics.get('num_samples', 0)
+        
+        # Điểm cơ bản từ F1-score
+        base_score = f1
+        
+        # Điều chỉnh dựa trên số lượng mẫu (confidence adjustment)
+        sample_confidence = min(num_samples / 10.0, 1.0)  # Normalize to [0,1]
+        
+        # Điều chỉnh dựa trên sự cân bằng giữa precision và recall
+        balance_factor = 1.0 - abs(precision - recall) / max(precision + recall, 1e-6)
+        
+        # Tính điểm cuối cùng với các điều chỉnh
+        final_score = base_score * sample_confidence * balance_factor
+        
+        return max(0.0, min(final_score, 1.0))
+    
+    def _calculate_relationship_score(self, relationship_metrics: Dict[str, Any]) -> float:
+        """
+        Tính điểm relationship dựa trên các chỉ số khách quan.
+        Bao gồm F1-score, độ lệch chuẩn và số lượng mẫu được đánh giá.
+        """
+        f1 = relationship_metrics.get('f1', 0.0)
+        f1_std = relationship_metrics.get('f1_std', 0.0)
+        precision = relationship_metrics.get('precision', 0.0)
+        recall = relationship_metrics.get('recall', 0.0)
+        num_samples = relationship_metrics.get('num_samples', 0)
+        
+        # Điểm cơ bản từ F1-score
+        base_score = f1
+        
+        # Điều chỉnh dựa trên độ ổn định (stability adjustment)
+        # Độ lệch chuẩn thấp = điểm cao hơn
+        stability_factor = max(0.0, 1.0 - f1_std)
+        
+        # Điều chỉnh dựa trên số lượng mẫu
+        sample_confidence = min(num_samples / 20.0, 1.0)
+        
+        # Điều chỉnh dựa trên sự cân bằng precision-recall
+        balance_factor = 1.0 - abs(precision - recall) / max(precision + recall, 1e-6)
+        
+        # Tính điểm cuối cùng
+        final_score = base_score * stability_factor * sample_confidence * balance_factor
+        
+        return max(0.0, min(final_score, 1.0))
+    
+    def _calculate_diversity_score(self, synthetic_data: List[Dict[str, Any]]) -> float:
+        """
+        Tính điểm đa dạng dựa trên các thuộc tính khác nhau của dữ liệu synthetic.
+        Bao gồm đa dạng về relationship types, object classes và spatial distribution.
+        """
+        if not synthetic_data:
+            return 0.0
+        
+        # 1. Đa dạng về relationship types
+        unique_relations = set()
+        for data in synthetic_data:
+            if 'original_relationship' in data:
+                rel = data['original_relationship']
+                unique_relations.add(rel.get('relation', ''))
+        
+        relation_diversity = min(len(unique_relations) / 10.0, 1.0)
+        
+        # 2. Đa dạng về object classes
+        unique_subjects = set()
+        unique_objects = set()
+        for data in synthetic_data:
+            if 'original_relationship' in data:
+                rel = data['original_relationship']
+                unique_subjects.add(rel.get('subject', ''))
+                unique_objects.add(rel.get('object', ''))
+        
+        class_diversity = min(len(unique_subjects | unique_objects) / 15.0, 1.0)
+        
+        # 3. Đa dạng về spatial distribution (nếu có thông tin bbox)
+        spatial_diversity = self._calculate_spatial_diversity(synthetic_data)
+        
+        # Tính điểm tổng hợp với trọng số
+        final_score = (
+            0.4 * relation_diversity +
+            0.4 * class_diversity +
+            0.2 * spatial_diversity
+        )
+        
+        return max(0.0, min(final_score, 1.0))
+    
+    def _calculate_spatial_diversity(self, synthetic_data: List[Dict[str, Any]]) -> float:
+        """Tính đa dạng không gian dựa trên vị trí của các objects."""
+        if not synthetic_data:
+            return 0.0
+        
+        # Thu thập tất cả bbox từ synthetic data
+        all_bboxes = []
+        for data in synthetic_data:
+            if 'image' in data and hasattr(data['image'], 'size'):
+                width, height = data['image'].size
+                # Giả sử có thông tin về vị trí objects trong data
+                # Đây là một implementation đơn giản
+                all_bboxes.append([0.0, 0.0, width, height])  # Placeholder
+        
+        if len(all_bboxes) < 2:
+            return 0.0
+        
+        # Tính độ phân tán của các bbox
+        # Đây là một metric đơn giản, có thể cải thiện thêm
+        return min(len(all_bboxes) / 10.0, 1.0)
+    
+    def _calculate_consistency_score(self, f1_scores: List[float], precomputed_std: Optional[float] = None) -> float:
+        """
+        Tính điểm consistency dựa trên độ ổn định của các predictions.
+        Sử dụng độ lệch chuẩn và trend analysis.
+        """
+        if not f1_scores and (precomputed_std is None or precomputed_std == 0.0):
+            return 0.0
+        
+        if precomputed_std is not None:
+            std = float(precomputed_std)
+        else:
+            if not f1_scores:
+                return 0.0
+            mean_score = sum(f1_scores) / len(f1_scores)
+            variance = sum((score - mean_score) ** 2 for score in f1_scores) / len(f1_scores)
+            std = math.sqrt(variance)
+        
+        # Điểm consistency dựa trên độ lệch chuẩn (thấp = tốt)
+        consistency_from_std = max(0.0, 1.0 - min(std, 1.0))
+        
+        # Điểm consistency dựa trên trend (xu hướng cải thiện)
+        trend_score = self._calculate_trend_score(f1_scores)
+        
+        # Kết hợp hai chỉ số
+        final_score = 0.7 * consistency_from_std + 0.3 * trend_score
+        
+        return max(0.0, min(final_score, 1.0))
+    
+    def _calculate_trend_score(self, scores: List[float]) -> float:
+        """Tính điểm dựa trên xu hướng cải thiện của scores."""
+        if len(scores) < 3:
+            return 0.5  # Neutral score for insufficient data
+        
+        # Tính slope của linear regression đơn giản
+        n = len(scores)
+        x_mean = (n - 1) / 2
+        y_mean = sum(scores) / n
+        
+        numerator = sum((i - x_mean) * (scores[i] - y_mean) for i in range(n))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+        
+        if denominator == 0:
+            return 0.5
+        
+        slope = numerator / denominator
+        
+        # Chuyển slope thành điểm (slope > 0 = cải thiện)
+        trend_score = 0.5 + 0.5 * math.tanh(slope * 10)  # Scale và normalize
+        
+        return max(0.0, min(trend_score, 1.0))
+    
+    def _calculate_improvement_score(self) -> float:
+        """
+        Tính điểm cải thiện dựa trên lịch sử performance.
+        So sánh với baseline và xu hướng gần đây.
+        """
+        if len(self.performance_history['rewards']) < 3:
+            return 0.5  # Neutral score for insufficient history
+        
+        recent_rewards = list(self.performance_history['rewards'])[-10:]  # Last 10 rewards
+        baseline_reward = self.baseline_performance.get('overall', 0.5)
+        
+        # So sánh với baseline
+        current_avg = sum(recent_rewards) / len(recent_rewards)
+        baseline_improvement = (current_avg - baseline_reward) / max(baseline_reward, 1e-6)
+        
+        # Xu hướng cải thiện gần đây
+        trend_improvement = self._calculate_trend_score(recent_rewards)
+        
+        # Kết hợp hai chỉ số
+        final_score = 0.6 * (0.5 + 0.5 * math.tanh(baseline_improvement)) + 0.4 * trend_improvement
+        
+        return max(0.0, min(final_score, 1.0))
+    
+    def _calculate_dynamic_weights(self, detection_score: float, relationship_score: float, 
+                                  diversity_score: float, consistency_score: float) -> Dict[str, float]:
+        """
+        Tính trọng số động dựa trên hiệu suất hiện tại và lịch sử.
+        Trọng số sẽ thích ứng để tập trung vào các thành phần cần cải thiện.
+        """
+        # Trọng số cơ bản
+        base_weights = {
+            'detection': 0.25,
+            'relationship': 0.45,
+            'diversity': 0.15,
+            'consistency': 0.10,
+            'improvement': 0.05,
+        }
+        
+        # Tính độ lệch so với baseline
+        detection_deviation = abs(detection_score - self.baseline_performance['detection'])
+        relationship_deviation = abs(relationship_score - self.baseline_performance['relationship'])
+        diversity_deviation = abs(diversity_score - self.baseline_performance['diversity'])
+        consistency_deviation = abs(consistency_score - self.baseline_performance['consistency'])
+        
+        # Điều chỉnh trọng số dựa trên độ lệch (thành phần nào kém sẽ có trọng số cao hơn)
+        adjustment_factor = 0.2  # Mức độ điều chỉnh
+        
+        adjusted_weights = {
+            'detection': base_weights['detection'] + adjustment_factor * detection_deviation,
+            'relationship': base_weights['relationship'] + adjustment_factor * relationship_deviation,
+            'diversity': base_weights['diversity'] + adjustment_factor * diversity_deviation,
+            'consistency': base_weights['consistency'] + adjustment_factor * consistency_deviation,
+            'improvement': base_weights['improvement'],
+        }
+        
+        # Normalize để tổng = 1.0
+        total_weight = sum(adjusted_weights.values())
+        normalized_weights = {k: v / total_weight for k, v in adjusted_weights.items()}
+        
+        return normalized_weights
+    
+    def _apply_reward_scaling(self, raw_reward: float) -> float:
+        """
+        Áp dụng hàm điều chỉnh để đảm bảo điểm trong khoảng hợp lý.
+        Sử dụng sigmoid function để normalize.
+        """
+        # Sử dụng sigmoid để đưa điểm về khoảng [0, 1]
+        scaled_reward = 1.0 / (1.0 + math.exp(-self.scaling_factor * (raw_reward - 0.5)))
+        
+        return scaled_reward
+    
+    def _get_current_scaling_factor(self) -> float:
+        """Lấy scaling factor hiện tại dựa trên lịch sử performance."""
+        if len(self.performance_history['rewards']) < 5:
+            return 1.0
+        
+        recent_rewards = list(self.performance_history['rewards'])[-10:]
+        reward_variance = np.var(recent_rewards) if recent_rewards else 0.0
+        
+        # Scaling factor cao hơn khi variance thấp (performance ổn định)
+        scaling_factor = 1.0 + (1.0 - min(reward_variance, 1.0))
+        
+        return scaling_factor
+    
+    def _update_performance_history(self, reward: float, weights: Dict[str, float]) -> None:
+        """Cập nhật lịch sử performance để học từ kinh nghiệm."""
+        self.performance_history['rewards'].append(reward)
+        
+        # Cập nhật baseline performance nếu có cải thiện
+        if len(self.performance_history['rewards']) >= 10:
+            recent_avg = sum(list(self.performance_history['rewards'])[-10:]) / 10
+            if recent_avg > self.baseline_performance.get('overall', 0.5):
+                self.baseline_performance['overall'] = recent_avg
+        
+        # Cập nhật scaling factor
+        self.scaling_factor = self._get_current_scaling_factor()
     
     def calculate_diversity_reward(self, synthetic_data):
         """Calculate diversity reward based on synthetic data variety"""
@@ -1858,3 +2173,104 @@ class RelationshipReinforcementLearning:
             'variation_index': data.get('variation_index'),
             'relationship_index': data.get('relationship_index'),
         }
+    
+    def get_scoring_analysis(self) -> Dict[str, Any]:
+        """
+        Trả về phân tích chi tiết về hệ thống tính điểm hiện tại.
+        Giúp hiểu rõ cách điểm được tính và các thành phần đóng góp.
+        """
+        if not self.latest_reward_components:
+            return {
+                'status': 'No scoring data available',
+                'message': 'Run a training episode first to get scoring analysis'
+            }
+        
+        components = self.latest_reward_components
+        weights = components.get('dynamic_weights', {})
+        
+        analysis = {
+            'scoring_method': 'Adaptive Algorithm-Based Scoring',
+            'total_reward': components.get('total_reward', 0.0),
+            'scaling_factor': components.get('scaling_factor', 1.0),
+            'components': {
+                'detection_score': {
+                    'value': components.get('detection_score', 0.0),
+                    'weight': weights.get('detection', 0.0),
+                    'contribution': components.get('detection_score', 0.0) * weights.get('detection', 0.0),
+                    'description': 'Based on F1-score, precision-recall balance, and sample confidence'
+                },
+                'relationship_score': {
+                    'value': components.get('relationship_score', 0.0),
+                    'weight': weights.get('relationship', 0.0),
+                    'contribution': components.get('relationship_score', 0.0) * weights.get('relationship', 0.0),
+                    'description': 'Based on F1-score, stability (low std), and sample confidence'
+                },
+                'diversity_score': {
+                    'value': components.get('diversity_score', 0.0),
+                    'weight': weights.get('diversity', 0.0),
+                    'contribution': components.get('diversity_score', 0.0) * weights.get('diversity', 0.0),
+                    'description': 'Based on relationship types, object classes, and spatial distribution'
+                },
+                'consistency_score': {
+                    'value': components.get('consistency_score', 0.0),
+                    'weight': weights.get('consistency', 0.0),
+                    'contribution': components.get('consistency_score', 0.0) * weights.get('consistency', 0.0),
+                    'description': 'Based on prediction stability and improvement trend'
+                },
+                'improvement_score': {
+                    'value': components.get('improvement_score', 0.0),
+                    'weight': weights.get('improvement', 0.0),
+                    'contribution': components.get('improvement_score', 0.0) * weights.get('improvement', 0.0),
+                    'description': 'Based on performance history and baseline comparison'
+                }
+            },
+            'baseline_performance': self.baseline_performance,
+            'performance_history_size': len(self.performance_history['rewards']),
+            'algorithm_features': [
+                'Dynamic weight adjustment based on current performance',
+                'Confidence adjustment based on sample size',
+                'Stability measurement using standard deviation',
+                'Trend analysis using linear regression',
+                'Sigmoid scaling for reward normalization',
+                'Adaptive baseline updating'
+            ]
+        }
+        
+        return analysis
+    
+    def print_scoring_breakdown(self) -> None:
+        """In ra phân tích chi tiết về cách tính điểm."""
+        analysis = self.get_scoring_analysis()
+        
+        if analysis.get('status') == 'No scoring data available':
+            print(analysis['message'])
+            return
+        
+        print("\n" + "="*80)
+        print("📊 PHÂN TÍCH HỆ THỐNG TÍNH ĐIỂM")
+        print("="*80)
+        print(f"🎯 Tổng điểm: {analysis['total_reward']:.4f}")
+        print(f"⚖️  Scaling Factor: {analysis['scaling_factor']:.3f}")
+        print(f"📈 Lịch sử Performance: {analysis['performance_history_size']} epochs")
+        
+        print("\n🔍 CHI TIẾT CÁC THÀNH PHẦN:")
+        print("-" * 60)
+        
+        for component_name, component_data in analysis['components'].items():
+            print(f"\n{component_name.upper().replace('_', ' ')}:")
+            print(f"  • Giá trị: {component_data['value']:.4f}")
+            print(f"  • Trọng số: {component_data['weight']:.4f}")
+            print(f"  • Đóng góp: {component_data['contribution']:.4f}")
+            print(f"  • Mô tả: {component_data['description']}")
+        
+        print("\n📋 BASELINE PERFORMANCE:")
+        print("-" * 30)
+        for metric, value in analysis['baseline_performance'].items():
+            print(f"  • {metric}: {value:.3f}")
+        
+        print("\n⚙️  TÍNH NĂNG THUẬT TOÁN:")
+        print("-" * 30)
+        for feature in analysis['algorithm_features']:
+            print(f"  ✓ {feature}")
+        
+        print("\n" + "="*80)
