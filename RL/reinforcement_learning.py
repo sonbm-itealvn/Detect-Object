@@ -1569,7 +1569,14 @@ class RelationshipReinforcementLearning:
         }
         
         # 7. Cập nhật lịch sử để học từ kinh nghiệm
-        self._update_performance_history(total_reward, dynamic_weights)
+        self._update_performance_history(
+            total_reward,
+            dynamic_weights,
+            detection_score,
+            relationship_score,
+            diversity_score,
+            consistency_score,
+        )
         
         return total_reward
     
@@ -2136,17 +2143,72 @@ class RelationshipReinforcementLearning:
         
         return scaling_factor
     
-    def _update_performance_history(self, reward: float, weights: Dict[str, float]) -> None:
-        """Cập nhật lịch sử performance để học từ kinh nghiệm."""
+    def _update_performance_history(
+        self,
+        reward: float,
+        weights: Dict[str, float],
+        detection_score: float,
+        relationship_score: float,
+        diversity_score: float,
+        consistency_score: float,
+    ) -> None:
+        """Cập nhật lịch sử performance để học từ kinh nghiệm và cập nhật baseline động."""
+        # Lưu history phần thưởng và trọng số
         self.performance_history['rewards'].append(reward)
-        
-        # Cập nhật baseline performance nếu có cải thiện
+        self.performance_history['weight_history'].append(weights)
+
+        # Lưu history các thành phần điểm
+        self.performance_history['detection_scores'].append(detection_score)
+        self.performance_history['relationship_scores'].append(relationship_score)
+        self.performance_history['diversity_scores'].append(diversity_score)
+        self.performance_history['consistency_scores'].append(consistency_score)
+
+        # Cập nhật baseline tổng thể dựa trên trung bình gần đây
         if len(self.performance_history['rewards']) >= 10:
-            recent_avg = sum(list(self.performance_history['rewards'])[-10:]) / 10
-            if recent_avg > self.baseline_performance.get('overall', 0.5):
-                self.baseline_performance['overall'] = recent_avg
-        
-        # Cập nhật scaling factor
+            recent_rewards = list(self.performance_history['rewards'])[-10:]
+            recent_overall_avg = sum(recent_rewards) / len(recent_rewards)
+            prev_overall = self.baseline_performance.get('overall', 0.5)
+            # EWMA để mượt hơn, ưu tiên kinh nghiệm gần đây
+            alpha_overall = 0.3
+            self.baseline_performance['overall'] = (
+                alpha_overall * recent_overall_avg + (1 - alpha_overall) * prev_overall
+            )
+
+        # Cập nhật baseline cho detection/relationship/diversity/consistency dựa trên lịch sử gần đây
+        window = 10
+        alpha = 0.3  # hệ số EWMA để phản ánh xu hướng gần đây nhưng vẫn ổn định
+        # Helper lấy trung bình gần đây an toàn
+        def recent_avg(values) -> Optional[float]:
+            data = list(values)[-window:]
+            if not data:
+                return None
+            return float(sum(data) / len(data))
+
+        # Detection
+        det_avg = recent_avg(self.performance_history['detection_scores'])
+        if det_avg is not None:
+            prev = self.baseline_performance.get('detection', det_avg)
+            self.baseline_performance['detection'] = alpha * det_avg + (1 - alpha) * prev
+
+        # Relationship
+        rel_avg = recent_avg(self.performance_history['relationship_scores'])
+        if rel_avg is not None:
+            prev = self.baseline_performance.get('relationship', rel_avg)
+            self.baseline_performance['relationship'] = alpha * rel_avg + (1 - alpha) * prev
+
+        # Diversity
+        div_avg = recent_avg(self.performance_history['diversity_scores'])
+        if div_avg is not None:
+            prev = self.baseline_performance.get('diversity', div_avg)
+            self.baseline_performance['diversity'] = alpha * div_avg + (1 - alpha) * prev
+
+        # Consistency
+        cons_avg = recent_avg(self.performance_history['consistency_scores'])
+        if cons_avg is not None:
+            prev = self.baseline_performance.get('consistency', cons_avg)
+            self.baseline_performance['consistency'] = alpha * cons_avg + (1 - alpha) * prev
+
+        # Cập nhật scaling factor theo phân phối phần thưởng gần đây
         self.scaling_factor = self._get_current_scaling_factor()
     
     # Các phương thức cũ đã được thay thế bằng hệ thống mới
