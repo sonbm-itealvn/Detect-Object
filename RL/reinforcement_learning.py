@@ -108,7 +108,8 @@ class RelationshipReinforcementLearning:
 
         # Deep Q-Network agent configuration
         self.rl_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.action_space = [1, 3, 5, 7]
+        # Mở rộng action space để bao gồm nhiều số lượng variations
+        self.action_space = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         self.state_dim = 5
         self.q_network = self._build_q_network(self.state_dim, len(self.action_space)).to(self.rl_device)
         self.target_network = self._build_q_network(self.state_dim, len(self.action_space)).to(self.rl_device)
@@ -180,6 +181,9 @@ class RelationshipReinforcementLearning:
         else:
             with torch.no_grad():
                 q_values = self.q_network(state.unsqueeze(0))
+                # Log tất cả Q_values để debug
+                q_values_list = q_values.squeeze(0).cpu().tolist()
+                print(f"[RL] Q_values for all actions: {dict(zip(self.action_space, q_values_list))}")
                 action_index = int(q_values.argmax(dim=1).item())
         action_value = self.action_space[action_index]
         return action_index, action_value
