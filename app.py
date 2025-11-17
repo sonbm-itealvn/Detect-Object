@@ -6,11 +6,15 @@ import tkinter as tk
 from tkinter import Entry, filedialog, Label, Button, Canvas, Frame, Scrollbar, Text
 from PIL import Image, ImageTk, ImageDraw
 import os
+import sys
 import glob
+import cv2
+from typing import Optional
 from sentence_transformers import SentenceTransformer, util
 
 from RL.rl_enhancement import AppReinforcementLearning
 from RL.training_evaluator import TrainingEvaluator
+from video_relation_pipeline import VideoRelationPipeline
 
 class ObjectDetectionApp:
     def __init__(self, root):
@@ -67,6 +71,24 @@ class ObjectDetectionApp:
                                           font=("Arial", 12, "bold"), bg="#8e44ad", fg="white", 
                                           width=15, height=2, relief="flat", bd=0)
         self.btn_evaluate_training.pack(side="left", padx=10)
+
+        self.btn_select_video = Button(control_frame, text="Select Video", 
+                                      command=self.select_video,
+                                      font=("Arial", 12, "bold"), bg="#1abc9c", fg="white", 
+                                      width=15, height=2, relief="flat", bd=0)
+        self.btn_select_video.pack(side="left", padx=10)
+
+        self.btn_run_video = Button(control_frame, text="Run Video Demo", 
+                                   command=self.run_video_demo_thread,
+                                   font=("Arial", 12, "bold"), bg="#16a085", fg="white", 
+                                   width=18, height=2, relief="flat", bd=0)
+        self.btn_run_video.pack(side="left", padx=10)
+
+        self.btn_stop_video = Button(control_frame, text="dY\"= Stop Video", 
+                                    command=self.stop_video_demo,
+                                    font=("Arial", 12, "bold"), bg="#c0392b", fg="white", 
+                                    width=15, height=2, relief="flat", bd=0)
+        self.btn_stop_video.pack(side="left", padx=10)
 
         # Frame chính chứa 3 cột
         main_frame = Frame(root, bg="#f5f5f5")
@@ -134,47 +156,136 @@ class ObjectDetectionApp:
 
         # Load model
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.video_path = None
+        self.video_pipeline: Optional[VideoRelationPipeline] = None
+        self.video_thread: Optional[threading.Thread] = None
+        self.video_stop_event = threading.Event()
+        self.latest_video_outputs = {}
 
     def select_image(self):
-        file_path = filedialog.askopenfilename(title="Chọn ảnh", filetypes=[("Image files", "*.jpg *.jpeg *.png")])
-        if file_path:
-            self.image_path = file_path
-            self.display_image(file_path)
-            # Tự động tải lại dữ liệu JSON khi chọn ảnh mới
-            self.title_label.config(text="🔄 Đang tải dữ liệu JSON...")
-            self.load_and_display_objects()
-            self.load_and_display_relationships()
-            self.title_label.config(text="✅ Đã tải dữ liệu JSON cho ảnh mới!")
+        file_path = filedialog.askopenfilename(
+            title="Select image",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png")],
+        )
+        if not file_path:
+            return
+        self.image_path = file_path
+        self.display_image(file_path)
+        self.title_label.config(text="Loading JSON data...")
+        self.load_and_display_objects()
+        self.load_and_display_relationships()
+        self.title_label.config(text="JSON data loaded for the new image.")
 
-    def display_image(self, path):
+    def select_video(self):
+        file_path = filedialog.askopenfilename(
+            title="Select video",
+            filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+        self.video_path = file_path
+        self.title_label.config(text=f"Selected video: {os.path.basename(file_path)}")
+        self.display_video_thumbnail(file_path)
+
+    def display_video_thumbnail(self, video_path: str):
+        cap = cv2.VideoCapture(video_path)
+        success, frame = cap.read()
+        cap.release()
+        if success:
+            self.display_frame_from_array(frame)
+            self.title_label.config(text=f"Video ready: {os.path.basename(video_path)}")
+        else:
+            self.title_label.config(text="Unable to read the first frame from the video.")
+
+    def display_image(self, path: str):
         try:
             image = Image.open(path)
-            # Tính toán kích thước phù hợp với canvas
-            canvas_width = 500
-            canvas_height = 400
-            
-            # Tính tỷ lệ để giữ nguyên tỷ lệ ảnh
-            img_width, img_height = image.size
-            ratio = min(canvas_width/img_width, canvas_height/img_height)
-            
-            new_width = int(img_width * ratio)
-            new_height = int(img_height * ratio)
-            
-            image = image.resize((new_width, new_height), Image.LANCZOS)
-            self.img_tk = ImageTk.PhotoImage(image)
-            
-            # Xóa ảnh cũ và vẽ ảnh mới ở giữa canvas
-            self.canvas.delete("all")
-            x = canvas_width // 2
-            y = canvas_height // 2
-            self.canvas.create_image(x, y, image=self.img_tk)
-            
-        except Exception as e:
-            print(f"❌ Lỗi hiển thị ảnh: {e}")
-            self.canvas.delete("all")
-            self.canvas.create_text(250, 200, text=f"❌ Lỗi tải ảnh:\n{str(e)}", 
-                                  font=("Arial", 12), fill="red", justify="center")
+        except Exception as exc:
+            print(f"Error loading image: {exc}")
+            self._show_error_on_canvas(f"Error loading image:\\n{exc}")
+            return
+        self._show_image_on_canvas(image)
 
+    def display_frame_from_array(self, frame):
+        try:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(frame_rgb)
+            self._show_image_on_canvas(image)
+        except Exception as exc:
+            print(f"Error displaying frame: {exc}")
+            self._show_error_on_canvas(f"Frame display error:\\n{exc}")
+
+    def _show_image_on_canvas(self, image: Image.Image):
+        canvas_width = 500
+        canvas_height = 400
+        try:
+            img_width, img_height = image.size
+            if img_width <= 0 or img_height <= 0:
+                raise ValueError("Invalid image dimensions.")
+            ratio = min(canvas_width / img_width, canvas_height / img_height)
+            new_width = max(1, int(img_width * ratio))
+            new_height = max(1, int(img_height * ratio))
+            resized = image.resize((new_width, new_height), Image.LANCZOS)
+            self.img_tk = ImageTk.PhotoImage(resized)
+            self.canvas.delete("all")
+            self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.img_tk)
+        except Exception as exc:
+            print(f"Error showing image on canvas: {exc}")
+            self._show_error_on_canvas(f"Canvas display error:\\n{exc}")
+
+    def _show_error_on_canvas(self, message: str):
+        self.canvas.delete("all")
+        self.canvas.create_text(
+            250,
+            200,
+            text=message,
+            font=("Arial", 12),
+            fill="red",
+            justify="center",
+        )
+
+    def _render_video_summary(self, summary_path: Optional[str]):
+        if not summary_path or not os.path.exists(summary_path):
+            return
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+        except Exception as exc:
+            print(f"Error loading video summary: {exc}")
+            return
+        objects = summary.get("objects", [])
+        relations = summary.get("relations", [])
+
+        self.objects_text.delete(1.0, tk.END)
+        if objects:
+            obj_lines = [f"{entry.get('label','?')}: {entry.get('count',0)}" for entry in objects[:20]]
+            self.objects_text.insert(tk.END, "\n".join(obj_lines))
+        else:
+            self.objects_text.insert(tk.END, "Không có vật thể nào được phát hiện.")
+
+        self.relationships_text.delete(1.0, tk.END)
+        if relations:
+            rel_lines = []
+            for entry in relations[:20]:
+                rel_lines.append(
+                    f"{entry.get('subject','?')} {entry.get('relation','?')} {entry.get('object','?')} ({entry.get('count',0)})"
+                )
+            self.relationships_text.insert(tk.END, "\n".join(rel_lines))
+        else:
+            self.relationships_text.insert(tk.END, "Không có mối quan hệ nào được phát hiện.")
+
+    def _open_video_file(self, video_path: Optional[str]):
+        if not video_path or not os.path.exists(video_path):
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(video_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", video_path])
+            else:
+                subprocess.Popen(["xdg-open", video_path])
+        except Exception as exc:
+            print(f"Unable to open video output: {exc}")
 
     def load_and_display_objects(self):
         """Tải và hiển thị danh sách vật thể từ JSON"""
@@ -528,6 +639,107 @@ class ObjectDetectionApp:
         except Exception as e:
             self.title_label.config(text=f"❌ Lỗi: {e}")
             print(f"❌ Lỗi xảy ra: {e}")
+
+
+    def run_video_demo_thread(self):
+        if not self.video_path:
+            self.title_label.config(text="❌ Hãy chọn video trước khi chạy demo!")
+            return
+        if self.video_thread and self.video_thread.is_alive():
+            self.title_label.config(text="Video relation demo đang chạy...")
+            return
+        self.title_label.config(text="Đang chuẩn bị chạy video relation demo...")
+        self.video_thread = threading.Thread(target=self.run_video_demo, daemon=True)
+        self.video_thread.start()
+
+    def run_video_demo(self):
+        try:
+            self.video_stop_event.clear()
+            if self.video_pipeline is None:
+                self.video_pipeline = VideoRelationPipeline(
+                    reltr_checkpoint=self.checkpoint_path,
+                    voice_enabled=True,
+                )
+
+            def handle_frame(frame):
+                frame_copy = frame.copy()
+                self.root.after(0, lambda f=frame_copy: self.display_frame_from_array(f))
+
+            def handle_relations(payload):
+                relations = payload.get("relations", [])
+                objects = payload.get("objects", [])
+                self.root.after(0, lambda rels=relations: self._update_live_relations(rels))
+                self.root.after(0, lambda objs=objects: self._update_live_objects(objs))
+
+            outputs = self.video_pipeline.process_video(
+                self.video_path,
+                output_dir="video_outputs",
+                frame_stride=2,
+                on_frame=handle_frame,
+                on_relations=handle_relations,
+                stop_event=self.video_stop_event,
+            )
+            self.latest_video_outputs = outputs
+            if outputs.get("json"):
+                self.relationship_json_path = outputs["json"]
+
+            status = (
+                "Đã dừng video relation demo."
+                if self.video_stop_event.is_set()
+                else f"Hoàn tất video demo: {os.path.basename(outputs['video'])}"
+            )
+            self.root.after(0, lambda msg=status: self.title_label.config(text=msg))
+            self.root.after(0, self.load_and_display_relationships)
+            summary_file = outputs.get("summary")
+            self.root.after(0, lambda path=summary_file: self._render_video_summary(path))
+            video_file = outputs.get("video")
+            self.root.after(0, lambda path=video_file: self._open_video_file(path))
+        except Exception as exc:
+            self.root.after(0, lambda: self.title_label.config(text=f"❌ Lỗi video demo: {exc}"))
+            print(f"Video demo error: {exc}")
+
+    def stop_video_demo(self):
+        if self.video_thread and self.video_thread.is_alive():
+            self.video_stop_event.set()
+            self.title_label.config(text="Đang dừng video relation demo...")
+        else:
+            self.title_label.config(text="Không có video relation demo đang chạy.")
+
+    def _update_live_relations(self, relations):
+        self.relationships_text.delete(1.0, tk.END)
+        if not relations:
+            self.relationships_text.insert(tk.END, "Không có mối quan hệ nào được phát hiện.")
+            return
+        lines = []
+        for rel in relations[:20]:
+            subject = rel.get("subject", "unknown")
+            relation = rel.get("relation", "liên quan")
+            obj = rel.get("object", "unknown")
+            confidence = rel.get("confidence", 0.0)
+            subj_id = rel.get("subject_track_id")
+            obj_id = rel.get("object_track_id")
+            prefix = ""
+            if subj_id is not None or obj_id is not None:
+                prefix = f"[{subj_id or '-'}->{obj_id or '-'}] "
+            lines.append(f"{prefix}{subject} {relation} {obj} ({confidence:.2f})")
+        self.relationships_text.insert(tk.END, "\n".join(lines))
+
+    def _update_live_objects(self, objects):
+        self.objects_text.delete(1.0, tk.END)
+        if not objects:
+            self.objects_text.insert(tk.END, "Không có vật thể nào được phát hiện.")
+            return
+        lines = []
+        for obj in objects[:20]:
+            label = obj.get("class", "object")
+            track_id = obj.get("track_id")
+            confidence = obj.get("confidence", 0.0)
+            if track_id is not None:
+                lines.append(f"ID {track_id}: {label} ({confidence:.2f})")
+            else:
+                lines.append(f"{label} ({confidence:.2f})")
+        self.objects_text.insert(tk.END, "\n".join(lines))
+
 
     def run_rl_training(self):
         """Run reinforcement learning training in separate thread"""
