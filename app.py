@@ -274,19 +274,6 @@ class ObjectDetectionApp:
         else:
             self.relationships_text.insert(tk.END, "Không có mối quan hệ nào được phát hiện.")
 
-    def _open_video_file(self, video_path: Optional[str]):
-        if not video_path or not os.path.exists(video_path):
-            return
-        try:
-            if os.name == "nt":
-                os.startfile(video_path)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", video_path])
-            else:
-                subprocess.Popen(["xdg-open", video_path])
-        except Exception as exc:
-            print(f"Unable to open video output: {exc}")
-
     def load_and_display_objects(self):
         """Tải và hiển thị danh sách vật thể từ JSON"""
         try:
@@ -658,7 +645,6 @@ class ObjectDetectionApp:
             if self.video_pipeline is None:
                 self.video_pipeline = VideoRelationPipeline(
                     reltr_checkpoint=self.checkpoint_path,
-                    voice_enabled=True,
                 )
 
             def handle_frame(frame):
@@ -680,8 +666,6 @@ class ObjectDetectionApp:
                 stop_event=self.video_stop_event,
             )
             self.latest_video_outputs = outputs
-            if outputs.get("json"):
-                self.relationship_json_path = outputs["json"]
 
             status = (
                 "Đã dừng video relation demo."
@@ -689,11 +673,8 @@ class ObjectDetectionApp:
                 else f"Hoàn tất video demo: {os.path.basename(outputs['video'])}"
             )
             self.root.after(0, lambda msg=status: self.title_label.config(text=msg))
-            self.root.after(0, self.load_and_display_relationships)
             summary_file = outputs.get("summary")
             self.root.after(0, lambda path=summary_file: self._render_video_summary(path))
-            video_file = outputs.get("video")
-            self.root.after(0, lambda path=video_file: self._open_video_file(path))
         except Exception as exc:
             self.root.after(0, lambda: self.title_label.config(text=f"❌ Lỗi video demo: {exc}"))
             print(f"Video demo error: {exc}")

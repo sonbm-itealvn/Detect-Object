@@ -18,11 +18,6 @@ from models import build_model
 from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
 
-try:
-    import pyttsx3
-except ImportError:  # pragma: no cover - optional dependency
-    pyttsx3 = None
-
 
 FrameCallback = Optional[Callable[[np.ndarray], None]]
 RelationCallback = Optional[Callable[[Dict[str, List[Dict[str, object]]]], None]]
@@ -198,44 +193,12 @@ class VideoRelationPipeline:
         tracker_config: Optional[str] = "bytetrack.yaml",
         min_confidence: float = 0.55,
         announce_min_confidence: float = 0.6,
-        voice_enabled: bool = True,
     ):
         self.rel_engine = RelTRInferenceEngine(reltr_checkpoint)
         self.yolo_model = detection_pipeline.yolo_model
         self.tracker_config = tracker_config
         self.min_confidence = min_confidence
         self.announce_threshold = announce_min_confidence
-        self.voice_enabled = voice_enabled and pyttsx3 is not None
-        self.spoken_relations: Dict[str, float] = {}
-        self.voice_engine = None
-        if self.voice_enabled:
-            try:
-                self.voice_engine = pyttsx3.init()
-                self.voice_engine.setProperty("rate", 185)
-            except Exception:
-                self.voice_engine = None
-                self.voice_enabled = False
-
-    def _announce(self, relations: List[Dict[str, object]]):
-        if not self.voice_enabled or not self.voice_engine or not relations:
-            return
-        now = time.time()
-        cooldown = 3.0
-        utterances: List[str] = []
-        for rel in relations:
-            if rel.get("confidence", 0.0) < self.announce_threshold:
-                continue
-            key = f"{rel.get('subject_track_id')}-{rel.get('relation')}-{rel.get('object_track_id')}"
-            last = self.spoken_relations.get(key, 0.0)
-            if now - last < cooldown:
-                continue
-            utterance = f"{rel.get('subject', 'vat the')} {rel.get('relation', 'lien quan')} {rel.get('object', 'vat the')}"
-            self.spoken_relations[key] = now
-            utterances.append(utterance)
-        if utterances:
-            for sentence in utterances:
-                self.voice_engine.say(sentence)
-            self.voice_engine.runAndWait()
 
     def process_video(
         self,
@@ -250,12 +213,10 @@ class VideoRelationPipeline:
         output_root = Path(output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
         annotated_path = output_root / f"{Path(video_path).stem}_relations.avi"
-        summary_path = output_root / f"{Path(video_path).stem}_relations.json"
         stats_path = output_root / f"{Path(video_path).stem}_summary.json"
 
         fps = self._read_video_fps(video_path)
         writer = None
-        summaries: List[Dict[str, object]] = []
         object_counter: Counter[str] = Counter()
         relation_counter: Counter[str] = Counter()
         stream = self.yolo_model.track(
@@ -297,22 +258,13 @@ class VideoRelationPipeline:
                         (width, height),
                     )
                 writer.write(annotated)
-                summaries.append({
-                    "frame": frame_idx,
-                    "timestamp": time.time(),
-                    "objects": objects,
-                    "relations": relations,
-                })
                 if on_frame:
                     on_frame(annotated.copy())
                 if on_relations:
                     on_relations({"frame": frame_idx, "relations": relations, "objects": objects})
-                self._announce(relations)
         finally:
             if writer is not None:
                 writer.release()
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(summaries, f, ensure_ascii=False, indent=2)
             stats_payload = {
                 "objects": [
                     {"label": label, "count": count}
@@ -331,7 +283,7 @@ class VideoRelationPipeline:
             }
             with open(stats_path, "w", encoding="utf-8") as f:
                 json.dump(stats_payload, f, ensure_ascii=False, indent=2)
-        return {"video": str(annotated_path), "json": str(summary_path), "summary": str(stats_path)}
+        return {"video": str(annotated_path), "summary": str(stats_path)}
 
     def _safe_consume_feature_map(self):
         try:
