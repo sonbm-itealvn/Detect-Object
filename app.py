@@ -21,131 +21,331 @@ class ObjectDetectionApp:
         self.root = root
         self.root.title("Object Detection & Relationship Analysis")
         self.root.geometry("1400x800")
-        self.root.configure(bg="#f5f5f5")
+        self.root.minsize(800, 600)
+        
+        # Modern color scheme
+        self.colors = {
+            'bg_main': '#0f172a',  # Dark slate
+            'bg_secondary': '#1e293b',  # Slate
+            'bg_card': '#ffffff',
+            'bg_card_dark': '#f8fafc',
+            'accent_primary': '#3b82f6',  # Blue
+            'accent_success': '#10b981',  # Green
+            'accent_warning': '#f59e0b',  # Amber
+            'accent_danger': '#ef4444',  # Red
+            'accent_purple': '#8b5cf6',  # Purple
+            'accent_teal': '#14b8a6',  # Teal
+            'text_primary': '#1e293b',
+            'text_secondary': '#64748b',
+            'text_light': '#ffffff',
+            'border': '#e2e8f0',
+            'shadow': '#cbd5e1'
+        }
+        
+        self.root.configure(bg=self.colors['bg_main'])
+        
+        # Bind resize event để responsive
+        self.root.bind("<Configure>", self.on_window_resize)
 
-        # Tiêu đề chính
-        title_frame = Frame(root, bg="#2c3e50", height=80)
-        title_frame.pack(fill="x", pady=(0, 20))
+        # Modern header với gradient effect
+        title_frame = Frame(root, bg=self.colors['bg_secondary'], height=70)
+        title_frame.pack(fill="x", pady=(0, 15))
         title_frame.pack_propagate(False)
         
-        self.title_label = Label(title_frame, text="🔍 Object Detection & Relationship Analysis", 
-                               font=("Arial", 18, "bold"), bg="#2c3e50", fg="white")
-        self.title_label.pack(expand=True)
+        # Title với better styling
+        title_inner = Frame(title_frame, bg=self.colors['bg_secondary'])
+        title_inner.pack(expand=True, fill="both", padx=20)
+        
+        self.title_label = Label(title_inner, 
+                               text="🔍 Object Detection & Relationship Analysis", 
+                               font=("Segoe UI", 16, "bold"), 
+                               bg=self.colors['bg_secondary'], 
+                               fg=self.colors['text_light'])
+        self.title_label.pack(expand=True, pady=15)
 
-        # Frame chứa các nút điều khiển
-        control_frame = Frame(root, bg="#f5f5f5")
-        control_frame.pack(pady=(0, 20))
-
-        self.btn_select = Button(control_frame, text="📁 Select Image", command=self.select_image, 
-                               font=("Arial", 12, "bold"), bg="#3498db", fg="white", 
-                               width=15, height=2, relief="flat", bd=0)
-        self.btn_select.pack(side="left", padx=10)
-
-        self.btn_run = Button(control_frame, text="▶️ Detect Object", command=self.run_pipeline_thread, 
-                            font=("Arial", 12, "bold"), bg="#27ae60", fg="white", 
-                            width=15, height=2, relief="flat", bd=0)
-        self.btn_run.pack(side="left", padx=10)
-
-        self.btn_refresh = Button(control_frame, text="🔄 Reload Data", command=self.refresh_data, 
-                                font=("Arial", 12, "bold"), bg="#f39c12", fg="white", 
-                                width=15, height=2, relief="flat", bd=0)
-        self.btn_refresh.pack(side="left", padx=10)
+        # Modern control panel với card design
+        control_container = Frame(root, bg=self.colors['bg_main'])
+        control_container.pack(fill="x", pady=(0, 15), padx=15)
+        
+        # Card frame cho buttons
+        control_card = Frame(control_container, bg=self.colors['bg_card'], relief="flat", bd=0)
+        control_card.pack(fill="x", padx=0, pady=0)
+        
+        # Canvas và scrollbar cho control buttons
+        control_canvas = Canvas(control_card, bg=self.colors['bg_card'], height=90, highlightthickness=0)
+        control_scrollbar = Scrollbar(control_card, orient="horizontal", command=control_canvas.xview,
+                                     bg=self.colors['bg_card'], troughcolor=self.colors['bg_card_dark'],
+                                     activebackground=self.colors['accent_primary'])
+        control_scrollable_frame = Frame(control_canvas, bg=self.colors['bg_card'])
+        
+        control_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: control_canvas.configure(scrollregion=control_canvas.bbox("all"))
+        )
+        
+        control_canvas.create_window((0, 0), window=control_scrollable_frame, anchor="nw")
+        control_canvas.configure(xscrollcommand=control_scrollbar.set)
+        
+        control_canvas.pack(side="left", fill="both", expand=True, padx=15, pady=15)
+        control_scrollbar.pack(side="right", fill="y", padx=(0, 15), pady=15)
+        
+        # Lưu reference để có thể cập nhật
+        self.control_frame = control_scrollable_frame
+        self.control_canvas = control_canvas
         
         self.rl_enhancement = AppReinforcementLearning(self)
         self.training_evaluator = TrainingEvaluator()
 
-        self.btn_rl_train = Button(control_frame, text="🧠 RL Training", 
-                                 command=self.run_rl_training,
-                                 font=("Arial", 12, "bold"), bg="#9b59b6", fg="white", 
-                                 width=15, height=2, relief="flat", bd=0)
-        self.btn_rl_train.pack(side="left", padx=10)
+        # Modern button style với hover effects
+        def create_modern_button(parent, text, command, bg_color, hover_color=None):
+            if hover_color is None:
+                hover_color = bg_color
+            btn = Button(parent, text=text, command=command,
+                        font=("Segoe UI", 10, "bold"), 
+                        bg=bg_color, fg="white", 
+                        width=14, height=2, 
+                        relief="flat", bd=0, 
+                        cursor="hand2",
+                        activebackground=hover_color,
+                        activeforeground="white")
+            
+            # Hover effect
+            def on_enter(e):
+                btn.configure(bg=hover_color)
+            def on_leave(e):
+                btn.configure(bg=bg_color)
+            
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+            return btn
+
+        # Tạo các nút với modern styling
+        self.btn_select = create_modern_button(
+            self.control_frame, "📁 Select Image", self.select_image,
+            self.colors['accent_primary'], '#2563eb'
+        )
+        self.btn_select.pack(side="left", padx=8, pady=8)
+
+        self.btn_run = create_modern_button(
+            self.control_frame, "▶️ Detect Object", self.run_pipeline_thread,
+            self.colors['accent_success'], '#059669'
+        )
+        self.btn_run.pack(side="left", padx=8, pady=8)
+
+        self.btn_refresh = create_modern_button(
+            self.control_frame, "🔄 Reload Data", self.refresh_data,
+            self.colors['accent_warning'], '#d97706'
+        )
+        self.btn_refresh.pack(side="left", padx=8, pady=8)
+
+        self.btn_rl_train = create_modern_button(
+            self.control_frame, "🧠 RL Training", self.run_rl_training,
+            self.colors['accent_purple'], '#7c3aed'
+        )
+        self.btn_rl_train.pack(side="left", padx=8, pady=8)
         
-        self.btn_generate_synthetic = Button(control_frame, text="🎨 Generate Synthetic", 
-                                           command=self.generate_synthetic_data,
-                                           font=("Arial", 12, "bold"), bg="#e67e22", fg="white", 
-                                           width=15, height=2, relief="flat", bd=0)
-        self.btn_generate_synthetic.pack(side="left", padx=10)
+        self.btn_generate_synthetic = create_modern_button(
+            self.control_frame, "🎨 Generate Synthetic", self.generate_synthetic_data,
+            '#f97316', '#ea580c'  # Orange
+        )
+        self.btn_generate_synthetic.pack(side="left", padx=8, pady=8)
         
-        self.btn_evaluate_training = Button(control_frame, text="📊 Evaluate Training", 
-                                          command=self.evaluate_training_results,
-                                          font=("Arial", 12, "bold"), bg="#8e44ad", fg="white", 
-                                          width=15, height=2, relief="flat", bd=0)
-        self.btn_evaluate_training.pack(side="left", padx=10)
+        self.btn_evaluate_training = create_modern_button(
+            self.control_frame, "📊 Evaluate Training", self.evaluate_training_results,
+            '#a855f7', '#9333ea'  # Purple variant
+        )
+        self.btn_evaluate_training.pack(side="left", padx=8, pady=8)
 
-        self.btn_select_video = Button(control_frame, text="Select Video", 
-                                      command=self.select_video,
-                                      font=("Arial", 12, "bold"), bg="#1abc9c", fg="white", 
-                                      width=15, height=2, relief="flat", bd=0)
-        self.btn_select_video.pack(side="left", padx=10)
+        self.btn_select_video = create_modern_button(
+            self.control_frame, "📹 Select Video", self.select_video,
+            self.colors['accent_teal'], '#0d9488'
+        )
+        self.btn_select_video.pack(side="left", padx=8, pady=8)
 
-        self.btn_run_video = Button(control_frame, text="Run Video Demo", 
-                                   command=self.run_video_demo_thread,
-                                   font=("Arial", 12, "bold"), bg="#16a085", fg="white", 
-                                   width=18, height=2, relief="flat", bd=0)
-        self.btn_run_video.pack(side="left", padx=10)
+        self.btn_run_video = create_modern_button(
+            self.control_frame, "▶️ Run Video Demo", self.run_video_demo_thread,
+            '#06b6d4', '#0891b2'  # Cyan
+        )
+        self.btn_run_video.pack(side="left", padx=8, pady=8)
 
-        self.btn_stop_video = Button(control_frame, text="dY\"= Stop Video", 
-                                    command=self.stop_video_demo,
-                                    font=("Arial", 12, "bold"), bg="#c0392b", fg="white", 
-                                    width=15, height=2, relief="flat", bd=0)
-        self.btn_stop_video.pack(side="left", padx=10)
-
-        # Frame chính chứa 3 cột
-        main_frame = Frame(root, bg="#f5f5f5")
-        main_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-
-        # Cột 1: Hiển thị ảnh
-        self.image_frame = Frame(main_frame, bg="white", relief="solid", bd=2)
-        self.image_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        self.btn_stop_video = create_modern_button(
+            self.control_frame, "⏹️ Stop Video", self.stop_video_demo,
+            self.colors['accent_danger'], '#dc2626'
+        )
+        self.btn_stop_video.pack(side="left", padx=8, pady=8)
         
-        image_title = Label(self.image_frame, text="🖼️ Hình ảnh", font=("Arial", 14, "bold"), 
-                           bg="white", fg="#2c3e50")
-        image_title.pack(pady=10)
-        
-        self.canvas = Canvas(self.image_frame, width=500, height=400, bg="white", relief="flat")
-        self.canvas.pack(pady=(0, 10), padx=10)
+        # Update scroll region
+        self.control_frame.update_idletasks()
+        self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all"))
 
-        # Cột 2: Danh sách vật thể
-        self.objects_frame = Frame(main_frame, bg="white", relief="solid", bd=2, width=300)
-        self.objects_frame.pack(side="left", fill="y", padx=(0, 10))
-        self.objects_frame.pack_propagate(False)
+        # Frame chính chứa 3 cột với modern card design
+        main_container = Frame(root, bg=self.colors['bg_main'])
+        main_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
         
-        objects_title = Label(self.objects_frame, text="📦 Vật thể được phát hiện", 
-                            font=("Arial", 14, "bold"), bg="white", fg="#2c3e50")
-        objects_title.pack(pady=10)
+        # Sử dụng grid layout để responsive
+        main_container.grid_columnconfigure(0, weight=2, minsize=350)
+        main_container.grid_columnconfigure(1, weight=1, minsize=250)
+        main_container.grid_columnconfigure(2, weight=1, minsize=250)
+        main_container.grid_rowconfigure(0, weight=1)
+
+        # Cột 1: Hiển thị ảnh với modern card
+        image_card = Frame(main_container, bg=self.colors['bg_card'], relief="flat", bd=0)
+        image_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        image_card.grid_propagate(False)
+        
+        # Header cho image card
+        image_header = Frame(image_card, bg=self.colors['accent_primary'], height=45)
+        image_header.pack(fill="x")
+        image_header.pack_propagate(False)
+        
+        image_title = Label(image_header, text="🖼️ Hình ảnh", 
+                          font=("Segoe UI", 13, "bold"), 
+                          bg=self.colors['accent_primary'], 
+                          fg="white")
+        image_title.pack(expand=True, pady=12)
+        
+        # Canvas container với padding
+        canvas_container = Frame(image_card, bg=self.colors['bg_card'])
+        canvas_container.pack(fill="both", expand=True, padx=15, pady=15)
+        
+        self.canvas = Canvas(canvas_container, bg="#f1f5f9", relief="flat", 
+                           highlightthickness=1, highlightbackground=self.colors['border'],
+                           highlightcolor=self.colors['accent_primary'])
+        self.canvas.pack(fill="both", expand=True)
+
+        # Cột 2: Danh sách vật thể với modern card
+        objects_card = Frame(main_container, bg=self.colors['bg_card'], relief="flat", bd=0)
+        objects_card.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+        objects_card.grid_propagate(False)
+        
+        # Header cho objects card
+        objects_header = Frame(objects_card, bg=self.colors['accent_success'], height=45)
+        objects_header.pack(fill="x")
+        objects_header.pack_propagate(False)
+        
+        objects_title = Label(objects_header, text="📦 Vật thể được phát hiện", 
+                            font=("Segoe UI", 13, "bold"), 
+                            bg=self.colors['accent_success'], 
+                            fg="white")
+        objects_title.pack(expand=True, pady=12)
         
         # Scrollbar cho danh sách vật thể
-        objects_scroll_frame = Frame(self.objects_frame, bg="white")
-        objects_scroll_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        objects_scroll_frame = Frame(objects_card, bg=self.colors['bg_card'])
+        objects_scroll_frame.pack(fill="both", expand=True, padx=12, pady=12)
         
-        self.objects_text = Text(objects_scroll_frame, height=15, width=35, font=("Arial", 10), 
-                               bg="#f8f9fa", fg="#2c3e50", relief="flat", bd=0, wrap="word")
-        objects_scrollbar = Scrollbar(objects_scroll_frame, orient="vertical", command=self.objects_text.yview)
+        self.objects_text = Text(objects_scroll_frame, 
+                               font=("Segoe UI", 10), 
+                               bg="#f8fafc", 
+                               fg=self.colors['text_primary'],
+                               relief="flat", 
+                               bd=0, 
+                               wrap="word",
+                               padx=10,
+                               pady=10)
+        objects_scrollbar = Scrollbar(objects_scroll_frame, 
+                                     orient="vertical", 
+                                     command=self.objects_text.yview,
+                                     bg=self.colors['bg_card'],
+                                     troughcolor=self.colors['bg_card_dark'],
+                                     activebackground=self.colors['accent_success'])
         self.objects_text.configure(yscrollcommand=objects_scrollbar.set)
         
         self.objects_text.pack(side="left", fill="both", expand=True)
         objects_scrollbar.pack(side="right", fill="y")
 
-        # Cột 3: Danh sách mối quan hệ
-        self.relationships_frame = Frame(main_frame, bg="white", relief="solid", bd=2, width=300)
-        self.relationships_frame.pack(side="left", fill="y")
-        self.relationships_frame.pack_propagate(False)
+        # Cột 3: Danh sách mối quan hệ với modern card
+        relationships_card = Frame(main_container, bg=self.colors['bg_card'], relief="flat", bd=0)
+        relationships_card.grid(row=0, column=2, sticky="nsew")
+        relationships_card.grid_propagate(False)
         
-        relationships_title = Label(self.relationships_frame, text="🔗 Mối quan hệ", 
-                                  font=("Arial", 14, "bold"), bg="white", fg="#2c3e50")
-        relationships_title.pack(pady=10)
+        # Header cho relationships card
+        relationships_header = Frame(relationships_card, bg=self.colors['accent_purple'], height=45)
+        relationships_header.pack(fill="x")
+        relationships_header.pack_propagate(False)
+        
+        relationships_title = Label(relationships_header, text="🔗 Mối quan hệ", 
+                                  font=("Segoe UI", 13, "bold"), 
+                                  bg=self.colors['accent_purple'], 
+                                  fg="white")
+        relationships_title.pack(expand=True, pady=12)
         
         # Scrollbar cho danh sách mối quan hệ
-        relationships_scroll_frame = Frame(self.relationships_frame, bg="white")
-        relationships_scroll_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        relationships_scroll_frame = Frame(relationships_card, bg=self.colors['bg_card'])
+        relationships_scroll_frame.pack(fill="both", expand=True, padx=12, pady=12)
         
-        self.relationships_text = Text(relationships_scroll_frame, height=15, width=35, font=("Arial", 10), 
-                                     bg="#f8f9fa", fg="#2c3e50", relief="flat", bd=0, wrap="word")
-        relationships_scrollbar = Scrollbar(relationships_scroll_frame, orient="vertical", command=self.relationships_text.yview)
+        self.relationships_text = Text(relationships_scroll_frame, 
+                                     font=("Segoe UI", 10), 
+                                     bg="#f8fafc", 
+                                     fg=self.colors['text_primary'],
+                                     relief="flat", 
+                                     bd=0, 
+                                     wrap="word",
+                                     padx=10,
+                                     pady=10)
+        relationships_scrollbar = Scrollbar(relationships_scroll_frame, 
+                                         orient="vertical", 
+                                         command=self.relationships_text.yview,
+                                         bg=self.colors['bg_card'],
+                                         troughcolor=self.colors['bg_card_dark'],
+                                         activebackground=self.colors['accent_purple'])
         self.relationships_text.configure(yscrollcommand=relationships_scrollbar.set)
         
         self.relationships_text.pack(side="left", fill="both", expand=True)
         relationships_scrollbar.pack(side="right", fill="y")
+        
+        # Lưu reference cho responsive
+        self.main_container = main_container
+        self.image_frame = image_card  # Update reference
+        self.objects_frame = objects_card  # Update reference
+        self.relationships_frame = relationships_card  # Update reference
+
+    def on_window_resize(self, event=None):
+        """Xử lý khi window resize để responsive"""
+        if event and event.widget == self.root:
+            # Cập nhật scroll region cho control buttons
+            try:
+                self.control_frame.update_idletasks()
+                self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all"))
+            except:
+                pass
+            
+            # Cập nhật canvas size nếu có ảnh
+            if hasattr(self, 'img_tk') and hasattr(self, '_original_image'):
+                # Delay một chút để canvas có thời gian resize
+                self.root.after(100, self._resize_canvas_image)
+
+    def _resize_canvas_image(self):
+        """Resize ảnh trên canvas khi window resize"""
+        if not hasattr(self, 'img_tk') or not hasattr(self, 'canvas'):
+            return
+        
+        try:
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            
+            if canvas_width <= 1 or canvas_height <= 1:
+                return
+            
+            # Lấy ảnh gốc nếu có
+            if hasattr(self, '_original_image'):
+                image = self._original_image
+            else:
+                return
+            
+            img_width, img_height = image.size
+            if img_width <= 0 or img_height <= 0:
+                return
+            
+            ratio = min(canvas_width / img_width, canvas_height / img_height)
+            new_width = max(1, int(img_width * ratio))
+            new_height = max(1, int(img_height * ratio))
+            
+            resized = image.resize((new_width, new_height), Image.LANCZOS)
+            self.img_tk = ImageTk.PhotoImage(resized)
+            self.canvas.delete("all")
+            self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.img_tk, anchor="center")
+        except Exception as e:
+            print(f"Error resizing canvas image: {e}")
 
         # Các đường dẫn mặc định
         self.image_path = None
@@ -216,19 +416,36 @@ class ObjectDetectionApp:
             self._show_error_on_canvas(f"Frame display error:\\n{exc}")
 
     def _show_image_on_canvas(self, image: Image.Image):
-        canvas_width = 500
-        canvas_height = 400
+        """Hiển thị ảnh trên canvas với kích thước responsive"""
         try:
+            # Lưu ảnh gốc để resize sau
+            self._original_image = image.copy()
+            
+            # Lấy kích thước canvas thực tế
+            self.canvas.update_idletasks()
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            
+            # Nếu canvas chưa có kích thước, dùng giá trị mặc định
+            if canvas_width <= 1 or canvas_height <= 1:
+                canvas_width = 500
+                canvas_height = 400
+            
             img_width, img_height = image.size
             if img_width <= 0 or img_height <= 0:
                 raise ValueError("Invalid image dimensions.")
-            ratio = min(canvas_width / img_width, canvas_height / img_height)
+            
+            # Tính tỷ lệ để fit vào canvas
+            ratio = min(canvas_width / img_width, canvas_height / img_height, 1.0)
             new_width = max(1, int(img_width * ratio))
             new_height = max(1, int(img_height * ratio))
+            
             resized = image.resize((new_width, new_height), Image.LANCZOS)
             self.img_tk = ImageTk.PhotoImage(resized)
             self.canvas.delete("all")
-            self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.img_tk)
+            # Set background color
+            self.canvas.configure(bg="#f1f5f9")
+            self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.img_tk, anchor="center")
         except Exception as exc:
             print(f"Error showing image on canvas: {exc}")
             self._show_error_on_canvas(f"Canvas display error:\\n{exc}")
