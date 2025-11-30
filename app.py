@@ -299,6 +299,19 @@ class ObjectDetectionApp:
         self.objects_frame = objects_card  # Update reference
         self.relationships_frame = relationships_card  # Update reference
 
+        self.image_path = None
+        self.result_image_path = "result.jpg"
+        self.result_json_path = "converted_bboxes.json"
+        self.relationship_json_path = "relationships.json"
+        self.checkpoint_path = "reltr_finetuned.pth"
+
+        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.video_path = None
+        self.video_pipeline: Optional[VideoRelationPipeline] = None
+        self.video_thread: Optional[threading.Thread] = None
+        self.video_stop_event = threading.Event()
+        self.latest_video_outputs = {}
+
     def on_window_resize(self, event=None):
         """Xử lý khi window resize để responsive"""
         if event and event.widget == self.root:
