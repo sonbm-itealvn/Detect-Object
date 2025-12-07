@@ -3,7 +3,7 @@ import subprocess
 import threading
 import re
 import tkinter as tk
-from tkinter import Entry, filedialog, Label, Button, Canvas, Frame, Scrollbar, Text
+from tkinter import Entry, filedialog, Label, Button, Canvas, Frame, Scrollbar, Text, ttk
 from PIL import Image, ImageTk, ImageDraw
 import os
 import sys
@@ -23,296 +23,432 @@ class ObjectDetectionApp:
         self.root.geometry("1400x800")
         self.root.minsize(800, 600)
         
-        # Modern color scheme
+        # Ultra Modern Color Scheme - Light & Airy Design
         self.colors = {
-            'bg_main': '#0f172a',  # Dark slate
-            'bg_secondary': '#1e293b',  # Slate
+            # Backgrounds - Light theme với subtle gradients
+            'bg_main': '#f5f7fa',  # Soft gray-blue
+            'bg_sidebar': '#ffffff',  # Pure white sidebar
             'bg_card': '#ffffff',
-            'bg_card_dark': '#f8fafc',
-            'accent_primary': '#3b82f6',  # Blue
-            'accent_success': '#10b981',  # Green
-            'accent_warning': '#f59e0b',  # Amber
-            'accent_danger': '#ef4444',  # Red
-            'accent_purple': '#8b5cf6',  # Purple
-            'accent_teal': '#14b8a6',  # Teal
+            'bg_card_hover': '#f8fafc',
+            'bg_panel': '#fafbfc',
+            
+            # Accent Colors - Vibrant & Modern
+            'accent_primary': '#6366f1',  # Indigo
+            'accent_primary_light': '#818cf8',
+            'accent_primary_dark': '#4f46e5',
+            'accent_success': '#10b981',
+            'accent_success_light': '#34d399',
+            'accent_warning': '#f59e0b',
+            'accent_warning_light': '#fbbf24',
+            'accent_danger': '#ef4444',
+            'accent_danger_light': '#f87171',
+            'accent_purple': '#8b5cf6',
+            'accent_purple_light': '#a78bfa',
+            'accent_teal': '#14b8a6',
+            'accent_teal_light': '#5eead4',
+            'accent_orange': '#f97316',
+            'accent_orange_light': '#fb923c',
+            'accent_cyan': '#06b6d4',
+            'accent_cyan_light': '#22d3ee',
+            
+            # Text Colors
             'text_primary': '#1e293b',
-            'text_secondary': '#64748b',
+            'text_secondary': '#475569',
+            'text_muted': '#94a3b8',
             'text_light': '#ffffff',
+            'text_on_accent': '#ffffff',
+            
+            # Borders & Dividers
             'border': '#e2e8f0',
-            'shadow': '#cbd5e1'
+            'border_light': '#f1f5f9',
+            'border_dark': '#cbd5e1',
+            
+            # Shadows
+            'shadow_sm': '#e2e8f0',
+            'shadow_md': '#cbd5e1',
+            'shadow_lg': '#94a3b8',
+            
+            # Status Colors
+            'status_safe': '#10b981',
+            'status_warning': '#f59e0b',
+            'status_danger': '#ef4444',
         }
         
         self.root.configure(bg=self.colors['bg_main'])
         
+        # Configure ttk style
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        
         # Bind resize event để responsive
         self.root.bind("<Configure>", self.on_window_resize)
 
-        # Modern header với gradient effect
-        title_frame = Frame(root, bg=self.colors['bg_secondary'], height=70)
-        title_frame.pack(fill="x", pady=(0, 15))
-        title_frame.pack_propagate(False)
+        # ========== MAIN LAYOUT: Sidebar + Content ==========
+        main_wrapper = Frame(root, bg=self.colors['bg_main'])
+        main_wrapper.pack(fill="both", expand=True)
         
-        # Title với better styling
-        title_inner = Frame(title_frame, bg=self.colors['bg_secondary'])
-        title_inner.pack(expand=True, fill="both", padx=20)
+        # ========== LEFT SIDEBAR ==========
+        sidebar = Frame(main_wrapper, bg=self.colors['bg_sidebar'], width=280)
+        sidebar.pack(side="left", fill="y", padx=(0, 1))
+        sidebar.pack_propagate(False)
         
-        self.title_label = Label(title_inner, 
-                               text="🔍 Object Detection & Relationship Analysis", 
-                               font=("Segoe UI", 16, "bold"), 
-                               bg=self.colors['bg_secondary'], 
-                               fg=self.colors['text_light'])
-        self.title_label.pack(expand=True, pady=15)
+        # Sidebar Header
+        sidebar_header = Frame(sidebar, bg=self.colors['accent_primary'], height=120)
+        sidebar_header.pack(fill="x")
+        sidebar_header.pack_propagate(False)
+        
+        # Logo/Title in sidebar
+        logo_frame = Frame(sidebar_header, bg=self.colors['accent_primary'])
+        logo_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        title_main = Label(logo_frame,
+                          text="🔍 AI Vision",
+                          font=("Segoe UI", 20, "bold"),
+                          bg=self.colors['accent_primary'],
+                          fg=self.colors['text_light'])
+        title_main.pack(anchor="w", pady=(0, 5))
+        
+        title_sub = Label(logo_frame,
+                         text="Object Detection & Analysis",
+                         font=("Segoe UI", 9),
+                         bg=self.colors['accent_primary'],
+                         fg=self.colors['text_light'])
+        title_sub.pack(anchor="w")
+        
+        # Status indicator
+        self.status_indicator = Frame(sidebar_header, bg=self.colors['accent_primary'], height=30)
+        self.status_indicator.pack(fill="x", padx=20, pady=(0, 15))
+        
+        self.title_label = Label(self.status_indicator,
+                               text="● Ready",
+                               font=("Segoe UI", 10, "bold"),
+                               bg=self.colors['accent_primary'],
+                               fg=self.colors['text_light'],
+                               anchor="w")
+        self.title_label.pack(fill="x")
+        
+        # Sidebar Content - Button Groups
+        sidebar_content = Frame(sidebar, bg=self.colors['bg_sidebar'])
+        sidebar_content.pack(fill="both", expand=True, padx=15, pady=15)
+        
+        # Section: Image Operations
+        section_label1 = Label(sidebar_content,
+                              text="IMAGE OPERATIONS",
+                              font=("Segoe UI", 8, "bold"),
+                              bg=self.colors['bg_sidebar'],
+                              fg=self.colors['text_muted'],
+                              anchor="w")
+        section_label1.pack(fill="x", pady=(0, 10))
+        
+        image_ops_frame = Frame(sidebar_content, bg=self.colors['bg_sidebar'])
+        image_ops_frame.pack(fill="x", pady=(0, 20))
+        
+        # Section: Video Operations
+        section_label2 = Label(sidebar_content,
+                              text="VIDEO OPERATIONS",
+                              font=("Segoe UI", 8, "bold"),
+                              bg=self.colors['bg_sidebar'],
+                              fg=self.colors['text_muted'],
+                              anchor="w")
+        section_label2.pack(fill="x", pady=(0, 10))
+        
+        video_ops_frame = Frame(sidebar_content, bg=self.colors['bg_sidebar'])
+        video_ops_frame.pack(fill="x", pady=(0, 20))
+        
+        # Section: Training & Analysis
+        section_label3 = Label(sidebar_content,
+                              text="TRAINING & ANALYSIS",
+                              font=("Segoe UI", 8, "bold"),
+                              bg=self.colors['bg_sidebar'],
+                              fg=self.colors['text_muted'],
+                              anchor="w")
+        section_label3.pack(fill="x", pady=(0, 10))
+        
+        training_ops_frame = Frame(sidebar_content, bg=self.colors['bg_sidebar'])
+        training_ops_frame.pack(fill="x", pady=(0, 20))
+        
+        # Store frames for buttons
+        self.image_ops_frame = image_ops_frame
+        self.video_ops_frame = video_ops_frame
+        self.training_ops_frame = training_ops_frame
 
-        # Modern control panel với card design
-        control_container = Frame(root, bg=self.colors['bg_main'])
-        control_container.pack(fill="x", pady=(0, 15), padx=15)
-        
-        # Card frame cho buttons
-        control_card = Frame(control_container, bg=self.colors['bg_card'], relief="flat", bd=0)
-        control_card.pack(fill="x", padx=0, pady=0)
-        
-        # Canvas và scrollbar cho control buttons
-        control_canvas = Canvas(control_card, bg=self.colors['bg_card'], height=90, highlightthickness=0)
-        control_scrollbar = Scrollbar(control_card, orient="horizontal", command=control_canvas.xview,
-                                     bg=self.colors['bg_card'], troughcolor=self.colors['bg_card_dark'],
-                                     activebackground=self.colors['accent_primary'])
-        control_scrollable_frame = Frame(control_canvas, bg=self.colors['bg_card'])
-        
-        control_scrollable_frame.bind(
-            "<Configure>",
-            lambda e: control_canvas.configure(scrollregion=control_canvas.bbox("all"))
-        )
-        
-        control_canvas.create_window((0, 0), window=control_scrollable_frame, anchor="nw")
-        control_canvas.configure(xscrollcommand=control_scrollbar.set)
-        
-        control_canvas.pack(side="left", fill="both", expand=True, padx=15, pady=15)
-        control_scrollbar.pack(side="right", fill="y", padx=(0, 15), pady=15)
-        
-        # Lưu reference để có thể cập nhật
-        self.control_frame = control_scrollable_frame
-        self.control_canvas = control_canvas
-        
         self.rl_enhancement = AppReinforcementLearning(self)
         self.training_evaluator = TrainingEvaluator()
 
-        # Modern button style với hover effects
-        def create_modern_button(parent, text, command, bg_color, hover_color=None):
+        # Ultra Modern Button Style - Full width, icon + text
+        def create_sidebar_button(parent, icon, text, command, color, hover_color=None):
             if hover_color is None:
-                hover_color = bg_color
-            btn = Button(parent, text=text, command=command,
-                        font=("Segoe UI", 10, "bold"), 
-                        bg=bg_color, fg="white", 
-                        width=14, height=2, 
-                        relief="flat", bd=0, 
-                        cursor="hand2",
-                        activebackground=hover_color,
-                        activeforeground="white")
+                hover_color = color
             
-            # Hover effect
+            btn_container = Frame(parent, bg=self.colors['bg_sidebar'], relief="flat", bd=0)
+            btn_container.pack(fill="x", pady=4)
+            
+            btn = Button(btn_container,
+                        text=f"{icon}  {text}",
+                        command=command,
+                        font=("Segoe UI", 10),
+                        bg=self.colors['bg_sidebar'],
+                        fg=self.colors['text_primary'],
+                        relief="flat",
+                        bd=0,
+                        anchor="w",
+                        padx=15,
+                        pady=12,
+                        cursor="hand2",
+                        activebackground=self.colors['bg_card_hover'],
+                        activeforeground=self.colors['text_primary'])
+            btn.pack(fill="x")
+            
+            # Hover effect với border highlight
             def on_enter(e):
-                btn.configure(bg=hover_color)
+                btn.configure(bg=self.colors['bg_card_hover'], fg=color)
+                btn_container.configure(bg=self.colors['bg_card_hover'])
             def on_leave(e):
-                btn.configure(bg=bg_color)
+                btn.configure(bg=self.colors['bg_sidebar'], fg=self.colors['text_primary'])
+                btn_container.configure(bg=self.colors['bg_sidebar'])
             
             btn.bind("<Enter>", on_enter)
             btn.bind("<Leave>", on_leave)
+            btn_container.bind("<Enter>", on_enter)
+            btn_container.bind("<Leave>", on_leave)
+            
             return btn
 
-        # Tạo các nút với modern styling
-        self.btn_select = create_modern_button(
-            self.control_frame, "📁 Select Image", self.select_image,
-            self.colors['accent_primary'], '#2563eb'
+        # Image Operations Buttons
+        self.btn_select = create_sidebar_button(
+            self.image_ops_frame, "📁", "Select Image", self.select_image,
+            self.colors['accent_primary']
         )
-        self.btn_select.pack(side="left", padx=8, pady=8)
-
-        self.btn_run = create_modern_button(
-            self.control_frame, "▶️ Detect Object", self.run_pipeline_thread,
-            self.colors['accent_success'], '#059669'
+        self.btn_run = create_sidebar_button(
+            self.image_ops_frame, "▶️", "Detect Objects", self.run_pipeline_thread,
+            self.colors['accent_success']
         )
-        self.btn_run.pack(side="left", padx=8, pady=8)
-
-        self.btn_refresh = create_modern_button(
-            self.control_frame, "🔄 Reload Data", self.refresh_data,
-            self.colors['accent_warning'], '#d97706'
+        self.btn_refresh = create_sidebar_button(
+            self.image_ops_frame, "🔄", "Reload Data", self.refresh_data,
+            self.colors['accent_warning']
         )
-        self.btn_refresh.pack(side="left", padx=8, pady=8)
-
-        self.btn_rl_train = create_modern_button(
-            self.control_frame, "🧠 RL Training", self.run_rl_training,
-            self.colors['accent_purple'], '#7c3aed'
-        )
-        self.btn_rl_train.pack(side="left", padx=8, pady=8)
         
-        self.btn_generate_synthetic = create_modern_button(
-            self.control_frame, "🎨 Generate Synthetic", self.generate_synthetic_data,
-            '#f97316', '#ea580c'  # Orange
+        # Video Operations Buttons
+        self.btn_select_video = create_sidebar_button(
+            self.video_ops_frame, "📹", "Select Video", self.select_video,
+            self.colors['accent_teal']
         )
-        self.btn_generate_synthetic.pack(side="left", padx=8, pady=8)
+        self.btn_run_video = create_sidebar_button(
+            self.video_ops_frame, "▶️", "Run Video Demo", self.run_video_demo_thread,
+            self.colors['accent_cyan']
+        )
+        self.btn_stop_video = create_sidebar_button(
+            self.video_ops_frame, "⏹️", "Stop Video", self.stop_video_demo,
+            self.colors['accent_danger']
+        )
         
-        self.btn_evaluate_training = create_modern_button(
-            self.control_frame, "📊 Evaluate Training", self.evaluate_training_results,
-            '#a855f7', '#9333ea'  # Purple variant
+        # Training & Analysis Buttons
+        self.btn_rl_train = create_sidebar_button(
+            self.training_ops_frame, "🧠", "RL Training", self.run_rl_training,
+            self.colors['accent_purple']
         )
-        self.btn_evaluate_training.pack(side="left", padx=8, pady=8)
+        self.btn_generate_synthetic = create_sidebar_button(
+            self.training_ops_frame, "🎨", "Generate Synthetic", self.generate_synthetic_data,
+            self.colors['accent_orange']
+        )
+        self.btn_evaluate_training = create_sidebar_button(
+            self.training_ops_frame, "📊", "Evaluate Training", self.evaluate_training_results,
+            self.colors['accent_purple']
+        )
 
-        self.btn_select_video = create_modern_button(
-            self.control_frame, "📹 Select Video", self.select_video,
-            self.colors['accent_teal'], '#0d9488'
-        )
-        self.btn_select_video.pack(side="left", padx=8, pady=8)
-
-        self.btn_run_video = create_modern_button(
-            self.control_frame, "▶️ Run Video Demo", self.run_video_demo_thread,
-            '#06b6d4', '#0891b2'  # Cyan
-        )
-        self.btn_run_video.pack(side="left", padx=8, pady=8)
-
-        self.btn_stop_video = create_modern_button(
-            self.control_frame, "⏹️ Stop Video", self.stop_video_demo,
-            self.colors['accent_danger'], '#dc2626'
-        )
-        self.btn_stop_video.pack(side="left", padx=8, pady=8)
+        # ========== MAIN CONTENT AREA ==========
+        content_area = Frame(main_wrapper, bg=self.colors['bg_main'])
+        content_area.pack(side="left", fill="both", expand=True)
         
-        # Update scroll region
-        self.control_frame.update_idletasks()
-        self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all"))
-
-        # Alert banner cho vùng an toàn 2m
-        self.alert_normal_bg = self.colors['bg_main']
+        # Top Status Bar
+        status_bar = Frame(content_area, bg=self.colors['bg_card'], height=60)
+        status_bar.pack(fill="x", padx=15, pady=(15, 0))
+        status_bar.pack_propagate(False)
+        
+        status_inner = Frame(status_bar, bg=self.colors['bg_card'])
+        status_inner.pack(fill="both", expand=True, padx=20, pady=15)
+        
+        self.alert_normal_bg = self.colors['status_safe']
         self.alert_normal_fg = self.colors['text_light']
-        self.alert_warning_bg = self.colors['accent_danger']
+        self.alert_warning_bg = self.colors['status_danger']
         self.alert_warning_fg = self.colors['text_light']
+        
         self.alert_label = Label(
-            root,
-            text="Safe zone ready (>=2m)",
+            status_inner,
+            text="🟢 Safe Zone: Ready (>=2m)",
             font=("Segoe UI", 11, "bold"),
             bg=self.alert_normal_bg,
             fg=self.alert_normal_fg,
-            pady=6
+            padx=20,
+            pady=8,
+            relief="flat",
+            bd=0
         )
-        self.alert_label.pack(fill="x", padx=25, pady=(0, 10))
+        self.alert_label.pack(side="left")
 
-        # Frame chính chứa 3 cột với modern card design
-        main_container = Frame(root, bg=self.colors['bg_main'])
-        main_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        # ========== MAIN CONTENT GRID ==========
+        main_container = Frame(content_area, bg=self.colors['bg_main'])
+        main_container.pack(fill="both", expand=True, padx=15, pady=15)
         
-        # Sử dụng grid layout để responsive
-        main_container.grid_columnconfigure(0, weight=2, minsize=350)
-        main_container.grid_columnconfigure(1, weight=1, minsize=250)
-        main_container.grid_columnconfigure(2, weight=1, minsize=250)
+        # Grid layout - 2 columns: Image (left) + Info Panels (right)
+        main_container.grid_columnconfigure(0, weight=2, minsize=500)
+        main_container.grid_columnconfigure(1, weight=1, minsize=350)
         main_container.grid_rowconfigure(0, weight=1)
-
-        # Cột 1: Hiển thị ảnh với modern card
-        image_card = Frame(main_container, bg=self.colors['bg_card'], relief="flat", bd=0)
-        image_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        image_card.grid_propagate(False)
         
-        # Header cho image card
-        image_header = Frame(image_card, bg=self.colors['accent_primary'], height=45)
+        # ========== LEFT: Image Display Card ==========
+        image_card_container = Frame(main_container, bg=self.colors['bg_main'])
+        image_card_container.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        
+        # Card với shadow effect (simulated với border)
+        image_card = Frame(image_card_container, bg=self.colors['bg_card'], relief="flat", bd=1, highlightbackground=self.colors['border'])
+        image_card.pack(fill="both", expand=True)
+        
+        # Card Header
+        image_header = Frame(image_card, bg=self.colors['bg_card'], height=60)
         image_header.pack(fill="x")
         image_header.pack_propagate(False)
         
-        image_title = Label(image_header, text="🖼️ Hình ảnh", 
-                          font=("Segoe UI", 13, "bold"), 
-                          bg=self.colors['accent_primary'], 
-                          fg="white")
-        image_title.pack(expand=True, pady=12)
+        image_header_inner = Frame(image_header, bg=self.colors['bg_card'])
+        image_header_inner.pack(fill="both", expand=True, padx=20, pady=15)
         
-        # Canvas container với padding
-        canvas_container = Frame(image_card, bg=self.colors['bg_card'])
-        canvas_container.pack(fill="both", expand=True, padx=15, pady=15)
+        image_title = Label(image_header_inner,
+                           text="🖼️ Image Preview",
+                           font=("Segoe UI", 13, "bold"),
+                           bg=self.colors['bg_card'],
+                           fg=self.colors['text_primary'],
+                           anchor="w")
+        image_title.pack(side="left")
         
-        self.canvas = Canvas(canvas_container, bg="#f1f5f9", relief="flat", 
-                           highlightthickness=1, highlightbackground=self.colors['border'],
+        # Canvas container
+        canvas_container = Frame(image_card, bg=self.colors['bg_panel'])
+        canvas_container.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        self.canvas = Canvas(canvas_container,
+                           bg=self.colors['bg_panel'],
+                           relief="flat",
+                           highlightthickness=1,
+                           highlightbackground=self.colors['border_light'],
                            highlightcolor=self.colors['accent_primary'])
         self.canvas.pack(fill="both", expand=True)
-
-        # Cột 2: Danh sách vật thể với modern card
-        objects_card = Frame(main_container, bg=self.colors['bg_card'], relief="flat", bd=0)
-        objects_card.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
-        objects_card.grid_propagate(False)
         
-        # Header cho objects card
-        objects_header = Frame(objects_card, bg=self.colors['accent_success'], height=45)
+        # Empty state với styling tốt hơn
+        self.canvas_empty_text = self.canvas.create_text(
+            300, 250,
+            text="📷 No Image Selected\n\nClick 'Select Image' in the sidebar\nto get started",
+            font=("Segoe UI", 13),
+            fill=self.colors['text_muted'],
+            justify="center",
+            tags="empty_state"
+        )
+        
+        # ========== RIGHT: Info Panels ==========
+        right_panel = Frame(main_container, bg=self.colors['bg_main'])
+        right_panel.grid(row=0, column=1, sticky="nsew")
+        right_panel.grid_rowconfigure(0, weight=1)
+        right_panel.grid_rowconfigure(1, weight=1)
+        right_panel.grid_columnconfigure(0, weight=1)
+        
+        # Panel 1: Detected Objects
+        objects_card = Frame(right_panel, bg=self.colors['bg_card'], relief="flat", bd=1, highlightbackground=self.colors['border'])
+        objects_card.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        
+        objects_header = Frame(objects_card, bg=self.colors['bg_card'], height=50)
         objects_header.pack(fill="x")
         objects_header.pack_propagate(False)
         
-        objects_title = Label(objects_header, text="📦 Vật thể được phát hiện", 
-                            font=("Segoe UI", 13, "bold"), 
-                            bg=self.colors['accent_success'], 
-                            fg="white")
-        objects_title.pack(expand=True, pady=12)
+        objects_header_inner = Frame(objects_header, bg=self.colors['bg_card'])
+        objects_header_inner.pack(fill="both", expand=True, padx=15, pady=12)
         
-        # Scrollbar cho danh sách vật thể
-        objects_scroll_frame = Frame(objects_card, bg=self.colors['bg_card'])
-        objects_scroll_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        objects_title = Label(objects_header_inner,
+                            text="📦 Detected Objects",
+                            font=("Segoe UI", 12, "bold"),
+                            bg=self.colors['bg_card'],
+                            fg=self.colors['text_primary'],
+                            anchor="w")
+        objects_title.pack(side="left")
         
-        self.objects_text = Text(objects_scroll_frame, 
-                               font=("Segoe UI", 10), 
-                               bg="#f8fafc", 
+        objects_content = Frame(objects_card, bg=self.colors['bg_card'])
+        objects_content.pack(fill="both", expand=True, padx=15, pady=15)
+        
+        self.objects_text = Text(objects_content,
+                               font=("Segoe UI", 9),
+                               bg=self.colors['bg_panel'],
                                fg=self.colors['text_primary'],
-                               relief="flat", 
-                               bd=0, 
+                               relief="flat",
+                               bd=0,
                                wrap="word",
-                               padx=10,
-                               pady=10)
-        objects_scrollbar = Scrollbar(objects_scroll_frame, 
-                                     orient="vertical", 
+                               padx=12,
+                               pady=12,
+                               selectbackground=self.colors['accent_success'],
+                               selectforeground="white")
+        objects_scrollbar = Scrollbar(objects_content,
+                                     orient="vertical",
                                      command=self.objects_text.yview,
                                      bg=self.colors['bg_card'],
-                                     troughcolor=self.colors['bg_card_dark'],
-                                     activebackground=self.colors['accent_success'])
+                                     troughcolor=self.colors['bg_panel'],
+                                     activebackground=self.colors['accent_success'],
+                                     width=10)
         self.objects_text.configure(yscrollcommand=objects_scrollbar.set)
         
         self.objects_text.pack(side="left", fill="both", expand=True)
         objects_scrollbar.pack(side="right", fill="y")
-
-        # Cột 3: Danh sách mối quan hệ với modern card
-        relationships_card = Frame(main_container, bg=self.colors['bg_card'], relief="flat", bd=0)
-        relationships_card.grid(row=0, column=2, sticky="nsew")
-        relationships_card.grid_propagate(False)
         
-        # Header cho relationships card
-        relationships_header = Frame(relationships_card, bg=self.colors['accent_purple'], height=45)
+        self.objects_text.insert("1.0", "📋 Objects will appear here\n\nRun 'Detect Objects' to see results")
+        self.objects_text.config(state="disabled")
+        
+        # Panel 2: Relationships
+        relationships_card = Frame(right_panel, bg=self.colors['bg_card'], relief="flat", bd=1, highlightbackground=self.colors['border'])
+        relationships_card.grid(row=1, column=0, sticky="nsew")
+        
+        relationships_header = Frame(relationships_card, bg=self.colors['bg_card'], height=50)
         relationships_header.pack(fill="x")
         relationships_header.pack_propagate(False)
         
-        relationships_title = Label(relationships_header, text="🔗 Mối quan hệ", 
-                                  font=("Segoe UI", 13, "bold"), 
-                                  bg=self.colors['accent_purple'], 
-                                  fg="white")
-        relationships_title.pack(expand=True, pady=12)
+        relationships_header_inner = Frame(relationships_header, bg=self.colors['bg_card'])
+        relationships_header_inner.pack(fill="both", expand=True, padx=15, pady=12)
         
-        # Scrollbar cho danh sách mối quan hệ
-        relationships_scroll_frame = Frame(relationships_card, bg=self.colors['bg_card'])
-        relationships_scroll_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        relationships_title = Label(relationships_header_inner,
+                                  text="🔗 Relationships",
+                                  font=("Segoe UI", 12, "bold"),
+                                  bg=self.colors['bg_card'],
+                                  fg=self.colors['text_primary'],
+                                  anchor="w")
+        relationships_title.pack(side="left")
         
-        self.relationships_text = Text(relationships_scroll_frame, 
-                                     font=("Segoe UI", 10), 
-                                     bg="#f8fafc", 
+        relationships_content = Frame(relationships_card, bg=self.colors['bg_card'])
+        relationships_content.pack(fill="both", expand=True, padx=15, pady=15)
+        
+        self.relationships_text = Text(relationships_content,
+                                     font=("Segoe UI", 9),
+                                     bg=self.colors['bg_panel'],
                                      fg=self.colors['text_primary'],
-                                     relief="flat", 
-                                     bd=0, 
+                                     relief="flat",
+                                     bd=0,
                                      wrap="word",
-                                     padx=10,
-                                     pady=10)
-        relationships_scrollbar = Scrollbar(relationships_scroll_frame, 
-                                         orient="vertical", 
+                                     padx=12,
+                                     pady=12,
+                                     selectbackground=self.colors['accent_purple'],
+                                     selectforeground="white")
+        relationships_scrollbar = Scrollbar(relationships_content,
+                                         orient="vertical",
                                          command=self.relationships_text.yview,
                                          bg=self.colors['bg_card'],
-                                         troughcolor=self.colors['bg_card_dark'],
-                                         activebackground=self.colors['accent_purple'])
+                                         troughcolor=self.colors['bg_panel'],
+                                         activebackground=self.colors['accent_purple'],
+                                         width=10)
         self.relationships_text.configure(yscrollcommand=relationships_scrollbar.set)
         
         self.relationships_text.pack(side="left", fill="both", expand=True)
         relationships_scrollbar.pack(side="right", fill="y")
         
-        # Lưu reference cho responsive
+        self.relationships_text.insert("1.0", "🔗 Relationships will appear here\n\nRun 'Detect Objects' to see results")
+        self.relationships_text.config(state="disabled")
+        
+        # Store references
         self.main_container = main_container
-        self.image_frame = image_card  # Update reference
-        self.objects_frame = objects_card  # Update reference
-        self.relationships_frame = relationships_card  # Update reference
+        self.image_frame = image_card
+        self.objects_frame = objects_card
+        self.relationships_frame = relationships_card
 
         self.image_path = None
         self.result_image_path = "result.jpg"
@@ -331,13 +467,6 @@ class ObjectDetectionApp:
     def on_window_resize(self, event=None):
         """Xử lý khi window resize để responsive"""
         if event and event.widget == self.root:
-            # Cập nhật scroll region cho control buttons
-            try:
-                self.control_frame.update_idletasks()
-                self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all"))
-            except:
-                pass
-            
             # Cập nhật canvas size nếu có ảnh
             if hasattr(self, 'img_tk') and hasattr(self, '_original_image'):
                 # Delay một chút để canvas có thời gian resize
@@ -433,6 +562,8 @@ class ObjectDetectionApp:
             print(f"Error loading image: {exc}")
             self._show_error_on_canvas(f"Error loading image:\\n{exc}")
             return
+        # Xóa empty state nếu có
+        self.canvas.delete("empty_state")
         self._show_image_on_canvas(image)
 
     def display_frame_from_array(self, frame):
@@ -473,7 +604,7 @@ class ObjectDetectionApp:
             self.img_tk = ImageTk.PhotoImage(resized)
             self.canvas.delete("all")
             # Set background color
-            self.canvas.configure(bg="#f1f5f9")
+            self.canvas.configure(bg="#f8fafc")
             self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.img_tk, anchor="center")
         except Exception as exc:
             print(f"Error showing image on canvas: {exc}")
@@ -502,27 +633,41 @@ class ObjectDetectionApp:
         objects = summary.get("objects", [])
         relations = summary.get("relations", [])
 
+        self.objects_text.config(state="normal")
         self.objects_text.delete(1.0, tk.END)
         if objects:
-            obj_lines = [f"{entry.get('label','?')}: {entry.get('count',0)}" for entry in objects[:20]]
-            self.objects_text.insert(tk.END, "\n".join(obj_lines))
+            header = f"📊 Video Summary - Total: {len(objects)} object types\n{'='*30}\n\n"
+            self.objects_text.insert(tk.END, header)
+            for i, entry in enumerate(objects[:20], 1):
+                label = entry.get('label', '?')
+                count = entry.get('count', 0)
+                self.objects_text.insert(tk.END, f"🔸 {i}. {label.upper()}: {count} occurrences\n")
         else:
-            self.objects_text.insert(tk.END, "Không có vật thể nào được phát hiện.")
+            self.objects_text.insert(tk.END, "❌ No objects detected in video.")
+        self.objects_text.config(state="disabled")
 
+        self.relationships_text.config(state="normal")
         self.relationships_text.delete(1.0, tk.END)
         if relations:
-            rel_lines = []
-            for entry in relations[:20]:
-                rel_lines.append(
-                    f"{entry.get('subject','?')} {entry.get('relation','?')} {entry.get('object','?')} ({entry.get('count',0)})"
-                )
-            self.relationships_text.insert(tk.END, "\n".join(rel_lines))
+            header = f"🔗 Video Summary - Total: {len(relations)} relationships\n{'='*30}\n\n"
+            self.relationships_text.insert(tk.END, header)
+            for i, entry in enumerate(relations[:20], 1):
+                subject = entry.get('subject', '?')
+                relation = entry.get('relation', '?')
+                obj = entry.get('object', '?')
+                count = entry.get('count', 0)
+                self.relationships_text.insert(tk.END, f"🔸 {i}. {subject.upper()}\n")
+                self.relationships_text.insert(tk.END, f"   🔗 {relation.upper()}\n")
+                self.relationships_text.insert(tk.END, f"   🎯 {obj.upper()}\n")
+                self.relationships_text.insert(tk.END, f"   📊 Count: {count}\n\n")
         else:
-            self.relationships_text.insert(tk.END, "Không có mối quan hệ nào được phát hiện.")
+            self.relationships_text.insert(tk.END, "❌ No relationships detected in video.")
+        self.relationships_text.config(state="disabled")
 
     def load_and_display_objects(self):
         """Tải và hiển thị danh sách vật thể từ JSON"""
         try:
+            self.objects_text.config(state="normal")
             with open(self.result_json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
@@ -541,59 +686,82 @@ class ObjectDetectionApp:
 
             if not objects:
                 self.objects_text.delete(1.0, tk.END)
-                self.objects_text.insert(tk.END, "❌ Không có vật thể nào được phát hiện")
+                self.objects_text.insert(tk.END, "❌ No objects detected\n\nPlease run 'Detect Objects' to detect objects in the image.")
+                self.objects_text.config(state="disabled")
                 return
 
             # Xóa nội dung cũ
             self.objects_text.delete(1.0, tk.END)
             
-            # Hiển thị thông tin vật thể
+            # Hiển thị thông tin vật thể với formatting đẹp hơn
+            header = f"📊 Total: {len(objects)} objects\n{'='*30}\n\n"
+            self.objects_text.insert(tk.END, header)
+            
             for i, obj in enumerate(objects, 1):
                 class_name = obj.get("class", "Unknown")
                 bbox = obj.get("bbox", [])
+                confidence = obj.get("confidence", 0)
                 
                 if len(bbox) >= 4:
                     x, y, w, h = bbox[:4]
                     info = f"🔸 {i}. {class_name.upper()}\n"
-                    info += f"   📍 Vị trí: ({x}, {y})\n"
-                    info += f"   📏 Kích thước: {w-x} x {h-y}\n"
-                    info += f"   🎯 Độ tin cậy: {obj.get('confidence', 'N/A')}\n\n"
+                    info += f"   📍 Position: ({int(x)}, {int(y)})\n"
+                    info += f"   📏 Size: {int(w-x)} x {int(h-y)} px\n"
+                    if isinstance(confidence, (int, float)):
+                        info += f"   🎯 Confidence: {confidence:.2%}\n\n"
+                    else:
+                        info += f"   🎯 Confidence: {confidence}\n\n"
                 else:
                     info = f"🔸 {i}. {class_name.upper()}\n"
-                    info += f"   📍 Thông tin bbox không hợp lệ\n\n"
+                    info += f"   ⚠️ Invalid bbox information\n\n"
                 
                 self.objects_text.insert(tk.END, info)
+            
+            self.objects_text.config(state="disabled")
                 
         except FileNotFoundError:
+            self.objects_text.config(state="normal")
             self.objects_text.delete(1.0, tk.END)
-            self.objects_text.insert(tk.END, f"❌ Không tìm thấy file: {self.result_json_path}")
+            self.objects_text.insert(tk.END, f"❌ File not found: {self.result_json_path}\n\nPlease run 'Detect Objects' first.")
+            self.objects_text.config(state="disabled")
         except json.JSONDecodeError:
+            self.objects_text.config(state="normal")
             self.objects_text.delete(1.0, tk.END)
-            self.objects_text.insert(tk.END, "❌ Lỗi đọc file JSON")
+            self.objects_text.insert(tk.END, "❌ Error reading JSON file\n\nFile may be corrupted or invalid format.")
+            self.objects_text.config(state="disabled")
         except Exception as e:
+            self.objects_text.config(state="normal")
             self.objects_text.delete(1.0, tk.END)
-            self.objects_text.insert(tk.END, f"❌ Lỗi: {str(e)}")
+            self.objects_text.insert(tk.END, f"❌ Error: {str(e)}")
+            self.objects_text.config(state="disabled")
 
     def load_and_display_relationships(self):
         """Tải và hiển thị danh sách mối quan hệ từ JSON"""
         try:
+            self.relationships_text.config(state="normal")
             with open(self.relationship_json_path, "r", encoding="utf-8") as f:
                 relationships = json.load(f)
             
             if not relationships:
                 self.relationships_text.delete(1.0, tk.END)
-                self.relationships_text.insert(tk.END, "❌ Không có mối quan hệ nào được phát hiện")
+                self.relationships_text.insert(tk.END, "❌ No relationships detected\n\nPlease run 'Detect Objects' to analyze relationships.")
+                self.relationships_text.config(state="disabled")
                 return
 
             # Xóa nội dung cũ
             self.relationships_text.delete(1.0, tk.END)
             
-            # Hiển thị thông tin mối quan hệ
+            # Header
+            header = f"🔗 Total: {len(relationships)} relationships\n{'='*30}\n\n"
+            self.relationships_text.insert(tk.END, header)
+            
+            # Hiển thị thông tin mối quan hệ với formatting đẹp hơn
             for i, rel in enumerate(relationships, 1):
                 subject = rel.get("subject", "Unknown")
                 relation = rel.get("relation", "Unknown")
                 obj = rel.get("object", "Unknown")
                 similarity = rel.get("visual_similarity", 0)
+                confidence = rel.get("confidence", 0)
                 
                 # Màu sắc dựa trên độ tin cậy (nếu có visual_similarity)
                 if similarity > 0:
@@ -601,7 +769,12 @@ class ObjectDetectionApp:
                     info = f"{confidence_color} {i}. {subject.upper()}\n"
                     info += f"   🔗 {relation.upper()}\n"
                     info += f"   🎯 {obj.upper()}\n"
-                    info += f"   📊 Độ tin cậy: {similarity:.2f}\n\n"
+                    info += f"   📊 Confidence: {similarity:.2%}\n\n"
+                elif confidence > 0:
+                    info = f"🔸 {i}. {subject.upper()}\n"
+                    info += f"   🔗 {relation.upper()}\n"
+                    info += f"   🎯 {obj.upper()}\n"
+                    info += f"   📊 Confidence: {confidence:.2%}\n\n"
                 else:
                     # Nếu không có visual_similarity, hiển thị đơn giản
                     info = f"🔸 {i}. {subject.upper()}\n"
@@ -609,23 +782,31 @@ class ObjectDetectionApp:
                     info += f"   🎯 {obj.upper()}\n\n"
                 
                 self.relationships_text.insert(tk.END, info)
+            
+            self.relationships_text.config(state="disabled")
                 
         except FileNotFoundError:
+            self.relationships_text.config(state="normal")
             self.relationships_text.delete(1.0, tk.END)
-            self.relationships_text.insert(tk.END, f"❌ Không tìm thấy file: {self.relationship_json_path}")
+            self.relationships_text.insert(tk.END, f"❌ File not found: {self.relationship_json_path}\n\nPlease run 'Detect Objects' first.")
+            self.relationships_text.config(state="disabled")
         except json.JSONDecodeError:
+            self.relationships_text.config(state="normal")
             self.relationships_text.delete(1.0, tk.END)
-            self.relationships_text.insert(tk.END, "❌ Lỗi đọc file JSON")
+            self.relationships_text.insert(tk.END, "❌ Error reading JSON file\n\nFile may be corrupted or invalid format.")
+            self.relationships_text.config(state="disabled")
         except Exception as e:
+            self.relationships_text.config(state="normal")
             self.relationships_text.delete(1.0, tk.END)
-            self.relationships_text.insert(tk.END, f"❌ Lỗi: {str(e)}")
+            self.relationships_text.insert(tk.END, f"❌ Error: {str(e)}")
+            self.relationships_text.config(state="disabled")
 
     def refresh_data(self):
         """Tải lại dữ liệu JSON mà không cần chạy lại pipeline"""
-        self.title_label.config(text="🔄 Đang tải lại dữ liệu...")
+        self.title_label.config(text="🔄 Reloading data...")
         self.load_and_display_objects()
         self.load_and_display_relationships()
-        self.title_label.config(text="✅ Đã tải lại dữ liệu thành công!")
+        self.title_label.config(text="✅ Data reloaded successfully!")
 
     def draw_relationship_boxes_on_image(self):
         """Vẽ bbox mối quan hệ trên ảnh kết quả"""
@@ -650,7 +831,7 @@ class ObjectDetectionApp:
                 objects = []
             
             if not objects or not relationships_data:
-                print("❌ Không có dữ liệu để vẽ bbox")
+                print("❌ No data to draw bbox")
                 return
             
             # Tìm ảnh kết quả
@@ -659,7 +840,7 @@ class ObjectDetectionApp:
             output_images = glob.glob(f"**/output_{image_id}.jpg", recursive=True)
             
             if not output_images:
-                print("❌ Không tìm thấy ảnh kết quả để vẽ bbox")
+                print("❌ Result image not found to draw bbox")
                 return
             
             latest_result = max(output_images, key=os.path.getmtime)
@@ -738,11 +919,11 @@ class ObjectDetectionApp:
             
             # Hiển thị ảnh mới
             self.display_image(result_path)
-            print(f"✅ Đã vẽ bbox mối quan hệ và lưu tại: {result_path}")
+            print(f"✅ Relationship bbox drawn and saved at: {result_path}")
             
         except Exception as e:
-            print(f"❌ Lỗi khi vẽ bbox mối quan hệ: {e}")
-            self.title_label.config(text=f"❌ Lỗi vẽ bbox: {e}")
+            print(f"❌ Error drawing relationship bbox: {e}")
+            self.title_label.config(text=f"❌ Error drawing bbox: {e}")
 
     def draw_relationship_boxes(self, subject_name, object_name):
         try:
@@ -772,13 +953,13 @@ class ObjectDetectionApp:
                 )
 
             if not subject_box:
-                self.label.config(text=f"❌ Không tìm thấy subject: {subject_name} trong JSON!")
-                print("❌ Lỗi tìm subject:", subject_name)
+                self.label.config(text=f"❌ Subject not found: {subject_name} in JSON!")
+                print("❌ Error finding subject:", subject_name)
                 return
 
             if object_name and not object_box:
-                self.label.config(text=f"❌ Không tìm thấy object: {object_name} trong JSON!")
-                print("❌ Lỗi tìm object:", object_name)
+                self.label.config(text=f"❌ Object not found: {object_name} in JSON!")
+                print("❌ Error finding object:", object_name)
                 return
 
             image = Image.open(self.image_path)
@@ -809,11 +990,11 @@ class ObjectDetectionApp:
             image.save(result_path)
             self.display_image(result_path)
 
-            self.label.config(text="✅ Đã vẽ xong box!")
+            self.label.config(text="✅ Box drawn successfully!")
 
         except Exception as e:
-            self.label.config(text=f"❌ Lỗi khi vẽ box: {e}")
-            print(f"❌ Lỗi khi vẽ box: {e}")
+            self.label.config(text=f"❌ Error drawing box: {e}")
+            print(f"❌ Error drawing box: {e}")
 
     def run_pipeline_thread(self):
         thread = threading.Thread(target=self.run_pipeline)
@@ -821,26 +1002,26 @@ class ObjectDetectionApp:
 
     def run_pipeline(self):
         if not self.image_path:
-            self.title_label.config(text="❌ Hãy chọn ảnh trước!")
+            self.title_label.config(text="❌ Please select an image first!")
             return
 
-        self.title_label.config(text="⏳ Đang xử lý... Vui lòng chờ.")
+        self.title_label.config(text="⏳ Processing... Please wait.")
 
         try:
             # 1️⃣ Chạy detect_objects.py
-            self.title_label.config(text="🔍 Đang phát hiện vật thể...")
+            self.title_label.config(text="🔍 Detecting objects...")
             detect_thread = threading.Thread(target=subprocess.run, args=(["python", "detect_objects.py", self.image_path],))
             detect_thread.start()
             detect_thread.join()  # Đợi detect_objects.py chạy xong
 
             # 2️⃣ Chạy convert_yolo_to_reltr.py (sau khi detect_objects.py hoàn tất)
-            self.title_label.config(text="🔄 Đang chuyển đổi dữ liệu YOLO...")
+            self.title_label.config(text="🔄 Converting YOLO data...")
             convert_thread = threading.Thread(target=subprocess.run, args=(["python", "convert_yolo_to_reltr.py", "result.json"],))
             convert_thread.start()
             convert_thread.join()  # Đợi convert_yolo_to_reltr.py chạy xong
 
             # 3️⃣ Chạy boundingbox_objects.py (sau khi convert_yolo_to_reltr.py hoàn tất)
-            self.title_label.config(text="🔗 Đang xác định mối quan hệ giữa các vật thể...")
+            self.title_label.config(text="🔗 Analyzing relationships between objects...")
             boundingbox_thread = threading.Thread(target=subprocess.run, args=(["python", "boundingbox_objects.py", "--yolo_json", self.result_json_path,"--img_path",self.image_path,"--device","cpu", "--resume", self.checkpoint_path],))
             boundingbox_thread.start()
             boundingbox_thread.join()  # Đợi boundingbox_objects.py chạy xong
@@ -854,34 +1035,34 @@ class ObjectDetectionApp:
             if output_images:
                 latest_result = max(output_images, key=os.path.getmtime)  # Lấy ảnh mới nhất nếu có nhiều ảnh trùng tên
                 self.display_image(latest_result)
-                self.title_label.config(text="✅ Hoàn tất! Đây là kết quả.")
+                self.title_label.config(text="✅ Complete! Here are the results.")
             else:
-                print("📂 Danh sách file trong thư mục:", os.listdir(image_dir))  # Debug kiểm tra
-                self.title_label.config(text="❌ Không tìm thấy ảnh kết quả!")
+                print("📂 File list in directory:", os.listdir(image_dir))  # Debug kiểm tra
+                self.title_label.config(text="❌ Result image not found!")
 
             # 4️⃣ Tải và hiển thị dữ liệu JSON
-            self.title_label.config(text="📊 Đang tải dữ liệu kết quả...")
+            self.title_label.config(text="📊 Loading result data...")
             self.load_and_display_objects()
             self.load_and_display_relationships()
             
             # 5️⃣ Vẽ bbox mối quan hệ trên ảnh
-            self.title_label.config(text="🎨 Đang vẽ bbox mối quan hệ...")
+            self.title_label.config(text="🎨 Drawing relationship bboxes...")
             self.draw_relationship_boxes_on_image()
-            self.title_label.config(text="✅ Hoàn tất! Dữ liệu đã được tải và vẽ bbox.")
+            self.title_label.config(text="✅ Complete! Data loaded and bboxes drawn.")
             
         except Exception as e:
-            self.title_label.config(text=f"❌ Lỗi: {e}")
-            print(f"❌ Lỗi xảy ra: {e}")
+            self.title_label.config(text=f"❌ Error: {e}")
+            print(f"❌ Error occurred: {e}")
 
 
     def run_video_demo_thread(self):
         if not self.video_path:
-            self.title_label.config(text="❌ Hãy chọn video trước khi chạy demo!")
+            self.title_label.config(text="❌ Please select a video before running demo!")
             return
         if self.video_thread and self.video_thread.is_alive():
-            self.title_label.config(text="Video relation demo đang chạy...")
+            self.title_label.config(text="Video relation demo is running...")
             return
-        self.title_label.config(text="Đang chuẩn bị chạy video relation demo...")
+        self.title_label.config(text="Preparing to run video relation demo...")
         self.video_thread = threading.Thread(target=self.run_video_demo, daemon=True)
         self.video_thread.start()
 
@@ -917,30 +1098,32 @@ class ObjectDetectionApp:
             self.latest_video_outputs = outputs
 
             status = (
-                "Đã dừng video relation demo."
+                "Video relation demo stopped."
                 if self.video_stop_event.is_set()
-                else f"Hoàn tất video demo: {os.path.basename(outputs['video'])}"
+                else f"Video demo completed: {os.path.basename(outputs['video'])}"
             )
             self.root.after(0, lambda msg=status: self.title_label.config(text=msg))
             summary_file = outputs.get("summary")
             self.root.after(0, lambda path=summary_file: self._render_video_summary(path))
         except Exception as exc:
-            self.root.after(0, lambda: self.title_label.config(text=f"❌ Lỗi video demo: {exc}"))
+            self.root.after(0, lambda: self.title_label.config(text=f"❌ Video demo error: {exc}"))
             print(f"Video demo error: {exc}")
 
     def stop_video_demo(self):
         if self.video_thread and self.video_thread.is_alive():
             self.video_stop_event.set()
-            self.title_label.config(text="Đang dừng video relation demo...")
+            self.title_label.config(text="Stopping video relation demo...")
         else:
-            self.title_label.config(text="Không có video relation demo đang chạy.")
+            self.title_label.config(text="No video relation demo is running.")
 
     def _update_live_relations(self, relations, intrusions=None, danger=False):
+        self.relationships_text.config(state="normal")
         self.relationships_text.delete(1.0, tk.END)
         lines = []
         intrusions = intrusions or []
         if danger and intrusions:
-            lines.append("!!! WARNING: safety zone (2m) intrusions !!!")
+            lines.append("⚠️ WARNING: safety zone (2m) intrusions ⚠️")
+            lines.append("="*30)
             for alert in intrusions[:5]:
                 label = alert.get("class", "object")
                 track_id = alert.get("track_id")
@@ -950,39 +1133,52 @@ class ObjectDetectionApp:
                     descriptor += f" #{track_id}"
                 if dist is not None:
                     descriptor += f" @ {dist:.1f} m"
-                lines.append(f"- {descriptor}")
+                lines.append(f"  • {descriptor}")
             lines.append("")
         if not relations:
-            lines.append("KhA'ng cA3 m ¯i quan h ¯Ø nAÿo Ž’ø ¯œc phA­t hi ¯Øn.")
+            lines.append("❌ No relationships detected.")
         else:
+            header = f"🔗 Total: {len(relations)} relationships\n{'='*30}\n\n"
+            lines.append(header)
             for rel in relations[:20]:
                 subject = rel.get("subject", "unknown")
-                relation = rel.get("relation", "liA¦n quan")
+                relation = rel.get("relation", "liên quan")
                 obj = rel.get("object", "unknown")
                 confidence = rel.get("confidence", 0.0)
                 subj_id = rel.get("subject_track_id")
                 obj_id = rel.get("object_track_id")
                 prefix = ""
                 if subj_id is not None or obj_id is not None:
-                    prefix = f"[{subj_id or '-'}->{obj_id or '-'}] "
-                lines.append(f"{prefix}{subject} {relation} {obj} ({confidence:.2f})")
+                    prefix = f"[{subj_id or '-'}→{obj_id or '-'}] "
+                lines.append(f"🔸 {prefix}{subject.upper()}")
+                lines.append(f"   🔗 {relation.upper()}")
+                lines.append(f"   🎯 {obj.upper()}")
+                lines.append(f"   📊 Confidence: {confidence:.2%}\n")
         self.relationships_text.insert(tk.END, '\n'.join(lines))
+        self.relationships_text.config(state="disabled")
 
     def _update_live_objects(self, objects):
+        self.objects_text.config(state="normal")
         self.objects_text.delete(1.0, tk.END)
         if not objects:
-            self.objects_text.insert(tk.END, "Không có vật thể nào được phát hiện.")
+            self.objects_text.insert(tk.END, "❌ No objects detected.")
+            self.objects_text.config(state="disabled")
             return
         lines = []
-        for obj in objects[:20]:
+        header = f"📊 Total: {len(objects)} objects\n{'='*30}\n\n"
+        lines.append(header)
+        for i, obj in enumerate(objects[:20], 1):
             label = obj.get("class", "object")
             track_id = obj.get("track_id")
             confidence = obj.get("confidence", 0.0)
             if track_id is not None:
-                lines.append(f"ID {track_id}: {label} ({confidence:.2f})")
+                lines.append(f"🔸 {i}. {label.upper()} (ID: {track_id})")
             else:
-                lines.append(f"{label} ({confidence:.2f})")
+                lines.append(f"🔸 {i}. {label.upper()}")
+            lines.append(f"   🎯 Confidence: {confidence:.2%}\n")
         self.objects_text.insert(tk.END, "\n".join(lines))
+        self.objects_text.config(state="disabled")
+        self.objects_text.config(state="disabled")
 
 
     def _update_alert_banner(self, intrusions, danger):
@@ -1001,27 +1197,27 @@ class ObjectDetectionApp:
                 else:
                     labels.append(label)
             alert_text = (
-                f"WARNING: {len(intrusions)} object(s) < {self.safe_zone_radius_m:.1f} m "
-                f"({', '.join(labels)}) | nearest {nearest:.1f} m"
+                f"⚠️ WARNING: {len(intrusions)} object(s) < {self.safe_zone_radius_m:.1f}m "
+                f"({', '.join(labels)}) | Nearest: {nearest:.1f}m"
             )
             self.alert_label.config(text=alert_text, bg=self.alert_warning_bg, fg=self.alert_warning_fg)
         else:
             self.alert_label.config(
-                text=f"Safe zone clear (>{self.safe_zone_radius_m:.1f} m)",
+                text=f"🟢 Safe Zone: Clear (>{self.safe_zone_radius_m:.1f}m)",
                 bg=self.alert_normal_bg,
                 fg=self.alert_normal_fg
             )
 
     def run_rl_training(self):
         """Run reinforcement learning training in separate thread"""
-        self.title_label.config(text="🧠 Đang chạy RL Training...")
+        self.title_label.config(text="🧠 Running RL Training...")
         
         def rl_training_thread():
             try:
                 results = self.rl_enhancement.run_reinforcement_learning()
-                self.title_label.config(text=f"✅ RL Training hoàn tất! Reward: {results['reward']:.3f}")
+                self.title_label.config(text=f"✅ RL Training completed! Reward: {results['reward']:.3f}")
             except Exception as e:
-                self.title_label.config(text=f"❌ RL Training lỗi: {e}")
+                self.title_label.config(text=f"❌ RL Training error: {e}")
                 print(f"❌ RL Training error: {e}")
         
         # Chạy RL training trong thread riêng để không block UI
@@ -1031,14 +1227,14 @@ class ObjectDetectionApp:
     
     def generate_synthetic_data(self):
         """Generate synthetic dataset from relationships in separate thread"""
-        self.title_label.config(text="🎨 Đang tạo dữ liệu synthetic...")
+        self.title_label.config(text="🎨 Generating synthetic data...")
         
         def synthetic_generation_thread():
             try:
                 synthetic_data = self.rl_enhancement.generate_synthetic_dataset()
-                self.title_label.config(text=f"✅ Đã tạo {len(synthetic_data)} ảnh synthetic!")
+                self.title_label.config(text=f"✅ Generated {len(synthetic_data)} synthetic images!")
             except Exception as e:
-                self.title_label.config(text=f"❌ Tạo synthetic data lỗi: {e}")
+                self.title_label.config(text=f"❌ Synthetic data generation error: {e}")
                 print(f"❌ Synthetic data generation error: {e}")
         
         # Chạy synthetic data generation trong thread riêng
@@ -1048,7 +1244,7 @@ class ObjectDetectionApp:
     
     def evaluate_training_results(self):
         """Evaluate training results and create comprehensive report"""
-        self.title_label.config(text="📊 Đang đánh giá kết quả training...")
+        self.title_label.config(text="📊 Evaluating training results...")
         
         def evaluation_thread():
             try:
@@ -1067,7 +1263,7 @@ class ObjectDetectionApp:
                     avg_reward = overall_analysis.get('average_reward', 0)
                     total_images = overall_analysis.get('total_ai_images_generated', 0)
                     
-                    self.title_label.config(text=f"✅ Đánh giá hoàn tất! {total_sessions} sessions, Reward: {avg_reward:.3f}, AI Images: {total_images}")
+                    self.title_label.config(text=f"✅ Evaluation completed! {total_sessions} sessions, Reward: {avg_reward:.3f}, AI Images: {total_images}")
                     
                     # Display detailed results in console
                     print("\n" + "="*60)
@@ -1093,10 +1289,10 @@ class ObjectDetectionApp:
                     print("="*60)
                     
                 else:
-                    self.title_label.config(text="❌ Không tìm thấy kết quả training để đánh giá")
+                    self.title_label.config(text="❌ No training results found to evaluate")
                     
             except Exception as e:
-                self.title_label.config(text=f"❌ Lỗi đánh giá: {e}")
+                self.title_label.config(text=f"❌ Evaluation error: {e}")
                 print(f"❌ Evaluation error: {e}")
         
         # Chạy evaluation trong thread riêng
