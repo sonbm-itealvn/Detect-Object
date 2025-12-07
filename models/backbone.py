@@ -3,12 +3,19 @@
 Backbone modules.
 """
 
+import inspect
+
 import torch
 import torch.nn.functional as F
 import torchvision
 from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+try:
+    from torchvision.models import get_model_weights
+except ImportError:
+    get_model_weights = None
 
 from util.misc import NestedTensor, is_main_process
 
@@ -85,11 +92,38 @@ class Backbone(BackboneBase):
                  train_backbone: bool,
                  return_interm_layers: bool,
                  dilation: bool):
-        backbone = getattr(torchvision.models, name)(
+        backbone_ctor = getattr(torchvision.models, name)
+        weights_arg = self._resolve_weights_argument(backbone_ctor, name)
+        kwargs = dict(
             replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d)
+            norm_layer=FrozenBatchNorm2d,
+        )
+        kwargs.update(weights_arg)
+        backbone = backbone_ctor(**kwargs)
         num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
+
+    def _resolve_weights_argument(self, ctor, name: str) -> Dict[str, Optional[object]]:
+        signature = inspect.signature(ctor)
+        use_pretrained = is_main_process()
+        if "weights" in signature.parameters:
+            weights = self._get_default_weights(name) if use_pretrained else None
+            return {"weights": weights}
+        if "pretrained" in signature.parameters:
+            return {"pretrained": use_pretrained}
+        return {}
+
+    def _get_default_weights(self, name: str):
+        if not get_model_weights:
+            return None
+        try:
+            weights_enum = get_model_weights(name)
+            if hasattr(weights_enum, "DEFAULT"):
+                return weights_enum.DEFAULT
+            members = list(weights_enum)
+            return members[0] if members else None
+        except Exception:
+            return None
 
 
 class Joiner(nn.Sequential):

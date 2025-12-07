@@ -1,16 +1,19 @@
+import inspect
 import json
 import time
 from collections import Counter
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
 from PIL import Image
+
+SAFE_ZONE_CONFIG_PATH = Path("safe_zone_config.json")
 
 import detect_objects as detection_pipeline
 from RL.reinforcement_learning import RELATION_CLASSES
@@ -21,6 +24,165 @@ from util.misc import nested_tensor_from_tensor_list
 
 FrameCallback = Optional[Callable[[np.ndarray], None]]
 RelationCallback = Optional[Callable[[Dict[str, List[Dict[str, object]]]], None]]
+_LOAD_STATE_HAS_ASSIGN = "assign" in inspect.signature(torch.nn.Module.load_state_dict).parameters
+
+
+class SafeZoneMonitor:
+    """Monitor and render the 2m safety zone in front of the ego vehicle."""
+
+    DEFAULT_NORMALIZED_POLYGON: Sequence[Tuple[float, float]] = (
+        (0.35, 0.55),
+        (0.65, 0.55),
+        (0.85, 0.98),
+        (0.15, 0.98),
+    )
+    DEFAULT_INTRUSION_CLASSES = {
+        "person",
+        "bicycle",
+        "motorbike",
+        "motorcycle",
+        "car",
+        "truck",
+        "bus",
+        "animal",
+    }
+
+    def __init__(self, config_path: Path = SAFE_ZONE_CONFIG_PATH):
+        self.config_path = Path(config_path)
+        self.config = self._load_config()
+        self.depth_m = float(self.config.get("safe_zone_depth_m", 2.0))
+        self.width_m = float(self.config.get("safe_zone_width_m", 3.0))
+        self.forward_offset_m = float(self.config.get("forward_offset_m", 0.0))
+        self.hysteresis_frames = int(self.config.get("hysteresis_frames", 3))
+        classes = self.config.get("intrusion_classes")
+        if classes is None:
+            self.monitor_classes = set(self.DEFAULT_INTRUSION_CLASSES)
+        else:
+            normalized = [cls for cls in classes if isinstance(cls, str)]
+            self.monitor_classes = {cls.lower() for cls in normalized}
+        self.alpha_normal = float(self.config.get("polygon_alpha_normal", 0.15))
+        self.alpha_alert = float(self.config.get("polygon_alpha_alert", 0.3))
+        self._homography = None
+        self._homography_inv = None
+        self._cached_polygons: Dict[Tuple[int, int], np.ndarray] = {}
+        self._last_intrusion_frame = -999
+        self._init_homography(self.config.get("homography"))
+
+    def _load_config(self) -> Dict[str, object]:
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _init_homography(self, homography_cfg: Optional[Dict[str, Sequence[Sequence[float]]]]):
+        if not homography_cfg:
+            return
+        image_points = homography_cfg.get("image_points") or []
+        world_points = homography_cfg.get("world_points") or []
+        if len(image_points) < 4 or len(world_points) < 4:
+            return
+        try:
+            src = np.array(world_points[:4], dtype=np.float32)
+            dst = np.array(image_points[:4], dtype=np.float32)
+            self._homography = cv2.getPerspectiveTransform(src, dst)
+            self._homography_inv = np.linalg.inv(self._homography)
+        except Exception:
+            self._homography = None
+            self._homography_inv = None
+
+    def evaluate(self, frame_shape: Tuple[int, int, int], objects: List[Dict[str, object]], frame_idx: int):
+        polygon = self._get_polygon(frame_shape)
+        if polygon is None or len(polygon) < 3:
+            return None, [], False
+        contour = polygon.reshape((-1, 1, 2)).astype(np.int32)
+        intrusions: List[Dict[str, object]] = []
+        for idx, obj in enumerate(objects):
+            bbox = obj.get("bbox", [0, 0, 0, 0])
+            if not bbox or len(bbox) < 4:
+                continue
+            cls_name = str(obj.get("class", "")).lower()
+            if self.monitor_classes and cls_name and cls_name not in self.monitor_classes:
+                continue
+            x1, y1, x2, y2 = bbox[:4]
+            foot_point = np.array([(x1 + x2) / 2.0, y2], dtype=np.float32)
+            inside = cv2.pointPolygonTest(contour, tuple(float(v) for v in foot_point), False)
+            if inside >= 0:
+                distance_m = self._estimate_distance(foot_point, frame_shape)
+                intrusion_entry = {
+                    "object_index": idx,
+                    "track_id": obj.get("track_id"),
+                    "class": obj.get("class"),
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "foot_point": [float(foot_point[0]), float(foot_point[1])],
+                    "confidence": float(obj.get("confidence", 0.0)),
+                    "distance_m": distance_m,
+                }
+                intrusions.append(intrusion_entry)
+        danger_active = bool(intrusions)
+        if danger_active:
+            self._last_intrusion_frame = frame_idx
+        elif frame_idx - self._last_intrusion_frame <= self.hysteresis_frames:
+            danger_active = True
+        return polygon, intrusions, danger_active
+
+    def _get_polygon(self, frame_shape: Tuple[int, int, int]):
+        height, width = frame_shape[:2]
+        cache_key = (width, height)
+        if cache_key in self._cached_polygons:
+            return self._cached_polygons[cache_key]
+        polygon = self._project_world_polygon(frame_shape)
+        if polygon is None:
+            polygon = self._polygon_from_normalized(frame_shape)
+        if polygon is not None:
+            self._cached_polygons[cache_key] = polygon
+        return polygon
+
+    def _polygon_from_normalized(self, frame_shape: Tuple[int, int, int]):
+        height, width = frame_shape[:2]
+        points = self.config.get("normalized_polygon") or self.DEFAULT_NORMALIZED_POLYGON
+        if not points:
+            return None
+        polygon = np.array([[p[0] * width, p[1] * height] for p in points], dtype=np.float32)
+        return polygon
+
+    def _project_world_polygon(self, frame_shape: Tuple[int, int, int]):
+        if self._homography is None:
+            return None
+        world_polygon = self.config.get("safe_zone_world")
+        if not world_polygon:
+            half_width = self.width_m / 2.0
+            world_polygon = [
+                [self.forward_offset_m, -half_width],
+                [self.forward_offset_m + self.depth_m, -half_width],
+                [self.forward_offset_m + self.depth_m, half_width],
+                [self.forward_offset_m, half_width],
+            ]
+        try:
+            pts = np.array(world_polygon, dtype=np.float32).reshape(-1, 1, 2)
+            projected = cv2.perspectiveTransform(pts, self._homography).reshape(-1, 2)
+            return projected.astype(np.float32)
+        except Exception:
+            return None
+
+    def _estimate_distance(self, image_point: np.ndarray, frame_shape: Tuple[int, int, int]) -> Optional[float]:
+        if self._homography_inv is not None:
+            try:
+                pts = np.array(image_point, dtype=np.float32).reshape(-1, 1, 2)
+                world_point = cv2.perspectiveTransform(pts, self._homography_inv).reshape(-1, 2)[0]
+                return float(max(0.0, world_point[0]))
+            except Exception:
+                pass
+        # Fallback: approximate using relative vertical position in frame
+        height = max(1, frame_shape[0])
+        rel = 1.0 - max(0.0, min(1.0, image_point[1] / height))
+        approx_distance = max(0.0, self.depth_m * (rel ** 0.5))
+        return float(round(approx_distance, 2))
+
+    def get_alpha_values(self):
+        return self.alpha_normal, self.alpha_alert
 
 
 class RelTRInferenceEngine:
@@ -35,6 +197,7 @@ class RelTRInferenceEngine:
             T.ToTensor(),
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
+        self._load_state_kwargs = {"strict": False}
 
     def _build_args(self):
         return dict(
@@ -71,14 +234,27 @@ class RelTRInferenceEngine:
         args = self._build_args()
         namespace_args = SimpleNamespace(**args)
         model, _, _ = build_model(namespace_args)
+        self._materialize_model(model)
+        if _LOAD_STATE_HAS_ASSIGN and "assign" in inspect.signature(model.load_state_dict).parameters:
+            self._load_state_kwargs["assign"] = True
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
         state = checkpoint.get("model") if isinstance(checkpoint, dict) else checkpoint
         if state:
-            model.load_state_dict(state, strict=False)
+            model.load_state_dict(state, **self._load_state_kwargs)
         model.to(self.device)
         model.eval()
         self.model = model
         return self.model
+
+    def _materialize_model(self, model: torch.nn.Module):
+        to_empty = getattr(model, "to_empty", None)
+        if callable(to_empty):
+            try:
+                model.to_empty(device=self.device)
+                return
+            except RuntimeError:
+                pass
+        model.to(self.device)
 
     def _prepare_context(self, global_context: Optional[List[float]]):
         if not global_context:
@@ -193,12 +369,14 @@ class VideoRelationPipeline:
         tracker_config: Optional[str] = "bytetrack.yaml",
         min_confidence: float = 0.55,
         announce_min_confidence: float = 0.6,
+        safe_zone_config: Path = SAFE_ZONE_CONFIG_PATH,
     ):
         self.rel_engine = RelTRInferenceEngine(reltr_checkpoint)
         self.yolo_model = detection_pipeline.yolo_model
         self.tracker_config = tracker_config
         self.min_confidence = min_confidence
         self.announce_threshold = announce_min_confidence
+        self.safe_zone = SafeZoneMonitor(safe_zone_config)
 
     def process_video(
         self,
@@ -248,7 +426,8 @@ class VideoRelationPipeline:
                 for rel in relations:
                     key = f"{rel.get('subject','unknown')}|{rel.get('relation','')}|{rel.get('object','unknown')}"
                     relation_counter[key] += 1
-                annotated = self._draw_annotations(frame.copy(), objects, relations)
+                polygon, intrusions, danger_active = self.safe_zone.evaluate(frame.shape, objects, frame_idx)
+                annotated = self._draw_annotations(frame.copy(), objects, relations, polygon, intrusions, danger_active)
                 if writer is None:
                     height, width = annotated.shape[:2]
                     writer = cv2.VideoWriter(
@@ -261,7 +440,14 @@ class VideoRelationPipeline:
                 if on_frame:
                     on_frame(annotated.copy())
                 if on_relations:
-                    on_relations({"frame": frame_idx, "relations": relations, "objects": objects})
+                    on_relations({
+                        "frame": frame_idx,
+                        "relations": relations,
+                        "objects": objects,
+                        "intrusions": intrusions,
+                        "safe_zone": polygon.tolist() if polygon is not None else [],
+                        "danger": danger_active,
+                    })
         finally:
             if writer is not None:
                 writer.release()
@@ -336,17 +522,63 @@ class VideoRelationPipeline:
             objects.append(obj)
         return objects
 
-    def _draw_annotations(self, frame, objects, relations):
-        for obj in objects:
-            x1, y1, x2, y2 = obj["bbox"]
+    def _draw_annotations(self, frame, objects, relations, safe_zone=None, intrusions=None, danger_active=False):
+        intrusions = intrusions or []
+        intrusion_lookup = {}
+        for alert in intrusions:
+            key = ("id", alert.get("track_id"))
+            if alert.get("track_id") is None:
+                key = ("bbox", tuple(alert.get("bbox", [])))
+            intrusion_lookup[key] = alert
+            intrusion_lookup[("idx", alert.get("object_index"))] = alert
+
+        if safe_zone is not None and len(safe_zone) >= 3:
+            contour = safe_zone.reshape((-1, 1, 2)).astype(np.int32)
+            overlay = frame.copy()
+            color = (0, 0, 255) if danger_active else (0, 255, 0)
+            alpha_normal, alpha_alert = self.safe_zone.get_alpha_values()
+            alpha = alpha_alert if danger_active else alpha_normal
+            cv2.fillPoly(overlay, [contour], color)
+            cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+            cv2.polylines(frame, [contour], True, color, 3)
+
+        for idx, obj in enumerate(objects):
+            x1, y1, x2, y2 = map(int, obj["bbox"])
             track_id = obj.get("track_id")
             label = obj.get("class", "obj")
-            color = (0, 255, 0)
+            alert = None
+            if track_id is not None and ("id", track_id) in intrusion_lookup:
+                alert = intrusion_lookup[("id", track_id)]
+            else:
+                bbox_key = ("bbox", (x1, y1, x2, y2))
+                if bbox_key in intrusion_lookup:
+                    alert = intrusion_lookup[bbox_key]
+                elif ("idx", idx) in intrusion_lookup:
+                    alert = intrusion_lookup[("idx", idx)]
+            color = (0, 0, 255) if alert else (0, 255, 0)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             caption = f"{label}"
             if track_id is not None:
                 caption = f"ID {track_id}: {label}"
+            if alert and alert.get("distance_m") is not None:
+                caption += f" | {alert['distance_m']:.1f}m"
             cv2.putText(frame, caption, (x1, max(15, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        if danger_active:
+            warning_text = "WARNING: object inside 2m safety zone"
+            cv2.putText(
+                frame,
+                warning_text,
+                (20, frame.shape[0] - 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                3,
+            )
+            for idx, alert in enumerate(intrusions[:2]):
+                txt = f"- {alert.get('class', 'object')} @ {alert.get('distance_m', 0):.1f}m"
+                cv2.putText(frame, txt, (25, frame.shape[0] - 60 - idx * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
         for idx, rel in enumerate(relations[:10]):
             text = f"{rel.get('subject', '?')} {rel.get('relation', '?')} {rel.get('object', '?')} ({rel.get('confidence', 0.0):.2f})"
             cv2.putText(frame, text, (15, 25 + 20 * idx), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)

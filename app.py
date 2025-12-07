@@ -178,6 +178,21 @@ class ObjectDetectionApp:
         self.control_frame.update_idletasks()
         self.control_canvas.configure(scrollregion=self.control_canvas.bbox("all"))
 
+        # Alert banner cho vùng an toàn 2m
+        self.alert_normal_bg = self.colors['bg_main']
+        self.alert_normal_fg = self.colors['text_light']
+        self.alert_warning_bg = self.colors['accent_danger']
+        self.alert_warning_fg = self.colors['text_light']
+        self.alert_label = Label(
+            root,
+            text="Safe zone ready (>=2m)",
+            font=("Segoe UI", 11, "bold"),
+            bg=self.alert_normal_bg,
+            fg=self.alert_normal_fg,
+            pady=6
+        )
+        self.alert_label.pack(fill="x", padx=25, pady=(0, 10))
+
         # Frame chính chứa 3 cột với modern card design
         main_container = Frame(root, bg=self.colors['bg_main'])
         main_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -311,6 +326,7 @@ class ObjectDetectionApp:
         self.video_thread: Optional[threading.Thread] = None
         self.video_stop_event = threading.Event()
         self.latest_video_outputs = {}
+        self.safe_zone_radius_m = 2.0
 
     def on_window_resize(self, event=None):
         """Xử lý khi window resize để responsive"""
@@ -884,8 +900,11 @@ class ObjectDetectionApp:
             def handle_relations(payload):
                 relations = payload.get("relations", [])
                 objects = payload.get("objects", [])
-                self.root.after(0, lambda rels=relations: self._update_live_relations(rels))
+                intrusions = payload.get("intrusions", [])
+                danger = payload.get("danger", False)
+                self.root.after(0, lambda rels=relations, intr=intrusions, dan=danger: self._update_live_relations(rels, intr, dan))
                 self.root.after(0, lambda objs=objects: self._update_live_objects(objs))
+                self.root.after(0, lambda intr=intrusions, dan=danger: self._update_alert_banner(intr, dan))
 
             outputs = self.video_pipeline.process_video(
                 self.video_path,
@@ -916,24 +935,38 @@ class ObjectDetectionApp:
         else:
             self.title_label.config(text="Không có video relation demo đang chạy.")
 
-    def _update_live_relations(self, relations):
+    def _update_live_relations(self, relations, intrusions=None, danger=False):
         self.relationships_text.delete(1.0, tk.END)
-        if not relations:
-            self.relationships_text.insert(tk.END, "Không có mối quan hệ nào được phát hiện.")
-            return
         lines = []
-        for rel in relations[:20]:
-            subject = rel.get("subject", "unknown")
-            relation = rel.get("relation", "liên quan")
-            obj = rel.get("object", "unknown")
-            confidence = rel.get("confidence", 0.0)
-            subj_id = rel.get("subject_track_id")
-            obj_id = rel.get("object_track_id")
-            prefix = ""
-            if subj_id is not None or obj_id is not None:
-                prefix = f"[{subj_id or '-'}->{obj_id or '-'}] "
-            lines.append(f"{prefix}{subject} {relation} {obj} ({confidence:.2f})")
-        self.relationships_text.insert(tk.END, "\n".join(lines))
+        intrusions = intrusions or []
+        if danger and intrusions:
+            lines.append("!!! WARNING: safety zone (2m) intrusions !!!")
+            for alert in intrusions[:5]:
+                label = alert.get("class", "object")
+                track_id = alert.get("track_id")
+                dist = alert.get("distance_m")
+                descriptor = f"{label}"
+                if track_id is not None:
+                    descriptor += f" #{track_id}"
+                if dist is not None:
+                    descriptor += f" @ {dist:.1f} m"
+                lines.append(f"- {descriptor}")
+            lines.append("")
+        if not relations:
+            lines.append("KhA'ng cA3 m ¯i quan h ¯Ø nAÿo Ž’ø ¯œc phA­t hi ¯Øn.")
+        else:
+            for rel in relations[:20]:
+                subject = rel.get("subject", "unknown")
+                relation = rel.get("relation", "liA¦n quan")
+                obj = rel.get("object", "unknown")
+                confidence = rel.get("confidence", 0.0)
+                subj_id = rel.get("subject_track_id")
+                obj_id = rel.get("object_track_id")
+                prefix = ""
+                if subj_id is not None or obj_id is not None:
+                    prefix = f"[{subj_id or '-'}->{obj_id or '-'}] "
+                lines.append(f"{prefix}{subject} {relation} {obj} ({confidence:.2f})")
+        self.relationships_text.insert(tk.END, '\n'.join(lines))
 
     def _update_live_objects(self, objects):
         self.objects_text.delete(1.0, tk.END)
@@ -951,6 +984,33 @@ class ObjectDetectionApp:
                 lines.append(f"{label} ({confidence:.2f})")
         self.objects_text.insert(tk.END, "\n".join(lines))
 
+
+    def _update_alert_banner(self, intrusions, danger):
+        intrusions = intrusions or []
+        if danger and intrusions:
+            nearest = min(
+                (alert.get('distance_m') if alert.get('distance_m') is not None else self.safe_zone_radius_m)
+                for alert in intrusions
+            )
+            labels = []
+            for alert in intrusions[:3]:
+                label = alert.get('class', 'object')
+                track_id = alert.get('track_id')
+                if track_id is not None:
+                    labels.append(f"{label}#{track_id}")
+                else:
+                    labels.append(label)
+            alert_text = (
+                f"WARNING: {len(intrusions)} object(s) < {self.safe_zone_radius_m:.1f} m "
+                f"({', '.join(labels)}) | nearest {nearest:.1f} m"
+            )
+            self.alert_label.config(text=alert_text, bg=self.alert_warning_bg, fg=self.alert_warning_fg)
+        else:
+            self.alert_label.config(
+                text=f"Safe zone clear (>{self.safe_zone_radius_m:.1f} m)",
+                bg=self.alert_normal_bg,
+                fg=self.alert_normal_fg
+            )
 
     def run_rl_training(self):
         """Run reinforcement learning training in separate thread"""
