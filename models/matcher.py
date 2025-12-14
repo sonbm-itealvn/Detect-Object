@@ -2,16 +2,82 @@
 # Copyright (c) Institute of Information Processing, Leibniz University Hannover.
 """
 Modules to compute the matching cost between the predicted triplet and ground truth triplet.
+Modified to use Greedy matching instead of Hungarian matching.
 """
 import torch
-from scipy.optimize import linear_sum_assignment
+import numpy as np
 from torch import nn
 
 from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou, box_iou
 
 
+def greedy_assignment(cost_matrix):
+    """
+    Greedy matching algorithm: iteratively select the minimum cost pair.
+    This function replaces linear_sum_assignment from scipy.optimize.
+    
+    Algorithm:
+        1. At each step, find the pair (prediction, target) with minimum cost
+        2. Match that pair
+        3. Mark both as used (set to infinity)
+        4. Repeat until no more pairs available
+    
+    Args:
+        cost_matrix: numpy array or torch tensor of shape [num_predictions, num_targets]
+    
+    Returns:
+        row_indices: numpy array of matched prediction indices (same format as linear_sum_assignment)
+        col_indices: numpy array of matched target indices (same format as linear_sum_assignment)
+    """
+    # Convert to numpy if it's a torch tensor
+    if isinstance(cost_matrix, torch.Tensor):
+        cost_matrix = cost_matrix.detach().cpu().numpy()
+    
+    cost_matrix = np.asarray(cost_matrix, dtype=np.float32)
+    num_preds, num_targets = cost_matrix.shape
+    
+    # Number of matches is the minimum of predictions and targets
+    num_matches = min(num_preds, num_targets)
+    
+    # Track which rows and columns are already used
+    used_rows = np.zeros(num_preds, dtype=bool)
+    used_cols = np.zeros(num_targets, dtype=bool)
+    
+    matched_rows = []
+    matched_cols = []
+    
+    # Create a working copy
+    costs = cost_matrix.copy()
+    
+    for _ in range(num_matches):
+        # Mask out used rows and columns by setting to infinity
+        temp_costs = costs.copy()
+        temp_costs[used_rows, :] = np.inf
+        temp_costs[:, used_cols] = np.inf
+        
+        # Find the minimum cost
+        min_idx = np.argmin(temp_costs)
+        min_row = min_idx // num_targets
+        min_col = min_idx % num_targets
+        
+        # Check if we found a valid pair (not infinity)
+        if temp_costs[min_row, min_col] == np.inf:
+            break
+        
+        # Add to matched pairs
+        matched_rows.append(min_row)
+        matched_cols.append(min_col)
+        
+        # Mark as used
+        used_rows[min_row] = True
+        used_cols[min_col] = True
+    
+    return np.array(matched_rows, dtype=np.int64), np.array(matched_cols, dtype=np.int64)
+
+
 class HungarianMatcher(nn.Module):
-    """This class computes an assignment between the targets and the predictions of the network"""
+    """This class computes an assignment between the targets and the predictions of the network.
+    Note: Despite the name, this now uses Greedy matching instead of Hungarian algorithm for better performance."""
 
     def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1, iou_threshold: float = 0.7):
         """Creates the matcher
@@ -89,7 +155,8 @@ class HungarianMatcher(nn.Module):
         C = C.view(bs, num_queries, -1).cpu()
 
         sizes = [len(v["boxes"]) for v in targets]
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+        # Use Greedy matching instead of Hungarian algorithm
+        indices = [greedy_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
 
         # Concat the subject/object/predicate labels and subject/object boxes
         sub_tgt_bbox = torch.cat([v['boxes'][v['rel_annotations'][:, 0]] for v in targets])
@@ -130,7 +197,8 @@ class HungarianMatcher(nn.Module):
         C_rel = C_rel.view(bs, num_queries_rel, -1).cpu()
 
         sizes1 = [len(v["rel_annotations"]) for v in targets]
-        indices1 = [linear_sum_assignment(c[i]) for i, c in enumerate(C_rel.split(sizes1, -1))]
+        # Use Greedy matching instead of Hungarian algorithm
+        indices1 = [greedy_assignment(c[i]) for i, c in enumerate(C_rel.split(sizes1, -1))]
 
         # assignment strategy to avoid assigning <background-no_relationship-background > to some good predictions
         sub_weight = torch.ones((bs, num_queries_rel)).to(out_prob.device)

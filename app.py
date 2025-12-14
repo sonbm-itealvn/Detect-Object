@@ -1005,24 +1005,46 @@ class ObjectDetectionApp:
             self.title_label.config(text="❌ Please select an image first!")
             return
 
+        # Validate all required paths
+        if not self.result_json_path:
+            self.result_json_path = "converted_bboxes.json"
+        if not self.checkpoint_path:
+            self.checkpoint_path = "reltr_finetuned.pth"
+        
+        # Ensure paths are strings, not None
+        if not isinstance(self.image_path, str) or not os.path.exists(self.image_path):
+            self.title_label.config(text="❌ Invalid image path!")
+            return
+
         self.title_label.config(text="⏳ Processing... Please wait.")
 
         try:
             # 1️⃣ Chạy detect_objects.py
             self.title_label.config(text="🔍 Detecting objects...")
-            detect_thread = threading.Thread(target=subprocess.run, args=(["python", "detect_objects.py", self.image_path],))
+            detect_cmd = ["python", "detect_objects.py", str(self.image_path)]
+            detect_thread = threading.Thread(target=lambda: subprocess.run(detect_cmd, check=True))
             detect_thread.start()
             detect_thread.join()  # Đợi detect_objects.py chạy xong
 
             # 2️⃣ Chạy convert_yolo_to_reltr.py (sau khi detect_objects.py hoàn tất)
             self.title_label.config(text="🔄 Converting YOLO data...")
-            convert_thread = threading.Thread(target=subprocess.run, args=(["python", "convert_yolo_to_reltr.py", "result.json"],))
+            convert_cmd = ["python", "convert_yolo_to_reltr.py", "result.json"]
+            convert_thread = threading.Thread(target=lambda: subprocess.run(convert_cmd, check=True))
             convert_thread.start()
             convert_thread.join()  # Đợi convert_yolo_to_reltr.py chạy xong
 
             # 3️⃣ Chạy boundingbox_objects.py (sau khi convert_yolo_to_reltr.py hoàn tất)
             self.title_label.config(text="🔗 Analyzing relationships between objects...")
-            boundingbox_thread = threading.Thread(target=subprocess.run, args=(["python", "boundingbox_objects.py", "--yolo_json", self.result_json_path,"--img_path",self.image_path,"--device","cpu", "--resume", self.checkpoint_path],))
+            boundingbox_cmd = [
+                "python", "boundingbox_objects.py",
+                "--yolo_json", str(self.result_json_path),
+                "--img_path", str(self.image_path),
+                "--device", "cpu",
+                "--resume", str(self.checkpoint_path)
+            ]
+            # Filter out any None values
+            boundingbox_cmd = [str(arg) for arg in boundingbox_cmd if arg is not None]
+            boundingbox_thread = threading.Thread(target=lambda: subprocess.run(boundingbox_cmd, check=True))
             boundingbox_thread.start()
             boundingbox_thread.join()  # Đợi boundingbox_objects.py chạy xong
 

@@ -259,20 +259,42 @@ class ObjectDetectionConsoleApp:
             print("❌ Hãy chọn ảnh trước!")
             return
 
+        # Validate all required paths
+        if not self.result_json_path:
+            self.result_json_path = "converted_bboxes.json"
+        if not self.checkpoint_path:
+            self.checkpoint_path = "checkpoint.pth"
+        
+        # Ensure paths are strings, not None
+        if not isinstance(self.image_path, str) or not os.path.exists(self.image_path):
+            print("❌ Đường dẫn ảnh không hợp lệ!")
+            return
+
         print("⏳ Đang xử lý... Vui lòng chờ.")
 
         try:
             # 1️⃣ Chạy detect_objects.py
             print("🔍 Đang phát hiện vật thể...")
-            subprocess.run(["python", "detect_objects.py", self.image_path], check=True)
+            detect_cmd = ["python", "detect_objects.py", str(self.image_path)]
+            subprocess.run(detect_cmd, check=True)
 
             # 2️⃣ Chạy convert_yolo_to_reltr.py (sau khi detect_objects.py hoàn tất)
             print("🔄 Đang chuyển đổi dữ liệu YOLO...")
-            subprocess.run(["python", "convert_yolo_to_reltr.py", "result.json"], check=True)
+            convert_cmd = ["python", "convert_yolo_to_reltr.py", "result.json"]
+            subprocess.run(convert_cmd, check=True)
 
             # 3️⃣ Chạy boundingbox_objects.py (sau khi convert_yolo_to_reltr.py hoàn tất)
             print("🔗 Đang xác định mối quan hệ giữa các vật thể...")
-            subprocess.run(["python", "boundingbox_objects.py", "--yolo_json", self.result_json_path,"--img_path",self.image_path,"--device","cpu", "--resume", self.checkpoint_path], check=True)
+            boundingbox_cmd = [
+                "python", "boundingbox_objects.py",
+                "--yolo_json", str(self.result_json_path),
+                "--img_path", str(self.image_path),
+                "--device", "cpu",
+                "--resume", str(self.checkpoint_path)
+            ]
+            # Filter out any None values
+            boundingbox_cmd = [str(arg) for arg in boundingbox_cmd if arg is not None]
+            subprocess.run(boundingbox_cmd, check=True)
 
             image_dir = os.path.dirname(self.image_path)
             image_id = os.path.splitext(os.path.basename(self.image_path))[0]
