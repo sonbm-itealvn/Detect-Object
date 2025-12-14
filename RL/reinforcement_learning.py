@@ -130,6 +130,10 @@ class RelationshipReinforcementLearning:
         self.latest_reward_components: Dict[str, float] = {}
         self.latest_detection_metrics: Dict[str, float] = {}
         self.latest_relationship_metrics: Dict[str, float] = {}
+        
+        # Per-relationship performance tracking (NEW: để agent có thể chọn relationships cần tập trung)
+        self.relationship_performance: Dict[str, Dict[str, Any]] = {}  # Key: relationship_tuple, Value: performance metrics
+        self.relationship_generation_history: Dict[str, List[float]] = {}  # Track F1 scores per relationship
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -188,19 +192,113 @@ class RelationshipReinforcementLearning:
         action_value = self.action_space[action_index]
         return action_index, action_value
 
-    def decide_action(self) -> Dict[str, Any]:
+    def _get_relationship_key(self, relationship: Dict[str, Any]) -> str:
+        """Tạo key duy nhất cho relationship để tracking"""
+        subject = relationship.get('subject', 'unknown')
+        relation = relationship.get('relation', 'unknown')
+        obj = relationship.get('object', 'unknown')
+        return f"{subject}|{relation}|{obj}".lower()
+    
+    def _update_relationship_performance(self, relationship: Dict[str, Any], f1_score: float):
+        """Cập nhật hiệu suất cho một relationship cụ thể"""
+        rel_key = self._get_relationship_key(relationship)
+        
+        if rel_key not in self.relationship_performance:
+            self.relationship_performance[rel_key] = {
+                'relationship': relationship,
+                'f1_scores': deque(maxlen=20),  # Lưu 20 F1 scores gần nhất
+                'avg_f1': 0.0,
+                'min_f1': 1.0,
+                'max_f1': 0.0,
+                'generation_count': 0,
+                'last_improvement': 0.0,
+            }
+            self.relationship_generation_history[rel_key] = []
+        
+        perf = self.relationship_performance[rel_key]
+        perf['f1_scores'].append(f1_score)
+        perf['avg_f1'] = sum(perf['f1_scores']) / len(perf['f1_scores'])
+        perf['min_f1'] = min(perf['f1_scores'])
+        perf['max_f1'] = max(perf['f1_scores'])
+        
+        # Tính improvement
+        if len(perf['f1_scores']) > 1:
+            perf['last_improvement'] = f1_score - list(perf['f1_scores'])[-2]
+    
+    def _get_relationship_priorities(self, original_relationships: List[Dict[str, Any]], 
+                                     base_variations: int) -> Dict[str, int]:
+        """
+        Tính toán số lượng variations cần sinh cho mỗi relationship dựa trên hiệu suất.
+        Relationships có F1 thấp sẽ được sinh nhiều ảnh hơn.
+        
+        Returns: Dict mapping relationship key -> số variations cần sinh
+        """
+        priorities = {}
+        
+        for rel in original_relationships:
+            rel_key = self._get_relationship_key(rel)
+            
+            if rel_key not in self.relationship_performance:
+                # Relationship mới chưa có data -> sinh số lượng cơ bản
+                priorities[rel_key] = base_variations
+            else:
+                perf = self.relationship_performance[rel_key]
+                avg_f1 = perf['avg_f1']
+                
+                # Tính priority score: F1 càng thấp -> cần sinh càng nhiều
+                # F1 = 0.0 -> sinh 3x base_variations
+                # F1 = 0.5 -> sinh 2x base_variations  
+                # F1 = 0.8+ -> sinh 0.5x base_variations (ít hơn)
+                
+                if avg_f1 < 0.3:
+                    # Rất yếu -> cần nhiều data
+                    variations = max(int(base_variations * 3), 5)
+                elif avg_f1 < 0.5:
+                    # Yếu -> cần nhiều data
+                    variations = max(int(base_variations * 2), 3)
+                elif avg_f1 < 0.7:
+                    # Trung bình -> sinh bình thường
+                    variations = base_variations
+                else:
+                    # Tốt -> sinh ít hơn để tiết kiệm
+                    variations = max(int(base_variations * 0.5), 1)
+                
+                # Nếu đang cải thiện nhưng vẫn thấp, vẫn cần nhiều data
+                if perf['last_improvement'] > 0.05 and avg_f1 < 0.6:
+                    variations = int(variations * 1.5)
+                
+                priorities[rel_key] = variations
+        
+        return priorities
+    
+    def decide_action(self, original_relationships: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Choose an action for the next training episode using epsilon-greedy DQN policy.
+        NEW: Bây giờ agent có thể quyết định sinh bao nhiêu ảnh cho TỪNG relationship cụ thể.
+        
         Returns a context dictionary that should be passed back after the episode completes.
         """
         state = self._build_state_vector()
         action_index, action_value = self._select_action(state)
         self.last_state = state
         self.last_action_index = action_index
+        
+        # NEW: Tính toán relationship-specific generation plan
+        relationship_plan = {}
+        if original_relationships:
+            relationship_plan = self._get_relationship_priorities(original_relationships, action_value)
+            print(f"[RL] Relationship-specific generation plan:")
+            for rel_key, variations in relationship_plan.items():
+                rel_info = self.relationship_performance.get(rel_key, {}).get('relationship', {})
+                avg_f1 = self.relationship_performance.get(rel_key, {}).get('avg_f1', 0.0)
+                print(f"  - {rel_info.get('subject', '?')} {rel_info.get('relation', '?')} {rel_info.get('object', '?')}: "
+                      f"{variations} variations (avg F1: {avg_f1:.3f})")
+        
         return {
             'state': state.clone().detach(),
             'action_index': action_index,
-            'num_variations': action_value,
+            'num_variations': action_value,  # Base variations (backward compatibility)
+            'relationship_plan': relationship_plan,  # NEW: Plan cho từng relationship
             'epsilon': self.epsilon,
         }
 
@@ -1342,6 +1440,10 @@ class RelationshipReinforcementLearning:
             total_fn += fn
             per_sample_f1.append(f1)
             evaluated += 1
+            
+            # NEW: Track per-relationship performance
+            if target_rel:
+                self._update_relationship_performance(target_rel, f1)
 
         if evaluated == 0:
             print("[RL] No samples were successfully evaluated")
@@ -1381,14 +1483,35 @@ class RelationshipReinforcementLearning:
         print(f"Starting training episode with {len(original_relationships)} relationships")
         action_variations = action_context.get('num_variations', 3) if action_context else 3
         
+        # NEW: Lấy relationship-specific generation plan nếu có
+        relationship_plan = action_context.get('relationship_plan', {}) if action_context else {}
+        
         # 1. Use provided synthetic data or generate new if none provided
         if synthetic_data is None:
-            print(f"Step 1: Generating synthetic data (variations per relation: {action_variations})...")
+            if relationship_plan:
+                print(f"Step 1: Generating synthetic data with relationship-specific plan...")
+            else:
+                print(f"Step 1: Generating synthetic data (variations per relation: {action_variations})...")
             synthetic_data = []
             for i, rel in enumerate(original_relationships):
-                print(f"  Processing relationship {i+1}/{len(original_relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
+                rel_key = self._get_relationship_key(rel)
+                
+                # NEW: Sử dụng số variations cụ thể cho relationship này nếu có plan
+                if relationship_plan and rel_key in relationship_plan:
+                    num_variations = relationship_plan[rel_key]
+                    perf_info = self.relationship_performance.get(rel_key, {})
+                    avg_f1 = perf_info.get('avg_f1', 0.0)
+                    print(f"  Processing relationship {i+1}/{len(original_relationships)}: "
+                          f"{rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')} "
+                          f"-> {num_variations} variations (F1: {avg_f1:.3f})")
+                else:
+                    num_variations = action_variations
+                    print(f"  Processing relationship {i+1}/{len(original_relationships)}: "
+                          f"{rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')} "
+                          f"-> {num_variations} variations (default)")
+                
                 try:
-                    generated_images = self.generator.generate_from_relationship(rel, num_variations=action_variations)
+                    generated_images = self.generator.generate_from_relationship(rel, num_variations=num_variations)
                     synthetic_data.extend(generated_images)
                     print(f"    SUCCESS: Generated {len(generated_images)} images")
                 except Exception as e:
@@ -1396,7 +1519,10 @@ class RelationshipReinforcementLearning:
                     continue
             print(f"Total synthetic data generated: {len(synthetic_data)} images")
         else:
-            print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images (variations per relation: {action_variations})")
+            if relationship_plan:
+                print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images (with relationship-specific plan)")
+            else:
+                print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images (variations per relation: {action_variations})")
 
         ingested_count = self._ingest_synthetic_samples(synthetic_data)
         if ingested_count == 0:

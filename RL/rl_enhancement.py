@@ -147,14 +147,26 @@ class AppReinforcementLearning:
             epoch_start_time = time.time()
             
             try:
-                action_context = self.rl_system.decide_action()
+                # NEW: Pass relationships to decide_action so it can create relationship-specific plan
+                action_context = self.rl_system.decide_action(original_relationships=relationships)
                 action_index = action_context.get('action_index')
                 num_variations = action_context.get('num_variations', 3)
-                print(f" Selected RL action {action_index} -> {num_variations} variations per relationship")
+                relationship_plan = action_context.get('relationship_plan', {})
+                
+                if relationship_plan:
+                    total_variations = sum(relationship_plan.values())
+                    print(f" Selected RL action {action_index} -> Relationship-specific plan: {len(relationship_plan)} relationships, {total_variations} total variations")
+                else:
+                    print(f" Selected RL action {action_index} -> {num_variations} variations per relationship (uniform)")
 
                 # Generate AI images for this epoch
                 print(f"🎨 Generating AI images for epoch {epoch + 1}...")
-                ai_images = self.generate_ai_images_for_epoch(relationships, epoch, num_variations=num_variations)
+                # NEW: Pass relationship_plan if available for targeted generation
+                ai_images = self.generate_ai_images_for_epoch(
+                    relationships, epoch, 
+                    num_variations=num_variations,
+                    relationship_plan=relationship_plan
+                )
                 # Lưu ảnh AI vào experiment
                 saved_ai_metadata = self.experiment_manager.save_ai_images(ai_images, epoch + 1) or []
                 for img_entry, meta in zip(ai_images, saved_ai_metadata):
@@ -384,19 +396,39 @@ class AppReinforcementLearning:
         print(f"SUCCESS: Generated {len(synthetic_dataset)} synthetic images")
         return synthetic_dataset
     
-    def generate_ai_images_for_epoch(self, relationships: List[Dict], epoch: int, num_variations: Optional[int] = None) -> List[Dict]:
-        """Generate AI images for a specific training epoch"""
+    def generate_ai_images_for_epoch(self, relationships: List[Dict], epoch: int, num_variations: Optional[int] = None, relationship_plan: Optional[Dict[str, int]] = None) -> List[Dict]:
+        """Generate AI images for a specific training epoch
+        
+        NEW: Supports relationship_plan to generate different numbers of images for different relationships
+        based on their performance.
+        """
         print(f"🎨 Generating AI images for epoch {epoch + 1}...")
         
         ai_images = []
         variations_per_relationship = num_variations if num_variations is not None else 3 + (epoch % 3)
-        print(f"  Using {variations_per_relationship} variations per relationship")
+        
+        if relationship_plan:
+            print(f"  Using relationship-specific generation plan")
+        else:
+            print(f"  Using {variations_per_relationship} variations per relationship (uniform)")
+        
         for i, rel in enumerate(relationships):
             try:
-                print(f"  Processing relationship {i+1}/{len(relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
+                # NEW: Get relationship-specific variations if plan is available
+                if relationship_plan:
+                    rel_key = self.rl_system._get_relationship_key(rel)
+                    if rel_key in relationship_plan:
+                        num_vars = relationship_plan[rel_key]
+                        print(f"  Processing relationship {i+1}/{len(relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')} -> {num_vars} variations")
+                    else:
+                        num_vars = variations_per_relationship
+                        print(f"  Processing relationship {i+1}/{len(relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')} -> {num_vars} variations (default)")
+                else:
+                    num_vars = variations_per_relationship
+                    print(f"  Processing relationship {i+1}/{len(relationships)}: {rel.get('subject', 'Unknown')} {rel.get('relation', 'Unknown')} {rel.get('object', 'Unknown')}")
                 
                 # Generate variations for this relationship
-                generated_images = self.generator.generate_from_relationship(rel, num_variations=variations_per_relationship)
+                generated_images = self.generator.generate_from_relationship(rel, num_variations=num_vars)
                 
                 # Add metadata to each generated image
                 for j, img_data in enumerate(generated_images):
