@@ -237,7 +237,7 @@ class RelTRInferenceEngine:
         self._materialize_model(model)
         if _LOAD_STATE_HAS_ASSIGN and "assign" in inspect.signature(model.load_state_dict).parameters:
             self._load_state_kwargs["assign"] = True
-        checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
         state = checkpoint.get("model") if isinstance(checkpoint, dict) else checkpoint
         if state:
             model.load_state_dict(state, **self._load_state_kwargs)

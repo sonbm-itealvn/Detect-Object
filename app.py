@@ -454,7 +454,7 @@ class ObjectDetectionApp:
         self.result_image_path = "result.jpg"
         self.result_json_path = "converted_bboxes.json"
         self.relationship_json_path = "relationships.json"
-        self.checkpoint_path = "reltr_finetuned.pth"
+        self.checkpoint_path = "checkpoint.pth"
 
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
         self.video_path = None
@@ -504,21 +504,6 @@ class ObjectDetectionApp:
             self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.img_tk, anchor="center")
         except Exception as e:
             print(f"Error resizing canvas image: {e}")
-
-        # Các đường dẫn mặc định
-        self.image_path = None
-        self.result_image_path = "result.jpg"
-        self.result_json_path = "converted_bboxes.json"
-        self.relationship_json_path = "relationships.json"
-        self.checkpoint_path = "reltr_finetuned.pth" 
-
-        # Load model
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
-        self.video_path = None
-        self.video_pipeline: Optional[VideoRelationPipeline] = None
-        self.video_thread: Optional[threading.Thread] = None
-        self.video_stop_event = threading.Event()
-        self.latest_video_outputs = {}
 
     def select_image(self):
         file_path = filedialog.askopenfilename(
@@ -1005,12 +990,35 @@ class ObjectDetectionApp:
             self.title_label.config(text="❌ Please select an image first!")
             return
 
+        if not self.result_json_path:
+            self.title_label.config(text="❌ Result JSON path is empty!")
+            return
+
+        if not self.checkpoint_path:
+            self.title_label.config(text="❌ Checkpoint path is empty!")
+            return
+
+        image_path = os.path.abspath(self.image_path)
+        result_json_path = os.path.abspath(self.result_json_path)
+        checkpoint_path = os.path.abspath(self.checkpoint_path)
+
+        if not os.path.exists(image_path):
+            self.title_label.config(text="❌ Selected image file not found!")
+            return
+
+        if not os.path.exists(checkpoint_path):
+            self.title_label.config(text=f"❌ Checkpoint not found: {checkpoint_path}")
+            return
+
         self.title_label.config(text="⏳ Processing... Please wait.")
 
         try:
             # 1️⃣ Chạy detect_objects.py
             self.title_label.config(text="🔍 Detecting objects...")
-            detect_thread = threading.Thread(target=subprocess.run, args=(["python", "detect_objects.py", self.image_path],))
+            detect_thread = threading.Thread(
+                target=subprocess.run,
+                args=(["python", "detect_objects.py", image_path],),
+            )
             detect_thread.start()
             detect_thread.join()  # Đợi detect_objects.py chạy xong
 
@@ -1022,12 +1030,22 @@ class ObjectDetectionApp:
 
             # 3️⃣ Chạy boundingbox_objects.py (sau khi convert_yolo_to_reltr.py hoàn tất)
             self.title_label.config(text="🔗 Analyzing relationships between objects...")
-            boundingbox_thread = threading.Thread(target=subprocess.run, args=(["python", "boundingbox_objects.py", "--yolo_json", self.result_json_path,"--img_path",self.image_path,"--device","cpu", "--resume", self.checkpoint_path],))
+            boundingbox_thread = threading.Thread(
+                target=subprocess.run,
+                args=([
+                    "python",
+                    "boundingbox_objects.py",
+                    "--yolo_json", result_json_path,
+                    "--img_path", image_path,
+                    "--device", "cpu",
+                    "--resume", checkpoint_path,
+                ],),
+            )
             boundingbox_thread.start()
             boundingbox_thread.join()  # Đợi boundingbox_objects.py chạy xong
 
-            image_dir = os.path.dirname(self.image_path)
-            image_id = os.path.splitext(os.path.basename(self.image_path))[0]
+            image_dir = os.path.dirname(image_path)
+            image_id = os.path.splitext(os.path.basename(image_path))[0]
 
             # ✅ Tìm ảnh output_anh2.jpg ở bất kỳ thư mục nào
             output_images = glob.glob(f"**/output_{image_id}.jpg", recursive=True)
