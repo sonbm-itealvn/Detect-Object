@@ -70,8 +70,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"🔹 Using device: {device}")
 clip_model, preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()  # Set to eval mode for faster inference
-if device == "cuda":
-    clip_model = clip_model.half()  # Use FP16 for 2x speedup on GPU
+# CLIP on CUDA loads in FP16 by default, but some internal ops require FP32
+# Force FP32 to avoid dtype mismatch errors
+clip_model = clip_model.float()
 
 # Danh sách từ vựng mở rộng (có thể tùy chỉnh)
 animals = [
@@ -197,8 +198,8 @@ def extract_roi_features(feature_map: torch.Tensor, boxes: List[Tuple[int, int, 
 text_inputs = clip.tokenize(label_texts).to(device)
 with torch.no_grad():
     _precomputed_text_features = clip_model.encode_text(text_inputs)
-    if device == "cuda":
-        _precomputed_text_features = _precomputed_text_features.half()
+    # Keep features in FP32 to match model dtype
+    _precomputed_text_features = _precomputed_text_features.float()
     _precomputed_text_features = _precomputed_text_features / _precomputed_text_features.norm(dim=-1, keepdim=True)
 
 def add_padding(image, bbox, padding=10):
@@ -264,8 +265,8 @@ def classify_with_clip(detected_objects, yolo_labels):
     # Process batch if we have valid images
     if image_batch:
         batch_tensor = torch.stack(image_batch).to(device)
-        if device == "cuda":
-            batch_tensor = batch_tensor.half()
+        # Keep in FP32 to match CLIP model dtype
+        batch_tensor = batch_tensor.float()
         
         with torch.no_grad():
             image_features = clip_model.encode_image(batch_tensor)
