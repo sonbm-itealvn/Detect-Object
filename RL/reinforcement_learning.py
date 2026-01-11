@@ -165,15 +165,40 @@ class RelationshipReinforcementLearning:
         return math.tanh(value / scale)
 
     def _build_state_vector(self, metrics: Optional[Dict[str, float]] = None) -> torch.Tensor:
+        """
+        Build state vector for DQN agent.
+        
+        IMPROVED: Now uses evaluation metrics (F1 scores) instead of training losses
+        for better representation of actual model performance.
+        
+        State components:
+        - detection_f1: Detection model evaluation F1 score (higher = better)
+        - relationship_f1: Relationship model evaluation F1 score (higher = better)
+        - reward_value: Latest reward signal
+        - dataset_size: Current dataset size (normalized)
+        - epsilon: Current exploration rate
+        """
         metrics = metrics or self.last_metrics
-        detection_loss = self._normalize_scalar(float(metrics.get('detection_loss', 1.0)), scale=5.0)
-        relationship_loss = self._normalize_scalar(float(metrics.get('relationship_loss', 1.0)), scale=5.0)
+        
+        # Use evaluation F1 scores instead of training losses for better signal
+        # F1 scores range [0, 1] so we use them directly
+        detection_f1 = float(metrics.get('detection_f1', 0.0))
+        relationship_f1 = float(metrics.get('relationship_f1', 0.0))
+        
+        # Fallback to inverted loss if F1 not available (for backward compatibility)
+        if detection_f1 == 0.0 and 'detection_loss' in metrics:
+            # Convert loss to pseudo-F1 (higher is better)
+            detection_f1 = max(0.0, 1.0 - self._normalize_scalar(float(metrics['detection_loss']), scale=5.0))
+        if relationship_f1 == 0.0 and 'relationship_loss' in metrics:
+            relationship_f1 = max(0.0, 1.0 - self._normalize_scalar(float(metrics['relationship_loss']), scale=5.0))
+        
         reward_value = self._normalize_scalar(float(metrics.get('reward', 0.0)), scale=1.0)
         dataset_size = metrics.get('dataset_size', len(self.dataset_samples))
         dataset_norm = self._normalize_scalar(float(dataset_size), scale=50.0)
         epsilon_value = self._normalize_scalar(float(self.epsilon), scale=1.0)
+        
         state = torch.tensor(
-            [detection_loss, relationship_loss, reward_value, dataset_norm, epsilon_value],
+            [detection_f1, relationship_f1, reward_value, dataset_norm, epsilon_value],
             dtype=torch.float32,
             device=self.rl_device,
         )
@@ -639,15 +664,61 @@ class RelationshipReinforcementLearning:
         h = (y2 - y1) / max(height, 1)
         return cx, cy, w, h
 
+    # Synonym mapping for fuzzy matching in relationship building
+    _LABEL_SYNONYMS = {
+        'person': ['man', 'woman', 'people', 'human', 'boy', 'girl', 'child', 'adult'],
+        'car': ['vehicle', 'automobile', 'auto'],
+        'bike': ['bicycle', 'cycle'],
+        'motorcycle': ['motorbike', 'scooter'],
+        'phone': ['smartphone', 'cellphone', 'mobile', 'cell phone'],
+        'laptop': ['computer', 'notebook'],
+        'dog': ['puppy', 'canine'],
+        'cat': ['kitten', 'feline'],
+        'chair': ['seat'],
+        'table': ['desk'],
+        'tv': ['television', 'monitor', 'screen'],
+    }
+    
+    def _get_label_synonyms(self, label: str) -> List[str]:
+        """Get all synonyms for a label including the label itself."""
+        normalized = self._normalize_label(label)
+        synonyms = [normalized]
+        
+        # Check if label is a key
+        if normalized in self._LABEL_SYNONYMS:
+            synonyms.extend(self._LABEL_SYNONYMS[normalized])
+        
+        # Check if label is a value (reverse lookup)
+        for key, values in self._LABEL_SYNONYMS.items():
+            if normalized in values:
+                synonyms.append(key)
+                synonyms.extend(values)
+        
+        return list(set(synonyms))
+
     def _find_object_index(self, objects: List[Dict[str, Any]], class_name: str) -> Optional[int]:
+        """Find object index with fuzzy matching support for synonyms."""
         normalized = self._normalize_label(class_name)
-        matches = [
-            (idx, obj) for idx, obj in enumerate(objects)
-            if self._normalize_label(obj.get('class', '')) == normalized
-        ]
-        if not matches:
-            return None
-        return matches[0][0]
+        
+        # First try exact match
+        for idx, obj in enumerate(objects):
+            if self._normalize_label(obj.get('class', '')) == normalized:
+                return idx
+        
+        # If no exact match, try synonym matching
+        synonyms = self._get_label_synonyms(class_name)
+        for idx, obj in enumerate(objects):
+            obj_label = self._normalize_label(obj.get('class', ''))
+            if obj_label in synonyms:
+                return idx
+        
+        # If still no match, try partial matching (label contains or is contained)
+        for idx, obj in enumerate(objects):
+            obj_label = self._normalize_label(obj.get('class', ''))
+            if normalized in obj_label or obj_label in normalized:
+                return idx
+        
+        return None
 
     def _build_relationship_from_original(
         self,
@@ -1205,13 +1276,28 @@ class RelationshipReinforcementLearning:
         detection_loss: float,
         relationship_loss: float,
         done: bool = False,
+        detection_metrics: Optional[Dict[str, float]] = None,
+        relationship_metrics: Optional[Dict[str, float]] = None,
     ) -> Optional[float]:
+        """
+        Finalize RL step by storing experience and updating Q-network.
+        
+        IMPROVED: Now accepts evaluation metrics (F1 scores) for better state representation.
+        """
+        # Build metrics dict with both losses and evaluation F1 scores
         metrics = {
             'detection_loss': detection_loss,
             'relationship_loss': relationship_loss,
             'reward': reward,
             'dataset_size': len(self.dataset_samples),
         }
+        
+        # Add evaluation F1 scores if available (preferred for state building)
+        if detection_metrics:
+            metrics['detection_f1'] = detection_metrics.get('f1', 0.0)
+        if relationship_metrics:
+            metrics['relationship_f1'] = relationship_metrics.get('f1', 0.0)
+        
         next_state = self._build_state_vector(metrics)
         self._remember(state, action_index, reward, next_state, done)
         optimization_loss = self._optimize_q_network()
@@ -1612,6 +1698,8 @@ class RelationshipReinforcementLearning:
             detection_loss,
             relationship_loss,
             done=done,
+            detection_metrics=detection_metrics_snapshot,  # Pass evaluation F1 for better state
+            relationship_metrics=relationship_metrics_snapshot,  # Pass evaluation F1 for better state
         )
         if rl_loss is not None:
             print(f"[RL] Q-network optimization loss: {rl_loss:.6f}")
@@ -1656,7 +1744,11 @@ class RelationshipReinforcementLearning:
         # 2. Tính toán các thành phần điểm với thuật toán cụ thể
         detection_score = self._calculate_detection_score(detection_metrics)
         relationship_score = self._calculate_relationship_score(relationship_metrics)
-        diversity_score = self._calculate_diversity_score(synthetic_data)
+        
+        # FIXED: Use dataset_samples which has objects field, not raw synthetic_data
+        # Raw synthetic_data only has image, prompt, original_relationship
+        # After ingestion, dataset_samples has objects, relationships, bbox info etc.
+        diversity_score = self._calculate_diversity_score(self.dataset_samples if self.dataset_samples else synthetic_data)
         consistency_score = self._calculate_consistency_score(per_sample_f1, relationship_metrics.get('f1_std'))
         improvement_score = self._calculate_improvement_score()
         
@@ -3015,3 +3107,128 @@ class RelationshipReinforcementLearning:
             print(f"  ✓ {feature}")
         
         print("\n" + "="*80)
+    
+    def validate_data_flow(self) -> Dict[str, Any]:
+        """
+        Validate entire RL data flow and identify potential issues.
+        Call this to debug training problems.
+        
+        Returns a diagnostic report with identified issues and recommendations.
+        """
+        print("\n" + "="*80)
+        print("🔍 RL DATA FLOW VALIDATION")
+        print("="*80)
+        
+        issues = []
+        warnings = []
+        info = []
+        
+        # 1. Check dataset samples
+        print("\n📊 1. DATASET SAMPLES CHECK:")
+        if not self.dataset_samples:
+            issues.append("No dataset samples available - model cannot be trained")
+            print("  ❌ No dataset samples")
+        else:
+            print(f"  ✅ {len(self.dataset_samples)} samples available")
+            
+            # Check sample quality
+            samples_with_objects = sum(1 for s in self.dataset_samples if s.get('objects'))
+            samples_with_relationships = sum(1 for s in self.dataset_samples if s.get('relationships'))
+            samples_with_images = sum(1 for s in self.dataset_samples if s.get('image_path') and os.path.exists(s.get('image_path', '')))
+            
+            print(f"  📦 Samples with objects: {samples_with_objects}/{len(self.dataset_samples)}")
+            print(f"  🔗 Samples with relationships: {samples_with_relationships}/{len(self.dataset_samples)}")
+            print(f"  🖼️  Samples with valid image paths: {samples_with_images}/{len(self.dataset_samples)}")
+            
+            if samples_with_relationships < len(self.dataset_samples) * 0.5:
+                warnings.append(f"Only {samples_with_relationships}/{len(self.dataset_samples)} samples have relationships - relationship training may be ineffective")
+            
+            if samples_with_objects < len(self.dataset_samples) * 0.5:
+                issues.append(f"Only {samples_with_objects}/{len(self.dataset_samples)} samples have objects - detection training will fail")
+        
+        # 2. Check models
+        print("\n🧠 2. MODEL STATUS:")
+        if self.detection_model is not None:
+            print("  ✅ Detection model loaded")
+        else:
+            info.append("Detection model not loaded yet (will be loaded on first use)")
+            print("  ⚠️ Detection model not loaded (lazy loading)")
+        
+        if self.relationship_model is not None:
+            print("  ✅ Relationship model loaded")
+        else:
+            info.append("Relationship model not loaded yet (will be loaded on first use)")
+            print("  ⚠️ Relationship model not loaded (lazy loading)")
+        
+        # 3. Check Q-network
+        print("\n🎮 3. Q-NETWORK STATUS:")
+        print(f"  📊 Memory buffer size: {len(self.memory)}/{self.memory.maxlen}")
+        print(f"  🎯 Epsilon (exploration): {self.epsilon:.4f}")
+        print(f"  📈 Learn step counter: {self.learn_step_counter}")
+        print(f"  🎲 Action space: {self.action_space}")
+        
+        if len(self.memory) < self.batch_size:
+            warnings.append(f"Memory buffer ({len(self.memory)}) < batch_size ({self.batch_size}) - Q-network cannot be trained yet")
+        
+        # 4. Check performance history
+        print("\n📈 4. PERFORMANCE HISTORY:")
+        print(f"  🎁 Rewards recorded: {len(self.performance_history['rewards'])}")
+        print(f"  🔍 Detection scores: {len(self.performance_history['detection_scores'])}")
+        print(f"  🔗 Relationship scores: {len(self.performance_history['relationship_scores'])}")
+        
+        if len(self.performance_history['rewards']) > 0:
+            recent_rewards = list(self.performance_history['rewards'])[-5:]
+            print(f"  📊 Recent rewards: {[f'{r:.3f}' for r in recent_rewards]}")
+        
+        # 5. Check relationship performance tracking
+        print("\n📋 5. RELATIONSHIP TRACKING:")
+        print(f"  🗂️  Tracked relationships: {len(self.relationship_performance)}")
+        if self.relationship_performance:
+            low_performers = [k for k, v in self.relationship_performance.items() if v.get('avg_f1', 0) < 0.3]
+            if low_performers:
+                print(f"  ⚠️ Low-performing relationships (F1<0.3): {len(low_performers)}")
+                for rel_key in low_performers[:3]:
+                    perf = self.relationship_performance[rel_key]
+                    print(f"     - {rel_key}: avg F1 = {perf.get('avg_f1', 0):.3f}")
+        
+        # 6. Check training history
+        print("\n📚 6. TRAINING HISTORY:")
+        print(f"  📖 Epochs completed: {len(self.training_history['epochs'])}")
+        print(f"  🏆 Best reward: {self.training_history['best_reward']:.4f}")
+        print(f"  ⭐ Best epoch: {self.training_history['best_epoch']}")
+        
+        # Summary
+        print("\n" + "="*80)
+        print("📋 VALIDATION SUMMARY")
+        print("="*80)
+        
+        if issues:
+            print("\n❌ ISSUES (must fix):")
+            for issue in issues:
+                print(f"  • {issue}")
+        
+        if warnings:
+            print("\n⚠️ WARNINGS (should address):")
+            for warning in warnings:
+                print(f"  • {warning}")
+        
+        if info:
+            print("\n💡 INFO:")
+            for i in info:
+                print(f"  • {i}")
+        
+        if not issues and not warnings:
+            print("\n✅ All checks passed! Data flow appears healthy.")
+        
+        print("\n" + "="*80)
+        
+        return {
+            'issues': issues,
+            'warnings': warnings,
+            'info': info,
+            'dataset_size': len(self.dataset_samples),
+            'memory_size': len(self.memory),
+            'epochs_completed': len(self.training_history['epochs']),
+            'best_reward': self.training_history['best_reward'],
+            'is_healthy': len(issues) == 0,
+        }
