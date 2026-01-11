@@ -32,13 +32,46 @@ class RelationshipImageGenerator:
                     use_safetensors=True
                 )
                 self.pipe = self.pipe.to(device)
-                print("SUCCESS: Stable Diffusion model loaded successfully!")
+                
+                # ========== SPEED OPTIMIZATIONS ==========
+                if device == "cuda":
+                    # Enable memory efficient attention (xFormers or native)
+                    try:
+                        self.pipe.enable_xformers_memory_efficient_attention()
+                        print("SUCCESS: xFormers enabled for 2x speedup")
+                    except Exception:
+                        try:
+                            from diffusers.models.attention_processor import AttnProcessor2_0
+                            self.pipe.unet.set_attn_processor(AttnProcessor2_0())
+                            print("SUCCESS: Flash Attention 2.0 enabled")
+                        except Exception:
+                            pass
+                    
+                    # Enable VAE slicing for lower memory
+                    self.pipe.enable_vae_slicing()
+                    
+                    # Enable channels last memory format
+                    self.pipe.unet.to(memory_format=torch.channels_last)
+                    
+                    # Compile UNet with torch.compile for extra speed (PyTorch 2.0+)
+                    try:
+                        if hasattr(torch, 'compile'):
+                            self.pipe.unet = torch.compile(self.pipe.unet, mode="reduce-overhead")
+                            print("SUCCESS: torch.compile enabled for optimized inference")
+                    except Exception:
+                        pass
+                
+                print("SUCCESS: Stable Diffusion model loaded with optimizations!")
             except Exception as e:
                 print(f"ERROR: Failed to load Stable Diffusion model: {e}")
                 print("Falling back to mock generator")
                 self.pipe = None
         
         self.relationship_templates = self.load_relationship_templates()
+        
+        # Default generation settings (can be adjusted for speed vs quality)
+        self.default_num_inference_steps = 15  # Reduced from 20 for faster generation
+        self.default_guidance_scale = 7.0
     
     def load_relationship_templates(self):
         """
@@ -133,27 +166,65 @@ class RelationshipImageGenerator:
                     'is_mock': True
                 })
         else:
-            print(f"Generating {len(variations)} images with Stable Diffusion...")
-            for i, prompt in enumerate(variations):
-                print(f"  Generating image {i+1}/{len(variations)}: {prompt[:50]}...")
+            print(f"Generating {len(variations)} images with Stable Diffusion (optimized)...")
+            
+            # OPTIMIZATION: Batch generation when possible
+            batch_size = min(len(variations), 2)  # Batch size based on GPU memory
+            
+            for batch_start in range(0, len(variations), batch_size):
+                batch_prompts = variations[batch_start:batch_start + batch_size]
+                batch_idx = batch_start // batch_size + 1
+                total_batches = (len(variations) + batch_size - 1) // batch_size
+                
+                print(f"  Batch {batch_idx}/{total_batches}: generating {len(batch_prompts)} images...")
+                
                 try:
-                    image = self.pipe(prompt, num_inference_steps=20).images[0]  # Giảm steps để nhanh hơn
-                    generated_images.append({
-                        'image': image,
-                        'prompt': prompt,
-                        'original_relationship': relationship,
-                        'is_mock': False
-                    })
+                    # Generate batch with optimized settings
+                    with torch.inference_mode():  # Faster than torch.no_grad()
+                        results = self.pipe(
+                            batch_prompts,
+                            num_inference_steps=self.default_num_inference_steps,
+                            guidance_scale=self.default_guidance_scale,
+                        )
+                    
+                    for img_idx, (image, prompt) in enumerate(zip(results.images, batch_prompts)):
+                        generated_images.append({
+                            'image': image,
+                            'prompt': prompt,
+                            'original_relationship': relationship,
+                            'is_mock': False
+                        })
+                        
                 except Exception as e:
-                    print(f"ERROR: Error generating image {i+1}: {e}")
-                    # Fallback to mock
-                    mock_image = self.create_mock_image()
-                    generated_images.append({
-                        'image': mock_image,
-                        'prompt': prompt,
-                        'original_relationship': relationship,
-                        'is_mock': True
-                    })
+                    print(f"ERROR: Batch generation failed: {e}, falling back to single generation")
+                    # Fallback to single image generation
+                    for prompt in batch_prompts:
+                        try:
+                            with torch.inference_mode():
+                                image = self.pipe(
+                                    prompt, 
+                                    num_inference_steps=self.default_num_inference_steps,
+                                    guidance_scale=self.default_guidance_scale,
+                                ).images[0]
+                            generated_images.append({
+                                'image': image,
+                                'prompt': prompt,
+                                'original_relationship': relationship,
+                                'is_mock': False
+                            })
+                        except Exception as e2:
+                            print(f"ERROR: Single generation also failed: {e2}")
+                            mock_image = self.create_mock_image()
+                            generated_images.append({
+                                'image': mock_image,
+                                'prompt': prompt,
+                                'original_relationship': relationship,
+                                'is_mock': True
+                            })
+                
+                # Clear CUDA cache between batches to prevent OOM
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         print(f"SUCCESS: Generated {len(generated_images)} images")
         return generated_images
