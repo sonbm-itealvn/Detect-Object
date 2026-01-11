@@ -2,7 +2,23 @@
 import torch
 import json
 import random
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+import numpy as np
+import cv2
+from PIL import Image
+
+# Optional dependencies
+try:
+    import imagehash
+    IMAGEHASH_AVAILABLE = True
+except ImportError:
+    IMAGEHASH_AVAILABLE = False
+
+try:
+    import clip
+    CLIP_AVAILABLE = True
+except ImportError:
+    CLIP_AVAILABLE = False
 
 # Try to import diffusers, fallback to mock if not available
 try:
@@ -12,17 +28,103 @@ except ImportError:
     print("WARNING: diffusers not available, using mock generator")
     DIFFUSERS_AVAILABLE = False
 
+
+class ImageQualityFilter:
+    """
+    Lightweight quality filter to reject low-quality AI-generated images.
+    Checks: size/aspect, blur, exposure, duplicate (pHash), CLIP similarity.
+    """
+
+    def __init__(self, device: str = "cpu"):
+        self.device = device
+        self.cfg = {
+            "min_width": 512,
+            "min_height": 512,
+            "max_aspect": 2.2,
+            "blur_var_threshold": 60.0,
+            "exposure_min_mean": 20.0,
+            "exposure_max_mean": 235.0,
+            "exposure_clip_ratio": 0.20,
+            "clip_min_similarity": 0.23,
+            "enable_clip": CLIP_AVAILABLE,
+            "enable_dupe": IMAGEHASH_AVAILABLE,
+        }
+        self.hash_store = set()
+        if CLIP_AVAILABLE:
+            self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=device)
+            self.clip_model.eval()
+
+    def _check_size_aspect(self, img: Image.Image) -> Tuple[bool, str]:
+        w, h = img.size
+        if w < self.cfg["min_width"] or h < self.cfg["min_height"]:
+            return False, "too_small"
+        ar = max(w, h) / max(1, min(w, h))
+        if ar > self.cfg["max_aspect"]:
+            return False, "bad_aspect"
+        return True, ""
+
+    def _check_blur(self, img: Image.Image) -> Tuple[bool, str]:
+        g = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        var = cv2.Laplacian(g, cv2.CV_64F).var()
+        return var >= self.cfg["blur_var_threshold"], f"blur_var={var:.1f}"
+
+    def _check_exposure(self, img: Image.Image) -> Tuple[bool, str]:
+        g = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        mean = g.mean()
+        clip_ratio = ((g == 0).sum() + (g == 255).sum()) / g.size
+        ok = (
+            self.cfg["exposure_min_mean"] <= mean <= self.cfg["exposure_max_mean"]
+            and clip_ratio <= self.cfg["exposure_clip_ratio"]
+        )
+        return ok, f"mean={mean:.1f},clip={clip_ratio:.3f}"
+
+    def _check_dupe(self, img: Image.Image) -> Tuple[bool, str]:
+        if not self.cfg["enable_dupe"]:
+            return True, ""
+        h = imagehash.phash(img)
+        if str(h) in self.hash_store:
+            return False, "duplicate"
+        self.hash_store.add(str(h))
+        return True, ""
+
+    def _check_clip_similarity(self, img: Image.Image, prompt: str) -> Tuple[bool, str]:
+        if not self.cfg["enable_clip"]:
+            return True, ""
+        with torch.no_grad():
+            text = clip.tokenize([prompt]).to(self.device)
+            image_input = self.clip_preprocess(img).unsqueeze(0).to(self.device)
+            image_feat = self.clip_model.encode_image(image_input)
+            text_feat = self.clip_model.encode_text(text)
+            image_feat = image_feat / image_feat.norm(dim=-1, keepdim=True)
+            text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+            sim = (image_feat @ text_feat.T).item()
+        return sim >= self.cfg["clip_min_similarity"], f"clip_sim={sim:.3f}"
+
+    def evaluate(self, img: Image.Image, prompt: str) -> Tuple[bool, str]:
+        checks = [
+            self._check_size_aspect,
+            self._check_blur,
+            self._check_exposure,
+            self._check_dupe,
+            lambda im: self._check_clip_similarity(im, prompt),
+        ]
+        for fn in checks:
+            ok, info = fn(img)
+            if not ok:
+                return False, info
+        return True, "ok"
+
+
 class RelationshipImageGenerator:
     def __init__(self, model_id="runwayml/stable-diffusion-v1-5"):
         print("Initializing AI Image Generator...")
-        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         if not DIFFUSERS_AVAILABLE:
             print("WARNING: diffusers not available, using mock generator")
             self.pipe = None
         else:
             try:
                 # Check if CUDA is available
-                device = "cuda" if torch.cuda.is_available() else "cpu"
                 print(f"Using device: {device}")
                 
                 print("Loading Stable Diffusion model... This may take a while...")
@@ -66,12 +168,14 @@ class RelationshipImageGenerator:
                 print(f"ERROR: Failed to load Stable Diffusion model: {e}")
                 print("Falling back to mock generator")
                 self.pipe = None
+                device = "cpu"
         
         self.relationship_templates = self.load_relationship_templates()
         
         # Default generation settings (can be adjusted for speed vs quality)
         self.default_num_inference_steps = 15  # Reduced from 20 for faster generation
         self.default_guidance_scale = 7.0
+        self.quality_filter = ImageQualityFilter(device=device if DIFFUSERS_AVAILABLE else "cpu")
     
     def load_relationship_templates(self):
         """
@@ -159,6 +263,10 @@ class RelationshipImageGenerator:
             # Mock generation - tạo fake data
             for i, prompt in enumerate(variations):
                 mock_image = self.create_mock_image()
+                passed, reason = self.quality_filter.evaluate(mock_image, prompt)
+                if not passed:
+                    print(f"  Skipped mock image {i+1}: {reason}")
+                    continue
                 generated_images.append({
                     'image': mock_image,
                     'prompt': prompt,
@@ -188,6 +296,10 @@ class RelationshipImageGenerator:
                         )
                     
                     for img_idx, (image, prompt) in enumerate(zip(results.images, batch_prompts)):
+                        passed, reason = self.quality_filter.evaluate(image, prompt)
+                        if not passed:
+                            print(f"  Skipped image (batch {batch_idx}, idx {img_idx}): {reason}")
+                            continue
                         generated_images.append({
                             'image': image,
                             'prompt': prompt,
@@ -206,6 +318,10 @@ class RelationshipImageGenerator:
                                     num_inference_steps=self.default_num_inference_steps,
                                     guidance_scale=self.default_guidance_scale,
                                 ).images[0]
+                            passed, reason = self.quality_filter.evaluate(image, prompt)
+                            if not passed:
+                                print(f"  Skipped image (fallback): {reason}")
+                                continue
                             generated_images.append({
                                 'image': image,
                                 'prompt': prompt,

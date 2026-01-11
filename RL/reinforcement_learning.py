@@ -22,6 +22,7 @@ from ultralytics import YOLO
 
 import detect_objects as detection_pipeline
 
+from RL.auto_annotator import get_annotator, AutoAnnotator
 from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
 from RL.model_manager import ModelManager
@@ -96,6 +97,8 @@ class RelationshipReinforcementLearning:
             'improvement_trend': deque(maxlen=20),  # Last 20 improvement scores
             'weight_history': deque(maxlen=20),  # Track weight changes
         }
+        # Long-tail handling: tail_weights được tính từ tần suất quan hệ hiếm
+        self.tail_weights: Dict[str, float] = {}
         
         # Adaptive scoring parameters
         self.scaling_factor = 1.0
@@ -148,6 +151,29 @@ class RelationshipReinforcementLearning:
     @staticmethod
     def _normalize_label(label: str) -> str:
         return label.strip().lower().replace("_", " ").replace("-", " ")
+
+    def _recompute_tail_weights(self) -> None:
+        """Tính trọng số cho các quan hệ hiếm (long-tail) dựa trên tần suất xuất hiện trong dataset_samples."""
+        if not self.dataset_samples:
+            self.tail_weights = {}
+            return
+
+        freq: Dict[str, int] = {}
+        for sample in self.dataset_samples:
+            for rel in sample.get('relationships', []) or []:
+                rel_name = self._normalize_label(rel.get('relation', ''))
+                if not rel_name:
+                    continue
+                freq[rel_name] = freq.get(rel_name, 0) + 1
+
+        if not freq:
+            self.tail_weights = {}
+            return
+
+        # 1/sqrt(freq) để ưu tiên lớp hiếm, sau đó normalize
+        raw_weights = {k: 1.0 / math.sqrt(v + 1e-3) for k, v in freq.items()}
+        total = sum(raw_weights.values()) or 1.0
+        self.tail_weights = {k: v / total for k, v in raw_weights.items()}
 
     def _build_q_network(self, input_dim: int, output_dim: int) -> nn.Module:
         return nn.Sequential(
@@ -970,13 +996,42 @@ class RelationshipReinforcementLearning:
                 continue
 
             print(f"[RL] Processing synthetic sample {index+1}/{len(synthetic_data)}")
-            sample = self._extract_objects_with_clip(image_path)
+            
+            original_relationship = data.get('original_relationship')
+            print(f"[RL] Sample {index+1} original relationship: {original_relationship}")
+            
+            # ========== BƯỚC 6.5: AUTO-ANNOTATION ==========
+            # Sử dụng GroundingDINO/OWL-ViT để detect bbox trong ảnh synthetic
+            # Giải quyết vấn đề: SD chỉ trả về pixels, không có bbox
+            sample = None
+            try:
+                annotator = get_annotator()
+                if original_relationship:
+                    annotation_result = annotator.annotate_from_relationship(
+                        image_path, original_relationship
+                    )
+                    if annotation_result and annotation_result.get('objects'):
+                        sample = {
+                            'image_path': annotation_result['image_path'],
+                            'width': annotation_result['width'],
+                            'height': annotation_result['height'],
+                            'objects': annotation_result['objects'],
+                            'global_context': [],  # Will be computed if needed
+                            'annotation_backend': annotation_result.get('annotation_backend', 'unknown'),
+                        }
+                        print(f"[RL] Sample {index+1}: AutoAnnotator ({annotation_result.get('annotation_backend')}) "
+                              f"detected {len(annotation_result['objects'])} objects")
+            except Exception as e:
+                print(f"[RL] Sample {index+1}: AutoAnnotator failed: {e}")
+            
+            # Fallback to YOLO+CLIP if AutoAnnotator fails
+            if not sample:
+                print(f"[RL] Sample {index+1}: Falling back to YOLO+CLIP extraction")
+                sample = self._extract_objects_with_clip(image_path)
+            
             if not sample:
                 print(f"[RL] Skipping sample {index+1}: failed to extract objects")
                 continue
-
-            original_relationship = data.get('original_relationship')
-            print(f"[RL] Sample {index+1} original relationship: {original_relationship}")
             
             # First try to build relationship from original
             relationships = self._build_relationship_from_original(sample['objects'], original_relationship)
@@ -1025,6 +1080,8 @@ class RelationshipReinforcementLearning:
 
         if ingested:
             self.detection_dataset_dir = None
+            # Cập nhật trọng số long-tail sau khi ingest dataset
+            self._recompute_tail_weights()
             self._save_dataset_snapshot()
             print(f"[RL] Successfully ingested {ingested} synthetic sample(s) into the training dataset.")
         else:
@@ -1072,6 +1129,8 @@ class RelationshipReinforcementLearning:
         if not dataset:
             print("[RL] Dataset build produced no usable samples.")
         self.dataset_samples = dataset
+        # Cập nhật trọng số long-tail sau khi build dataset
+        self._recompute_tail_weights()
         if self.model_manager.current_experiment_dir:
             self._save_dataset_snapshot()
         return len(self.dataset_samples)
@@ -1974,8 +2033,18 @@ class RelationshipReinforcementLearning:
         # Điều chỉnh dựa trên sự cân bằng precision-recall
         balance_factor = 1.0 - abs(precision - recall) / max(precision + recall, 1e-6)
         
+        # Điều chỉnh long-tail: ưu tiên quan hệ hiếm bằng trọng số tail_weights
+        tail_factor = 1.0
+        if self.tail_weights:
+            rel_name = self._normalize_label(
+                relationship_metrics.get('relation_name', '') or relationship_metrics.get('relation', '')
+            )
+            if rel_name:
+                tail_factor += self.tail_weights.get(rel_name, 0.0)
+
         # Tính điểm cuối cùng
-        final_score = base_score * stability_factor * sample_confidence * balance_factor
+        final_score = base_score * stability_factor * sample_confidence * balance_factor * tail_factor
+        final_score = min(final_score, 1.0)
         
         return max(0.0, min(final_score, 1.0))
     
