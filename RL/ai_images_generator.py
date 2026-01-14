@@ -173,11 +173,11 @@ class RelationshipImageGenerator:
         self.relationship_templates = self.load_relationship_templates()
         
         # Default generation settings (can be adjusted for speed vs quality)
-        self.default_num_inference_steps = 15  # Reduced from 20 for faster generation
+        self.default_num_inference_steps = 25  # Reduced from 20 for faster generation
         self.default_guidance_scale = 7.0
         self.quality_filter = ImageQualityFilter(device=device if DIFFUSERS_AVAILABLE else "cpu")
     
-    def load_relationship_templates(self):
+    def load_relationship_templates(self):  
         """
         Template mapping từ relation type sang câu mô tả tự nhiên.
         Mỗi template được thiết kế để tạo prompt rõ ràng cho Stable Diffusion.

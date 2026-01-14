@@ -220,6 +220,7 @@ class AppReinforcementLearning:
                     'timestamp': datetime.datetime.now().isoformat(),
                     'detection_loss': results['detection_loss'],
                     'relationship_loss': results['relationship_loss'],
+                    'long_tail_loss': results.get('long_tail_loss', 0.0),
                     'reward': results['reward'],
                     'epsilon': results['epsilon'],
                     'ai_images_count': len(ai_images),

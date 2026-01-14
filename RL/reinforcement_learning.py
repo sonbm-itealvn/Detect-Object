@@ -1335,6 +1335,7 @@ class RelationshipReinforcementLearning:
         detection_loss: float,
         relationship_loss: float,
         done: bool = False,
+        long_tail_loss: float = 0.0,
         detection_metrics: Optional[Dict[str, float]] = None,
         relationship_metrics: Optional[Dict[str, float]] = None,
     ) -> Optional[float]:
@@ -1347,6 +1348,7 @@ class RelationshipReinforcementLearning:
         metrics = {
             'detection_loss': detection_loss,
             'relationship_loss': relationship_loss,
+            'long_tail_loss': long_tail_loss,
             'reward': reward,
             'dataset_size': len(self.dataset_samples),
         }
@@ -1682,8 +1684,9 @@ class RelationshipReinforcementLearning:
         
         # 3. Train relationship model
         print("Step 3: 🧠 Training relationship model...")
-        relationship_loss = self.train_relationship_model(synthetic_data)
+        relationship_loss, long_tail_loss = self.train_relationship_model(synthetic_data)
         print(f"    ✅ Relationship loss: {relationship_loss:.4f}")
+        print(f"    ✅ Long-tail loss: {long_tail_loss:.4f}")
         
         # 4. Calculate reward
         print("Step 4: 📊 Calculating reward...")
@@ -1731,6 +1734,7 @@ class RelationshipReinforcementLearning:
             'epoch': len(self.training_history['epochs']) + 1,
             'detection_loss': detection_loss,
             'relationship_loss': relationship_loss,
+            'long_tail_loss': long_tail_loss,
             'reward': reward,
             'epsilon': self.epsilon,
             'timestamp': datetime.datetime.now().isoformat()
@@ -1746,6 +1750,7 @@ class RelationshipReinforcementLearning:
             reward=reward,
             detection_loss=detection_loss,
             relationship_loss=relationship_loss,
+            long_tail_loss=long_tail_loss,
         )
 
         rl_state = action_context.get('state') if action_context else None
@@ -1757,6 +1762,7 @@ class RelationshipReinforcementLearning:
             detection_loss,
             relationship_loss,
             done=done,
+            long_tail_loss=long_tail_loss,
             detection_metrics=detection_metrics_snapshot,  # Pass evaluation F1 for better state
             relationship_metrics=relationship_metrics_snapshot,  # Pass evaluation F1 for better state
         )
@@ -1766,6 +1772,7 @@ class RelationshipReinforcementLearning:
         return {
             'detection_loss': detection_loss,
             'relationship_loss': relationship_loss,
+            'long_tail_loss': long_tail_loss,
             'reward': reward,
             'epsilon': self.epsilon,
             'experience_batch': experience_batch,
@@ -1913,13 +1920,19 @@ class RelationshipReinforcementLearning:
         return loss_value
     
     def train_relationship_model(self, synthetic_data):
-        """Fine-tune the RelTR relationship model on available relationship annotations."""
+        """Fine-tune the RelTR relationship model on available relationship annotations.
+        
+        Returns:
+            tuple: (relationship_loss, long_tail_loss) where:
+                - relationship_loss: Average loss across all samples
+                - long_tail_loss: Weighted loss for rare relationships (long-tail)
+        """
         print("[RL] Starting relationship model training...")
         model, criterion = self._ensure_relationship_model()
         prepared_samples = self._prepare_reltr_training_samples()
         if not prepared_samples:
             print("[RL] RelTR training samples unavailable, skipping relationship training.")
-            return 0.0
+            return 0.0, 0.0
 
         print(f"[RL] Training RelTR model with {len(prepared_samples)} samples")
         if self.reltr_optimizer is None:
@@ -1933,6 +1946,8 @@ class RelationshipReinforcementLearning:
         model.train()
         optimizer.zero_grad()
         total_loss = 0.0
+        total_tail_loss = 0.0
+        tail_weighted_count = 0
 
         for i, (image_tensor, target, global_context) in enumerate(prepared_samples):
             print(f"[RL] Training on sample {i+1}/{len(prepared_samples)}")
@@ -1951,8 +1966,16 @@ class RelationshipReinforcementLearning:
                 loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
 
                 loss.backward()
-                total_loss += float(loss.item())
-                print(f"[RL] Sample {i+1} loss: {loss.item():.4f}")
+                sample_loss = float(loss.item())
+                total_loss += sample_loss
+                
+                # Calculate long-tail loss: weight by tail_weights if this sample contains rare relationships
+                tail_weight = self._get_sample_tail_weight(target)
+                if tail_weight > 0:
+                    total_tail_loss += sample_loss * tail_weight
+                    tail_weighted_count += 1
+                
+                print(f"[RL] Sample {i+1} loss: {sample_loss:.4f}")
             except Exception as exc:
                 print(f"[RL] Error training on sample {i+1}: {exc}")
                 continue
@@ -1960,9 +1983,46 @@ class RelationshipReinforcementLearning:
         optimizer.step()
 
         average_loss = total_loss / max(len(prepared_samples), 1)
+        # Long-tail loss: average of tail-weighted losses, or 0 if no tail relationships
+        long_tail_loss = total_tail_loss / max(tail_weighted_count, 1) if tail_weighted_count > 0 else 0.0
+        
         print(f"[RL] Relationship loss after fine-tuning: {average_loss:.4f}")
+        print(f"[RL] Long-tail loss: {long_tail_loss:.4f} (weighted for {tail_weighted_count} rare relationship samples)")
         model.eval()
-        return average_loss
+        return average_loss, long_tail_loss
+    
+    def _get_sample_tail_weight(self, target: Dict[str, Any]) -> float:
+        """Calculate tail weight for a training sample based on its relationships.
+        
+        Args:
+            target: RelTR target dictionary containing relationship annotations
+            
+        Returns:
+            float: Average tail weight of relationships in this sample, or 0 if no tail relationships
+        """
+        if not self.tail_weights:
+            return 0.0
+        
+        # Calculate average tail weight based on relationships in current dataset
+        # Since we can't directly map target to relationship names, we use the average
+        # tail weight of all relationships in the dataset as a proxy
+        if not self.dataset_samples:
+            return 0.0
+        
+        # Collect all relationship names from dataset and calculate average tail weight
+        tail_weights_in_dataset = []
+        for sample in self.dataset_samples:
+            for rel in sample.get('relationships', []):
+                rel_name = self._normalize_label(rel.get('relation', ''))
+                if rel_name in self.tail_weights:
+                    tail_weights_in_dataset.append(self.tail_weights[rel_name])
+        
+        if not tail_weights_in_dataset:
+            return 0.0
+        
+        # Return average tail weight - this gives us a measure of how "rare" 
+        # the relationships in the current training batch are
+        return sum(tail_weights_in_dataset) / len(tail_weights_in_dataset)
     
     def predict_relationships(self, image):
         """Predict relationships from an input image using the fine-tuned RelTR model."""
@@ -2724,6 +2784,7 @@ class RelationshipReinforcementLearning:
         reward: float,
         detection_loss: float,
         relationship_loss: float,
+        long_tail_loss: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """Create a batch of serialized experiences for replay buffer storage."""
         if not synthetic_data:
@@ -2741,6 +2802,7 @@ class RelationshipReinforcementLearning:
                 'metadata': {
                     'detection_loss': detection_loss,
                     'relationship_loss': relationship_loss,
+                    'long_tail_loss': long_tail_loss,
                     'timestamp': datetime.datetime.now().isoformat(),
                 }
             }]
@@ -2774,6 +2836,7 @@ class RelationshipReinforcementLearning:
                     'is_mock': data.get('is_mock', False),
                     'detection_loss': detection_loss,
                     'relationship_loss': relationship_loss,
+                    'long_tail_loss': long_tail_loss,
                     'generated_at': data.get('generation_timestamp'),
                 }
             })
