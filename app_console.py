@@ -302,17 +302,56 @@ class ObjectDetectionConsoleApp:
 
     def run_rl_training(self, epochs=5):
         """Run reinforcement learning training"""
-        print(f"🧠 Đang chạy RL Training với {epochs} epochs...")
+        print(f"\n🧠 RL TRAINING")
+        print("=" * 60)
+        print(f"Epochs: {epochs}")
+        print()
         
+        # Menu chọn dataset
+        print("📂 CHỌN DATASET ĐỂ TRAINING:")
+        print("1. Sử dụng dataset hiện tại (nếu đã có)")
+        print("2. Chọn thư mục chứa ảnh để build dataset")
+        print("3. Bỏ qua (sẽ dùng dataset từ relationships hiện tại)")
+        print()
+        
+        dataset_choice = input("Chọn phương thức (1-3, mặc định 3): ").strip() or "3"
+        
+        dataset_dir = None
+        if dataset_choice == "2":
+            dataset_dir = input("Nhập đường dẫn thư mục chứa ảnh: ").strip()
+            if not dataset_dir or not os.path.exists(dataset_dir):
+                print("❌ Thư mục không tồn tại! Sẽ bỏ qua dataset directory.")
+                dataset_dir = None
+            else:
+                print(f"✅ Đã chọn thư mục dataset: {dataset_dir}")
+                # Build dataset từ thư mục ảnh
+                try:
+                    print("📦 Đang build dataset từ thư mục ảnh...")
+                    if not self.rl_enhancement.rl_system:
+                        self.rl_enhancement.setup_reinforcement_learning()
+                    rl_agent = self.rl_enhancement.rl_system
+                    if rl_agent:
+                        count = rl_agent.build_dataset_from_directory(dataset_dir)
+                        print(f"✅ Đã build dataset với {count} samples!")
+                    else:
+                        print("⚠️  RL agent chưa được khởi tạo")
+                except Exception as e:
+                    print(f"⚠️  Lỗi build dataset: {e}")
+                    print("   Sẽ tiếp tục với dataset hiện tại...")
+        
+        print(f"\n🚀 Bắt đầu RL Training...")
         try:
-            dataset_dir = input("Nh��-p thA� m���c ch��'a ���nh (Enter �`��� dA?ng ���nh hiA�n tA?i): ").strip()
-            dataset_dir = dataset_dir if dataset_dir else None
             results = self.rl_enhancement.run_reinforcement_learning(epochs=epochs, image_directory=dataset_dir)
-            print(f"�o. RL Training hoA�n t���t! Reward: {results['reward']:.3f}")
-            buffer_stats = self.rl_enhancement.experience_manager.stats()
-            print(f"[RL] Replay buffer size: {buffer_stats['buffer_size']} / {buffer_stats['capacity']}")
+            print(f"\n✅ RL Training hoàn tất!")
+            print(f"🎯 Final Reward: {results.get('reward', 0):.4f}")
+            print(f"📈 Total AI Images: {results.get('total_ai_images', 0)}")
+            if hasattr(self.rl_enhancement, 'experience_manager'):
+                buffer_stats = self.rl_enhancement.experience_manager.stats()
+                print(f"💾 Replay buffer size: {buffer_stats['buffer_size']} / {buffer_stats['capacity']}")
         except Exception as e:
             print(f"❌ RL Training lỗi: {e}")
+            import traceback
+            traceback.print_exc()
     
     def generate_synthetic_data(self):
         """Generate synthetic dataset from relationships"""

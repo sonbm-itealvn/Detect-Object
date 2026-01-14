@@ -137,6 +137,10 @@ class RelationshipReinforcementLearning:
         # Per-relationship performance tracking (NEW: để agent có thể chọn relationships cần tập trung)
         self.relationship_performance: Dict[str, Dict[str, Any]] = {}  # Key: relationship_tuple, Value: performance metrics
         self.relationship_generation_history: Dict[str, List[float]] = {}  # Track F1 scores per relationship
+        
+        # Training configuration: number of epochs to train on full dataset each episode
+        # Increase this value (e.g., 3-5) to train multiple epochs on accumulated dataset
+        self.reltr_training_epochs = 1  # Default: 1 epoch per episode (can be increased for better learning)
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -1514,6 +1518,98 @@ class RelationshipReinforcementLearning:
         fn = sum(max(gt_counter[key] - pred_counter.get(key, 0), 0) for key in gt_counter)
         return tp, fp, fn
 
+    def _calculate_mr_at_k(
+        self,
+        all_ground_truths: List[List[Dict[str, Any]]],
+        all_predictions: List[List[Dict[str, Any]]],
+        k_values: List[int] = [10, 20, 50, 100]
+    ) -> Dict[str, float]:
+        """
+        Calculate mean Recall@K (mR@K) for relationship prediction.
+        
+        mR@K is the mean of Recall@K across all relationship types, which provides
+        a fairer evaluation for rare relationships (long-tail) compared to R@K.
+        
+        Algorithm:
+        1. For each relation type, calculate R@K = (# of correct predictions in top K) / (# of ground truths)
+        2. mR@K = mean of all relation type R@K values
+        
+        Args:
+            all_ground_truths: List of ground truth relationship lists for each sample
+            all_predictions: List of predicted relationships (sorted by confidence) for each sample
+            k_values: List of K values to compute (default: [10, 20, 50, 100])
+        
+        Returns:
+            Dictionary mapping 'mr@10', 'mr@20', etc. to their values
+        """
+        if not all_ground_truths or not all_predictions or len(all_ground_truths) != len(all_predictions):
+            return {f'mr@{k}': 0.0 for k in k_values}
+        
+        # Collect all unique relation types from ground truths
+        relation_types = set()
+        for gt_list in all_ground_truths:
+            for gt in gt_list:
+                if not gt:
+                    continue
+                rel_type = self._normalize_label(gt.get('relation', ''))
+                if rel_type:
+                    relation_types.add(rel_type)
+        
+        if not relation_types:
+            return {f'mr@{k}': 0.0 for k in k_values}
+        
+        mr_at_k_results = {}
+        
+        for k in k_values:
+            relation_recalls = []
+            
+            # Calculate R@K for each relation type
+            for rel_type in relation_types:
+                total_gt_count = 0
+                hits = 0
+                
+                # For each sample
+                for sample_idx, (gt_list, pred_list) in enumerate(zip(all_ground_truths, all_predictions)):
+                    if not pred_list:
+                        continue
+                    
+                    # Get GT relationships of this type in this sample
+                    gt_tuples_of_type = []
+                    for gt in gt_list:
+                        if not gt:
+                            continue
+                        if self._normalize_label(gt.get('relation', '')) == rel_type:
+                            gt_tuple = self._normalize_relationship_tuple(gt)
+                            gt_tuples_of_type.append(gt_tuple)
+                    
+                    if not gt_tuples_of_type:
+                        continue
+                    
+                    total_gt_count += len(gt_tuples_of_type)
+                    
+                    # Get top K predictions (sorted by confidence if available)
+                    top_k_preds = pred_list[:k]
+                    pred_tuples = [
+                        self._normalize_relationship_tuple(rel) 
+                        for rel in top_k_preds 
+                        if rel
+                    ]
+                    
+                    # Count how many GT tuples of this type are in top K
+                    for gt_tuple in gt_tuples_of_type:
+                        if gt_tuple in pred_tuples:
+                            hits += 1
+                
+                # Calculate recall for this relation type
+                recall = hits / total_gt_count if total_gt_count > 0 else 0.0
+                relation_recalls.append(recall)
+            
+            # Mean Recall@K = average of all relation type recalls
+            mr_at_k = sum(relation_recalls) / len(relation_recalls) if relation_recalls else 0.0
+            mr_at_k_results[f'mr@{k}'] = mr_at_k
+        
+        return mr_at_k_results
+
     def _evaluate_relationship_metrics(
         self,
         evaluation_data: List[Dict[str, Any]],
@@ -1532,6 +1628,10 @@ class RelationshipReinforcementLearning:
                 'fn': 0,
                 'num_samples': 0,
                 'per_sample_f1': [],
+                'mr@10': 0.0,
+                'mr@20': 0.0,
+                'mr@50': 0.0,
+                'mr@100': 0.0,
             }
 
         print(f"[RL] Evaluating relationship metrics on {len(evaluation_data)} samples")
@@ -1544,6 +1644,10 @@ class RelationshipReinforcementLearning:
         total_tp = total_fp = total_fn = 0
         per_sample_f1: List[float] = []
         evaluated = 0
+        
+        # For mR@K calculation
+        all_ground_truths: List[Dict[str, Any]] = []
+        all_predictions: List[List[Dict[str, Any]]] = []
 
         subset = evaluation_data[:max_samples]
         for i, data in enumerate(subset):
@@ -1551,8 +1655,10 @@ class RelationshipReinforcementLearning:
             # Đối với synthetic_data, lấy từ original_relationship field
             if 'relationships' in data and data['relationships']:
                 target_rel = data['relationships'][0]  # Lấy relationship đầu tiên
+                all_gt_rels = data['relationships']  # Tất cả relationships trong sample
             else:
                 target_rel = data.get('original_relationship')
+                all_gt_rels = [target_rel] if target_rel else []
             
             image_input = data.get('image') or data.get('image_path')
             if not target_rel or image_input is None:
@@ -1563,6 +1669,15 @@ class RelationshipReinforcementLearning:
                 # Ensure relationship model is loaded
                 self._ensure_relationship_model()
                 predicted_relationships = self.predict_relationships(image_input) or []
+                
+                # Sort predictions by confidence if available
+                if predicted_relationships:
+                    predicted_relationships = sorted(
+                        predicted_relationships,
+                        key=lambda x: x.get('confidence', 0.0),
+                        reverse=True
+                    )
+                
                 print(f"[RL] Sample {i+1}: predicted {len(predicted_relationships)} relationships")
                 
                 # Debug: In ra target relationship để kiểm tra
@@ -1572,6 +1687,10 @@ class RelationshipReinforcementLearning:
             except Exception as exc:
                 print(f"[RL] Relationship evaluation failed for sample {i+1}: {exc}")
                 predicted_relationships = []
+
+            # Store for mR@K calculation
+            all_ground_truths.append(all_gt_rels)
+            all_predictions.append(predicted_relationships)
 
             gt_tuples = [self._normalize_relationship_tuple(target_rel)]
             pred_tuples = [self._normalize_relationship_tuple(rel) for rel in predicted_relationships if rel]
@@ -1604,6 +1723,10 @@ class RelationshipReinforcementLearning:
                 'fn': 0,
                 'num_samples': 0,
                 'per_sample_f1': [],
+                'mr@10': 0.0,
+                'mr@20': 0.0,
+                'mr@50': 0.0,
+                'mr@100': 0.0,
             }
 
         precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
@@ -1613,7 +1736,13 @@ class RelationshipReinforcementLearning:
         variance = sum((score - mean_f1) ** 2 for score in per_sample_f1) / len(per_sample_f1) if per_sample_f1 else 0.0
         std_f1 = math.sqrt(variance)
 
+        # Calculate mR@K metrics
+        mr_at_k_results = self._calculate_mr_at_k(all_ground_truths, all_predictions)
+
         print(f"[RL] Relationship evaluation completed: P={precision:.3f}, R={recall:.3f}, F1={f1:.3f} (evaluated {evaluated} samples)")
+        print(f"[RL] mR@K metrics: mR@10={mr_at_k_results.get('mr@10', 0.0):.4f}, mR@20={mr_at_k_results.get('mr@20', 0.0):.4f}, "
+              f"mR@50={mr_at_k_results.get('mr@50', 0.0):.4f}, mR@100={mr_at_k_results.get('mr@100', 0.0):.4f}")
+        
         return {
             'precision': precision,
             'recall': recall,
@@ -1624,6 +1753,7 @@ class RelationshipReinforcementLearning:
             'fn': total_fn,
             'num_samples': evaluated,
             'per_sample_f1': per_sample_f1,
+            **mr_at_k_results,  # Add mR@K metrics
         }
 
     def train_episode(self, original_relationships, synthetic_data=None, action_context: Optional[Dict[str, Any]] = None, done: bool = False):
@@ -1684,7 +1814,9 @@ class RelationshipReinforcementLearning:
         
         # 3. Train relationship model
         print("Step 3: 🧠 Training relationship model...")
-        relationship_loss, long_tail_loss = self.train_relationship_model(synthetic_data)
+        # Use configurable number of epochs (default: 1, but can be increased for better learning)
+        num_training_epochs = getattr(self, 'reltr_training_epochs', 1)
+        relationship_loss, long_tail_loss = self.train_relationship_model(synthetic_data, num_epochs=num_training_epochs)
         print(f"    ✅ Relationship loss: {relationship_loss:.4f}")
         print(f"    ✅ Long-tail loss: {long_tail_loss:.4f}")
         
@@ -1919,22 +2051,26 @@ class RelationshipReinforcementLearning:
         detection_model.model.eval()
         return loss_value
     
-    def train_relationship_model(self, synthetic_data):
+    def train_relationship_model(self, synthetic_data, num_epochs: int = 1):
         """Fine-tune the RelTR relationship model on available relationship annotations.
+        
+        Args:
+            synthetic_data: Synthetic data generated (for compatibility, not used directly)
+            num_epochs: Number of training epochs to run on the full dataset (default: 1)
         
         Returns:
             tuple: (relationship_loss, long_tail_loss) where:
                 - relationship_loss: Average loss across all samples
                 - long_tail_loss: Weighted loss for rare relationships (long-tail)
         """
-        print("[RL] Starting relationship model training...")
+        print(f"[RL] Starting relationship model training (epochs: {num_epochs})...")
         model, criterion = self._ensure_relationship_model()
         prepared_samples = self._prepare_reltr_training_samples()
         if not prepared_samples:
             print("[RL] RelTR training samples unavailable, skipping relationship training.")
             return 0.0, 0.0
 
-        print(f"[RL] Training RelTR model with {len(prepared_samples)} samples")
+        print(f"[RL] Training RelTR model with {len(prepared_samples)} samples over {num_epochs} epoch(s)")
         if self.reltr_optimizer is None:
             self.reltr_optimizer = AdamW(
                 (param for param in model.parameters() if param.requires_grad),
@@ -1943,51 +2079,85 @@ class RelationshipReinforcementLearning:
             )
         optimizer = self.reltr_optimizer
 
-        model.train()
-        optimizer.zero_grad()
-        total_loss = 0.0
-        total_tail_loss = 0.0
-        tail_weighted_count = 0
+        # Track losses across all epochs
+        all_epoch_losses = []
+        all_epoch_tail_losses = []
+        all_tail_weighted_counts = []
 
-        for i, (image_tensor, target, global_context) in enumerate(prepared_samples):
-            print(f"[RL] Training on sample {i+1}/{len(prepared_samples)}")
-            try:
-                samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
-                targets = [self._move_target_to_device(target, self.reltr_device)]
+        # Train for multiple epochs
+        for epoch in range(num_epochs):
+            print(f"[RL] Epoch {epoch + 1}/{num_epochs}")
+            model.train()
+            optimizer.zero_grad()
+            total_loss = 0.0
+            total_tail_loss = 0.0
+            tail_weighted_count = 0
 
-                context_tensor = self._prepare_global_context_tensor(global_context)
-                if context_tensor is not None:
-                    outputs = model(samples, global_context=context_tensor)
+            # Shuffle samples for each epoch (except first epoch to maintain reproducibility)
+            import random
+            if epoch > 0:
+                shuffled_samples = list(prepared_samples)
+                random.shuffle(shuffled_samples)
+            else:
+                shuffled_samples = prepared_samples
+
+            for i, (image_tensor, target, global_context) in enumerate(shuffled_samples):
+                if num_epochs > 1 and len(prepared_samples) > 10:
+                    # Only print every 10th sample for large datasets
+                    if i % 10 == 0 or i == len(shuffled_samples) - 1:
+                        print(f"[RL] Epoch {epoch + 1}: Training on sample {i+1}/{len(shuffled_samples)}")
                 else:
-                    outputs = model(samples)
+                    print(f"[RL] Training on sample {i+1}/{len(shuffled_samples)}")
                 
-                loss_dict = criterion(outputs, targets)
-                weight_dict = criterion.weight_dict
-                loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
+                try:
+                    samples = nested_tensor_from_tensor_list([image_tensor.to(self.reltr_device)])
+                    targets = [self._move_target_to_device(target, self.reltr_device)]
 
-                loss.backward()
-                sample_loss = float(loss.item())
-                total_loss += sample_loss
-                
-                # Calculate long-tail loss: weight by tail_weights if this sample contains rare relationships
-                tail_weight = self._get_sample_tail_weight(target)
-                if tail_weight > 0:
-                    total_tail_loss += sample_loss * tail_weight
-                    tail_weighted_count += 1
-                
-                print(f"[RL] Sample {i+1} loss: {sample_loss:.4f}")
-            except Exception as exc:
-                print(f"[RL] Error training on sample {i+1}: {exc}")
-                continue
+                    context_tensor = self._prepare_global_context_tensor(global_context)
+                    if context_tensor is not None:
+                        outputs = model(samples, global_context=context_tensor)
+                    else:
+                        outputs = model(samples)
+                    
+                    loss_dict = criterion(outputs, targets)
+                    weight_dict = criterion.weight_dict
+                    loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) for k in loss_dict.keys() if k in weight_dict)
 
-        optimizer.step()
+                    loss.backward()
+                    sample_loss = float(loss.item())
+                    total_loss += sample_loss
+                    
+                    # Calculate long-tail loss: weight by tail_weights if this sample contains rare relationships
+                    tail_weight = self._get_sample_tail_weight(target)
+                    if tail_weight > 0:
+                        total_tail_loss += sample_loss * tail_weight
+                        tail_weighted_count += 1
+                    
+                    if num_epochs == 1 or i % 10 == 0 or i == len(shuffled_samples) - 1:
+                        print(f"[RL] Sample {i+1} loss: {sample_loss:.4f}")
+                except Exception as exc:
+                    print(f"[RL] Error training on sample {i+1}: {exc}")
+                    continue
 
-        average_loss = total_loss / max(len(prepared_samples), 1)
-        # Long-tail loss: average of tail-weighted losses, or 0 if no tail relationships
-        long_tail_loss = total_tail_loss / max(tail_weighted_count, 1) if tail_weighted_count > 0 else 0.0
+            # Update optimizer after processing all samples in this epoch
+            optimizer.step()
+
+            epoch_avg_loss = total_loss / max(len(shuffled_samples), 1)
+            epoch_tail_loss = total_tail_loss / max(tail_weighted_count, 1) if tail_weighted_count > 0 else 0.0
+            
+            all_epoch_losses.append(epoch_avg_loss)
+            all_epoch_tail_losses.append(epoch_tail_loss)
+            all_tail_weighted_counts.append(tail_weighted_count)
+            
+            print(f"[RL] Epoch {epoch + 1} completed - Loss: {epoch_avg_loss:.4f}, Long-tail loss: {epoch_tail_loss:.4f}")
+
+        # Return average loss across all epochs (or final epoch loss)
+        average_loss = sum(all_epoch_losses) / len(all_epoch_losses) if all_epoch_losses else 0.0
+        long_tail_loss = sum(all_epoch_tail_losses) / len(all_epoch_tail_losses) if all_epoch_tail_losses else 0.0
+        total_tail_weighted_count = sum(all_tail_weighted_counts)
         
-        print(f"[RL] Relationship loss after fine-tuning: {average_loss:.4f}")
-        print(f"[RL] Long-tail loss: {long_tail_loss:.4f} (weighted for {tail_weighted_count} rare relationship samples)")
+        print(f"[RL] Relationship loss after {num_epochs} epoch(s): {average_loss:.4f} (avg across epochs)")
+        print(f"[RL] Long-tail loss: {long_tail_loss:.4f} (weighted for {total_tail_weighted_count} rare relationship samples across all epochs)")
         model.eval()
         return average_loss, long_tail_loss
     

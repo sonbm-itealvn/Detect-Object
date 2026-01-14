@@ -1228,11 +1228,40 @@ class ObjectDetectionApp:
 
     def run_rl_training(self):
         """Run reinforcement learning training in separate thread"""
+        from tkinter import filedialog, messagebox
+        
+        # Dialog chọn dataset
+        choice = messagebox.askyesnocancel(
+            "Chọn Dataset",
+            "Bạn có muốn chọn thư mục chứa ảnh để build dataset?\n\n"
+            "Yes: Chọn thư mục ảnh\n"
+            "No: Sử dụng dataset hiện tại\n"
+            "Cancel: Hủy"
+        )
+        
+        dataset_dir = None
+        if choice is True:  # User chọn Yes
+            dataset_dir = filedialog.askdirectory(title="Chọn thư mục chứa ảnh dataset")
+            if not dataset_dir:
+                messagebox.showinfo("Thông báo", "Không chọn thư mục. Sẽ dùng dataset hiện tại.")
+                dataset_dir = None
+        elif choice is None:  # User chọn Cancel
+            return
+        
         self.title_label.config(text="🧠 Running RL Training...")
         
         def rl_training_thread():
             try:
-                results = self.rl_enhancement.run_reinforcement_learning()
+                # Build dataset nếu có chọn thư mục
+                if dataset_dir:
+                    if not self.rl_enhancement.rl_system:
+                        self.rl_enhancement.setup_reinforcement_learning()
+                    rl_agent = self.rl_enhancement.rl_system
+                    if rl_agent:
+                        count = rl_agent.build_dataset_from_directory(dataset_dir)
+                        print(f"[RL] Built dataset with {count} samples from {dataset_dir}")
+                
+                results = self.rl_enhancement.run_reinforcement_learning(image_directory=dataset_dir)
                 self.title_label.config(text=f"✅ RL Training completed! Reward: {results['reward']:.3f}")
             except Exception as e:
                 self.title_label.config(text=f"❌ RL Training error: {e}")
