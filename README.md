@@ -18,6 +18,7 @@
 - [Cấu trúc dự án](#-cấu-trúc-dự-án)
 - [Cấu hình](#-cấu-hình)
 - [Kết quả](#-kết-quả)
+- [Cập nhật và cải tiến](#-cập-nhật-và-cải-tiến)
 
 ---
 
@@ -194,7 +195,8 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 │  │  [4.2] Evaluation                                                            │           │
 │  │  • Detection metrics: Precision, Recall, F1                                  │           │
 │  │  • Relationship metrics: Precision, Recall, F1                               │           │
-│  │  • Tail class F1: F1 riêng cho các quan hệ hiếm                              │           │
+│  │  • mR@K metrics: mR@10, mR@20, mR@50, mR@100 (công bằng cho long-tail)      │           │
+│  │  • Long-tail loss: Loss riêng cho các quan hệ hiếm                           │           │
 │  │  • Diversity score: Đa dạng relation/object types                            │           │
 │  │  • Consistency score: Độ ổn định predictions                                 │           │
 │  └──────────────────────────────────────────────────────────────────────────────┘           │
@@ -251,8 +253,8 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 5. **Quality Filter**: Lọc ảnh chất lượng thấp (blur, exposure, duplicate, CLIP similarity)
 6. **Auto-Annotation**: GroundingDINO/OWL-ViT tự động tạo bounding boxes cho synthetic images
 7. **Dataset Ingestion**: Thêm synthetic samples vào training dataset
-8. **Model Training**: Fine-tune RelTR với dataset mới
-9. **Evaluation**: Tính metrics (Detection F1, Relationship F1, Tail F1, Diversity, Consistency)
+8. **Model Training**: Fine-tune RelTR với dataset mới (hỗ trợ multiple epochs)
+9. **Evaluation**: Tính metrics (Detection F1, Relationship F1, mR@K, Long-tail Loss, Diversity, Consistency)
 10. **Reward Calculation**: Tính reward với long-tail boost cho quan hệ hiếm
 11. **DQN Update**: Cập nhật Q-network từ experience replay
 12. **Loop**: Lặp lại từ bước 2 cho đến khi đạt convergence hoặc max epochs
@@ -275,6 +277,8 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 - **Action space**: Số biến thể prompt sinh ảnh [1-10]
 - **Reward function**: Detection + Relationship + Diversity + Consistency + Improvement
 - **Long-tail boost**: Trọng số `1/sqrt(freq)` cho quan hệ hiếm
+- **Multiple epochs training**: Hỗ trợ training nhiều epochs trên toàn bộ dataset tích lũy
+- **Dataset input**: Cho phép chọn/nhập dataset từ thư mục ảnh khi training
 
 ### 4. Synthetic Data Generation
 - Stable Diffusion sinh ảnh từ relationship triplets
@@ -389,6 +393,8 @@ Menu:
 2. Chạy pipeline phát hiện vật thể và mối quan hệ
 3. Tải lại dữ liệu JSON
 4. **Chạy RL Training** ← Học tăng cường
+   - Chọn dataset: Sử dụng dataset hiện tại / Chọn thư mục ảnh / Bỏ qua
+   - Nhập số epochs để training
 5. Tạo dữ liệu synthetic
 6. Đánh giá kết quả training
 7. Quản lý Experiments
@@ -514,11 +520,13 @@ relationship_score *= (1 + tail_weight)   # Boost rare relations
 ## 📊 Kết quả
 
 ### Metrics theo dõi
-- **Detection F1**: Precision, Recall, F1 cho object detection
-- **Relationship F1**: Precision, Recall, F1 cho relationship prediction
-- **Tail Class F1**: F1 riêng cho các quan hệ hiếm
+- **Detection Metrics**: Precision, Recall, F1 cho object detection
+- **Relationship Metrics**: Precision, Recall, F1 cho relationship prediction
+- **mR@K Metrics**: Mean Recall@K (mR@10, mR@20, mR@50, mR@100) - đánh giá công bằng cho long-tail
+- **Long-tail Loss**: Loss riêng cho các quan hệ hiếm (weighted by tail_weights)
 - **Reward**: Tổng reward từ DQN
 - **Diversity Score**: Đa dạng synthetic data
+- **Consistency Score**: Độ ổn định predictions
 
 ### Visualizations
 - Reward vs Epoch plot
@@ -564,6 +572,170 @@ Input(5) → Linear(64) → ReLU → Linear(64) → ReLU → Linear(10)
 2. **OWL-ViT** - Lightweight, HuggingFace
 3. **YOLO+CLIP** - Fallback, limited vocabulary
 4. **Pseudo-bbox** - Heuristic, low quality
+
+### RelTR Training Configuration
+| Parameter | Giá trị | Mô tả |
+|-----------|---------|-------|
+| Training Epochs | 1 (default) | Số epochs train trên toàn bộ dataset mỗi episode |
+| Learning Rate | 1e-5 | AdamW optimizer cho RelTR |
+| Weight Decay | 1e-4 | L2 regularization |
+| Batch Processing | Sequential | Train từng sample, accumulate gradients |
+
+**Lưu ý**: Có thể tăng `reltr_training_epochs` (2-5) để model học tốt hơn trên dataset lớn.
+
+---
+
+## 🆕 Cập nhật và cải tiến
+
+### Version mới nhất - Các tính năng đã thêm
+
+#### 1. **Long-tail Loss Metric** ✅
+- **Mô tả**: Metric mới để theo dõi hiệu suất trên các quan hệ hiếm (long-tail)
+- **Cách tính**: Relationship loss được trọng số hóa bởi `tail_weights` cho các quan hệ hiếm
+- **Lợi ích**: Đánh giá chính xác hơn về hiệu suất model trên long-tail distribution
+- **Vị trí**: Được lưu trong `relationship_metrics` JSON với key `long_tail_loss`
+
+```json
+{
+  "relationship_loss": 31.20,
+  "long_tail_loss": 42.80,  // ← Metric mới
+  "relationship_metrics": {
+    "precision": 0.28,
+    "recall": 0.47,
+    "f1": 0.35
+  }
+}
+```
+
+#### 2. **Multiple Epochs Training** ✅
+- **Mô tả**: Hỗ trợ training nhiều epochs trên toàn bộ dataset tích lũy
+- **Cấu hình**: `self.reltr_training_epochs` (mặc định: 1, có thể tăng lên 3-5)
+- **Tính năng**:
+  - Shuffle samples giữa các epochs (trừ epoch đầu)
+  - Tối ưu logging cho dataset lớn
+  - Tính average loss across epochs
+- **Cách sử dụng**:
+  ```python
+  # Trong code
+  rl_agent.reltr_training_epochs = 3  # Train 3 epochs mỗi episode
+  ```
+
+#### 3. **Dataset Input cho RL Training** ✅
+- **Mô tả**: Cho phép chọn/nhập dataset từ thư mục ảnh khi chạy RL training
+- **Console App (`app_console.py`)**:
+  ```
+  📂 CHỌN DATASET ĐỂ TRAINING:
+  1. Sử dụng dataset hiện tại (nếu đã có)
+  2. Chọn thư mục chứa ảnh để build dataset
+  3. Bỏ qua (sẽ dùng dataset từ relationships hiện tại)
+  ```
+- **GUI App (`app.py`)**:
+  - Dialog chọn thư mục ảnh
+  - Tự động build dataset từ thư mục được chọn
+- **Lợi ích**: Linh hoạt hơn trong việc quản lý và sử dụng dataset
+
+#### 4. **mR@K Metrics (Mean Recall@K)** ✅
+- **Mô tả**: Metric đánh giá công bằng cho long-tail relationships
+- **Cách tính**:
+  1. Tính R@K cho từng loại quan hệ riêng lẻ
+  2. Lấy trung bình của tất cả các R@K đó
+- **Giá trị K**: mR@10, mR@20, mR@50, mR@100
+- **Lợi ích**:
+  - Đánh giá công bằng hơn so với R@K thông thường
+  - Không bị ảnh hưởng bởi các quan hệ phổ biến (head classes)
+  - Tiêu chuẩn trong Scene Graph Generation research
+- **Vị trí**: Được lưu trong `relationship_metrics` JSON
+
+```json
+{
+  "relationship_metrics": {
+    "precision": 0.28,
+    "recall": 0.47,
+    "f1": 0.35,
+    "mr@10": 0.1234,   // ← Metrics mới
+    "mr@20": 0.2345,
+    "mr@50": 0.3456,
+    "mr@100": 0.4567
+  }
+}
+```
+
+### So sánh mR@K vs R@K
+
+| Metric | Cách tính | Ưu điểm | Nhược điểm |
+|--------|-----------|---------|------------|
+| **R@K** | Recall tổng thể trên tất cả predictions | Đơn giản, dễ hiểu | Bị ảnh hưởng bởi head classes |
+| **mR@K** | Mean của R@K cho từng relation type | Công bằng cho long-tail | Phức tạp hơn |
+
+**Ví dụ**:
+- Quan hệ "on": 100 samples, R@10 = 0.8
+- Quan hệ "riding": 5 samples, R@10 = 0.2
+- **R@10** = (80 + 1) / 105 = 0.77 (bị ảnh hưởng bởi "on")
+- **mR@10** = (0.8 + 0.2) / 2 = 0.5 (công bằng hơn)
+
+### Cấu trúc Metrics JSON mới
+
+```json
+{
+  "experiment_id": "exp_001",
+  "epoch": 1,
+  "detection_loss": 21.09,
+  "relationship_loss": 31.20,
+  "long_tail_loss": 42.80,  // ← Mới
+  "reward": 0.43,
+  "detection_metrics": {
+    "precision": 0.28,
+    "recall": 0.47,
+    "f1": 0.35
+  },
+  "relationship_metrics": {
+    "precision": 0.28,
+    "recall": 0.47,
+    "f1": 0.35,
+    "mr@10": 0.1234,   // ← Mới
+    "mr@20": 0.2345,   // ← Mới
+    "mr@50": 0.3456,   // ← Mới
+    "mr@100": 0.4567   // ← Mới
+  }
+}
+```
+
+### Hướng dẫn sử dụng các tính năng mới
+
+#### Sử dụng Multiple Epochs Training
+```python
+# Trong RL/reinforcement_learning.py hoặc sau khi khởi tạo
+rl_agent = RelationshipReinforcementLearning(...)
+rl_agent.reltr_training_epochs = 3  # Train 3 epochs mỗi episode
+```
+
+#### Chọn Dataset khi Training
+```bash
+# Console App
+python app_console.py
+# Chọn 4. Chạy RL Training
+# Chọn 2 để chọn thư mục ảnh
+# Nhập: D:/path/to/images
+
+# GUI App
+python app.py
+# Click "RL Training"
+# Chọn Yes → Browse thư mục ảnh
+```
+
+#### Xem mR@K Metrics
+```python
+# Metrics được tự động lưu trong JSON
+# experiments/exp_XXX/metrics/training_metrics_epoch_XX.json
+
+import json
+with open('experiments/exp_001/metrics/training_metrics_epoch_01.json') as f:
+    data = json.load(f)
+    print(f"mR@10: {data['relationship_metrics']['mr@10']:.4f}")
+    print(f"mR@20: {data['relationship_metrics']['mr@20']:.4f}")
+    print(f"mR@50: {data['relationship_metrics']['mr@50']:.4f}")
+    print(f"mR@100: {data['relationship_metrics']['mr@100']:.4f}")
+```
 
 ---
 
