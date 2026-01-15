@@ -149,19 +149,50 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 │        ▼                                                                                    │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐           │
 │  │  [3.4] Auto-Annotation (Priority Order)                                      │           │
-│  │  1. GroundingDINO (SOTA, chính xác nhất)                                     │           │
-│  │     • Open-vocabulary detection                                              │           │
-│  │     • Input: Image + relationship triplet                                    │           │
-│  │     • Output: Bounding boxes + classes                                       │           │
 │  │                                                                              │           │
-│  │  2. OWL-ViT (Lightweight, HuggingFace)                                       │           │
+│  │  Vấn đề: Stable Diffusion chỉ trả về pixels, không có bounding boxes        │           │
+│  │  Giải pháp: Open-vocabulary detection để tự động tạo annotations            │           │
+│  │                                                                              │           │
+│  │  Flow:                                                                       │           │
+│  │  1. Input: Synthetic image + relationship triplet (subject, relation, object)│           │
+│  │  2. Extract text prompts: ["dog", "surfboard"] từ subject/object            │           │
+│  │  3. Chạy detector với text prompts                                           │           │
+│  │  4. Output: Objects với bbox [x1, y1, x2, y2] + class + confidence         │           │
+│  │                                                                              │           │
+│  │  Backend Priority (tự động chọn theo thứ tự):                                 │           │
+│  │                                                                              │           │
+│  │  1. GroundingDINO (SOTA, chính xác nhất)                                    │           │
+│  │     • Model: SwinT-OGC (Swin Transformer)                                    │           │
+│  │     • Input format: Image + text prompt "dog . surfboard"                    │           │
+│  │     • Thresholds: box_threshold=0.25, text_threshold=0.20                    │           │
+│  │     • Output: Normalized coords [cx, cy, w, h] → convert to [x1, y1, x2, y2] │           │
+│  │     • Auto-detect paths:                                                    │           │
+│  │       - Config: GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py│           │
+│  │       - Weights: weights/groundingdino_swint_ogc.pth                        │           │
+│  │                                                                              │           │
+│  │  2. OWL-ViT (Lightweight, HuggingFace)                                      │           │
+│  │     • Model: google/owlvit-base-patch32 (tự động download từ HuggingFace)    │           │
+│  │     • Input format: Image + text prompts ["a photo of a dog", "a photo of..."]│           │
+│  │     • Threshold: box_threshold=0.25                                           │           │
+│  │     • Output: Direct [x1, y1, x2, y2] coordinates                          │           │
 │  │     • Fallback nếu GroundingDINO không có                                    │           │
 │  │                                                                              │           │
-│  │  3. YOLO + CLIP (Fallback)                                                   │           │
-│  │     • Limited vocabulary                                                     │           │
+│  │  3. YOLO + CLIP (Fallback)                                                  │           │
+│  │     • Pipeline: YOLO detect → CLIP classify với open vocabulary            │           │
+│  │     • Input: Image path                                                     │           │
+│  │     • Matching: Fuzzy match labels với text prompts                         │           │
+│  │     • Confidence: 0.7 nếu matched, 0.5 nếu không                           │           │
+│  │     • Limited vocabulary (chỉ detect classes YOLO biết)                    │           │
 │  │                                                                              │           │
-│  │  4. Pseudo-bbox (Heuristic, low quality)                                     │           │
-│  │     • Tạo bbox từ relationship nếu không detect được                         │           │
+│  │  4. Pseudo-bbox (Heuristic, low quality - LAST RESORT)                      │           │
+│  │     • Chỉ dùng khi tất cả detectors đều fail                                │           │
+│  │     • Heuristics dựa trên relation type:                                     │           │
+│  │       - "on"/"above"/"riding": Subject trên, Object dưới                   │           │
+│  │       - "under"/"below": Subject dưới, Object trên                          │           │
+│  │       - "holding"/"carrying": Subject lớn, Object nhỏ gần subject           │           │
+│  │       - Default: Subject trái, Object phải                                  │           │
+│  │     • Confidence: 0.3 (rất thấp)                                            │           │
+│  │     • WARNING: Chất lượng thấp, chỉ dùng khi không còn lựa chọn            │           │
 │  └──────────────────────────────────────────────────────────────────────────────┘           │
 │        │                                                                                    │
 │        ▼                                                                                    │
@@ -567,11 +598,319 @@ state = [
 Input(5) → Linear(64) → ReLU → Linear(64) → ReLU → Linear(10)
 ```
 
-### Auto-Annotation Priority
-1. **GroundingDINO** - SOTA open-vocabulary detector
-2. **OWL-ViT** - Lightweight, HuggingFace
-3. **YOLO+CLIP** - Fallback, limited vocabulary
-4. **Pseudo-bbox** - Heuristic, low quality
+### Auto-Annotation Priority và Chi tiết Implementation
+
+**File chính**: `RL/auto_annotator.py`
+
+**Vấn đề**: Stable Diffusion chỉ trả về pixels, không có bounding boxes. Cần tự động tạo annotations cho synthetic images.
+
+**Giải pháp**: Sử dụng Open-Vocabulary Detectors với priority order, tự động fallback nếu backend trước fail.
+
+#### 1. GroundingDINO (Ưu tiên cao nhất - SOTA)
+**Function**: `_annotate_groundingdino()` trong `RL/auto_annotator.py`
+
+**Cách hoạt động**:
+```python
+# 1. Load image và convert sang tensor
+image_source, image_tensor = load_image(image_path)
+
+# 2. Tạo text prompt từ relationship triplet
+# Input: relationship = {"subject": "dog", "relation": "riding", "object": "surfboard"}
+# Output: text_prompt = "dog . surfboard"  # Format: "subject . object"
+
+# 3. Predict với GroundingDINO
+boxes, logits, phrases = predict(
+    model=groundingdino_model,
+    image=image_tensor,
+    caption=text_prompt,
+    box_threshold=0.25,   # Minimum confidence for boxes
+    text_threshold=0.20,  # Minimum confidence for text matching
+    device="cuda"
+)
+
+# 4. Convert normalized coords [cx, cy, w, h] → absolute [x1, y1, x2, y2]
+cx, cy, bw, bh = box.tolist()
+x1 = int((cx - bw / 2) * width)
+y1 = int((cy - bh / 2) * height)
+x2 = int((cx + bw / 2) * width)
+y2 = int((cy + bh / 2) * height)
+
+# 5. Clamp to image bounds
+x1 = max(0, min(x1, width - 1))
+y1 = max(0, min(y1, height - 1))
+x2 = max(x1 + 1, min(x2, width))
+y2 = max(y1 + 1, min(y2, height))
+```
+
+**Ưu điểm**:
+- ✅ Open-vocabulary: Detect bất kỳ object nào từ text prompt
+- ✅ Chính xác cao (State-of-the-Art)
+- ✅ Hỗ trợ nhiều objects trong một prompt
+- ✅ Model: SwinT-OGC (Swin Transformer backbone)
+
+**Yêu cầu cài đặt**:
+```bash
+git clone https://github.com/IDEA-Research/GroundingDINO.git
+cd GroundingDINO
+pip install -e .
+# Download weights
+wget -P weights https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
+```
+
+**Auto-detect paths** (tự động tìm trong code):
+- Config: `GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py`
+- Weights: `weights/groundingdino_swint_ogc.pth` hoặc `~/.cache/groundingdino/`
+
+#### 2. OWL-ViT (Fallback 1 - Lightweight)
+**Function**: `_annotate_owlvit()` trong `RL/auto_annotator.py`
+
+**Cách hoạt động**:
+```python
+# 1. Load model từ HuggingFace (tự động download lần đầu)
+processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
+model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
+model.to(device).eval()
+
+# 2. Prepare inputs với text prompts
+# Format: "a photo of a {object}" cho mỗi prompt
+texts = [["a photo of a dog", "a photo of a surfboard"]]
+inputs = processor(text=texts, images=image, return_tensors="pt")
+inputs = {k: v.to(device) for k, v in inputs.items()}
+
+# 3. Predict
+with torch.no_grad():
+    outputs = model(**inputs)
+
+# 4. Post-process (có sẵn trong processor)
+target_sizes = torch.tensor([[height, width]], device=device)
+results = processor.post_process_object_detection(
+    outputs, threshold=0.25, target_sizes=target_sizes
+)[0]
+
+# 5. Extract boxes (đã là [x1, y1, x2, y2] format)
+for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
+    x1, y1, x2, y2 = box.tolist()
+    class_name = text_prompts[label.item()]  # Map label index to prompt
+```
+
+**Ưu điểm**:
+- ✅ Dễ cài: Chỉ cần `pip install transformers`
+- ✅ Tự động download model (~1.5GB) từ HuggingFace
+- ✅ Lightweight hơn GroundingDINO
+- ✅ Không cần config files
+
+**Nhược điểm**:
+- ⚠️ Độ chính xác thấp hơn GroundingDINO
+- ⚠️ Cần format text: "a photo of a {object}"
+
+#### 3. YOLO + CLIP (Fallback 2 - Limited Vocabulary)
+**Function**: `_annotate_yolo_clip()` trong `RL/auto_annotator.py`
+
+**Cách hoạt động**:
+```python
+# 1. YOLO detect objects (sử dụng pipeline có sẵn)
+detected_objects, yolo_labels, original_image, feature_map, global_context = \
+    detection_pipeline.detect_objects(image_path)
+
+# 2. CLIP classify với open vocabulary
+classified_results = detection_pipeline.classify_with_clip(
+    detected_objects, yolo_labels
+)
+# Output: [(label, bbox), ...] ví dụ: [("dog", [x1, y1, x2, y2]), ...]
+
+# 3. Fuzzy match với text prompts
+for label, bbox in classified_results:
+    label_lower = label.strip().lower()
+    matched = any(
+        prompt.lower() in label_lower or label_lower in prompt.lower()
+        for prompt in text_prompts  # ["dog", "surfboard"]
+    )
+    confidence = 0.7 if matched else 0.5
+```
+
+**Ưu điểm**:
+- ✅ Sử dụng pipeline có sẵn (`detect_objects.py`)
+- ✅ Không cần cài thêm dependencies
+- ✅ CLIP hỗ trợ open vocabulary (một phần)
+
+**Nhược điểm**:
+- ⚠️ Limited vocabulary (chỉ detect classes YOLO biết)
+- ⚠️ Fuzzy matching có thể không chính xác
+- ⚠️ Confidence thấp hơn (0.5-0.7)
+
+#### 4. Pseudo-bbox (Last Resort - Heuristic, Low Quality)
+**Function**: `_create_pseudo_annotations()` trong `RL/auto_annotator.py`
+
+**Cách hoạt động**:
+```python
+# Heuristics dựa trên relation type
+subject = relationship.get('subject', 'unknown')
+relation = relationship.get('relation', 'unknown')
+obj = relationship.get('object', 'unknown')
+
+if relation in ['on', 'above', 'over', 'riding']:
+    # Subject trên, Object dưới
+    subject_bbox = [width*0.3, height*0.1, width*0.7, height*0.45]
+    object_bbox = [width*0.2, height*0.5, width*0.8, height*0.9]
+    
+elif relation in ['under', 'below']:
+    # Subject dưới, Object trên
+    subject_bbox = [width*0.2, height*0.5, width*0.8, height*0.9]
+    object_bbox = [width*0.3, height*0.1, width*0.7, height*0.45]
+    
+elif relation in ['holding', 'carrying', 'using']:
+    # Subject lớn, Object nhỏ gần subject
+    subject_bbox = [width*0.2, height*0.1, width*0.7, height*0.9]
+    object_bbox = [width*0.5, height*0.3, width*0.8, height*0.6]
+    
+else:
+    # Default: Subject trái, Object phải
+    subject_bbox = [width*0.05, height*0.2, width*0.45, height*0.8]
+    object_bbox = [width*0.55, height*0.2, width*0.95, height*0.8]
+
+# Confidence cố định = 0.3 (rất thấp)
+objects = [
+    {'class': subject, 'bbox': subject_bbox, 'confidence': 0.3, 'source': 'pseudo'},
+    {'class': obj, 'bbox': object_bbox, 'confidence': 0.3, 'source': 'pseudo'}
+]
+```
+
+**Lưu ý**:
+- ⚠️ **WARNING**: Chất lượng rất thấp (confidence = 0.3)
+- ⚠️ Chỉ dùng khi tất cả detectors đều fail
+- ⚠️ Bbox được tạo từ heuristics, không phải từ ảnh thực tế
+- ⚠️ Có thể không chính xác với layout phức tạp
+
+### Code Flow trong `_ingest_synthetic_samples()`
+
+**File**: `RL/reinforcement_learning.py` - dòng 1007-1034
+
+```python
+# Trong hàm _ingest_synthetic_samples()
+for synthetic_data in synthetic_samples:
+    original_relationship = data.get('original_relationship')
+    # {"subject": "dog", "relation": "riding", "object": "surfboard"}
+    
+    # 1. Gọi AutoAnnotator (singleton pattern)
+    annotator = get_annotator()  # Tự động chọn backend tốt nhất
+    
+    # 2. Annotate từ relationship
+    annotation_result = annotator.annotate_from_relationship(
+        image_path, original_relationship
+    )
+    
+    # 3. annotation_result structure:
+    # {
+    #   'image_path': 'experiments/exp_001/ai_images/image_001.jpg',
+    #   'width': 512, 'height': 512,
+    #   'objects': [
+    #     {
+    #       'class': 'dog',
+    #       'bbox': [100, 150, 300, 400],  # [x1, y1, x2, y2]
+    #       'confidence': 0.85,
+    #       'source': 'groundingdino'  # hoặc 'owlvit', 'yolo_clip', 'pseudo'
+    #     },
+    #     {
+    #       'class': 'surfboard',
+    #       'bbox': [200, 300, 450, 500],
+    #       'confidence': 0.78,
+    #       'source': 'groundingdino'
+    #     }
+    #   ],
+    #   'annotation_backend': 'groundingdino',
+    #   'num_detected': 2
+    # }
+    
+    # 4. Sử dụng objects để build RelTR training targets
+    sample = {
+        'image_path': annotation_result['image_path'],
+        'objects': annotation_result['objects'],
+        'relationships': [...],  # Được infer từ RelTR sau
+        'annotation_backend': annotation_result['annotation_backend']
+    }
+```
+
+### Backend Selection Logic
+
+**File**: `RL/auto_annotator.py` - `_initialize_backend()`
+
+```python
+def _initialize_backend(self, config, checkpoint):
+    # 1. Try GroundingDINO first
+    if GROUNDINGDINO_AVAILABLE:
+        try:
+            # Auto-detect paths
+            if config is None:
+                candidates = [
+                    "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",
+                    "groundingdino/config/GroundingDINO_SwinT_OGC.py",
+                    "~/.cache/groundingdino/GroundingDINO_SwinT_OGC.py"
+                ]
+                # Tìm file đầu tiên tồn tại
+            
+            model = load_model(config, checkpoint, device)
+            return "groundingdino"  # ✅ Success
+        except Exception as e:
+            print(f"GroundingDINO failed: {e}")
+    
+    # 2. Try OWL-ViT
+    if OWLVIT_AVAILABLE:
+        try:
+            processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
+            model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
+            return "owlvit"  # ✅ Success
+        except Exception as e:
+            print(f"OWL-ViT failed: {e}")
+    
+    # 3. Fallback to YOLO+CLIP
+    if YOLO_CLIP_AVAILABLE:
+        return "yolo_clip"  # ✅ Always available (uses existing pipeline)
+    
+    # 4. No backend available
+    return "none"  # ❌ Will use pseudo-bbox only
+```
+
+### Cấu hình Thresholds
+
+| Backend | Box Threshold | Text Threshold | Mô tả |
+|---------|---------------|----------------|-------|
+| **GroundingDINO** | 0.25 | 0.20 | Minimum confidence cho box detection và text matching |
+| **OWL-ViT** | 0.25 | N/A | Minimum confidence cho object detection |
+| **YOLO+CLIP** | N/A | N/A | Sử dụng confidence từ YOLO/CLIP (0.5-0.7) |
+| **Pseudo** | N/A | N/A | Fixed confidence = 0.3 (rất thấp) |
+
+**Có thể điều chỉnh**:
+```python
+annotator = AutoAnnotator(
+    box_threshold=0.3,   # Tăng để strict hơn
+    text_threshold=0.25  # Tăng để match text chính xác hơn
+)
+```
+
+### Tối ưu hóa và Best Practices
+
+1. **Singleton Pattern**: 
+   - `get_annotator()` trả về instance duy nhất
+   - Model chỉ load 1 lần, tái sử dụng cho tất cả images
+   - Tiết kiệm memory và thời gian
+
+2. **Lazy Loading**: 
+   - Model chỉ được load khi cần thiết (lần đầu gọi `annotate()`)
+   - Không load tất cả backends cùng lúc
+
+3. **Auto-detect Paths**: 
+   - Tự động tìm config và weights files
+   - Hỗ trợ nhiều vị trí phổ biến
+
+4. **Error Handling**: 
+   - Graceful fallback nếu một backend fail
+   - Log lỗi nhưng không crash toàn bộ pipeline
+
+5. **Performance Tips**:
+   - GroundingDINO: Chính xác nhất nhưng chậm nhất
+   - OWL-ViT: Cân bằng tốt giữa speed và accuracy
+   - YOLO+CLIP: Nhanh nhất nhưng ít chính xác
+   - Pseudo: Instant nhưng chất lượng thấp
 
 ### RelTR Training Configuration
 | Parameter | Giá trị | Mô tả |
