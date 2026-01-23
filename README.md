@@ -51,9 +51,14 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 │  ┌──────────────────────────────────────────────────────────────────────────────┐           │
 │  │  YOLO v11 Detection                                                          │           │
 │  │  • Phát hiện bounding boxes                                                  │           │
-│  │  • YOLO v11 classification                                                   │           │
 │  │  • ROI features extraction                                                   │           │
 │  │  • Global context vector                                                     │           │
+│  └──────────────────────────────────────────────────────────────────────────────┘  
+│        │                                                                                    │
+│        ▼                                                                                    │
+│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
+│  │  ReClip (Region Clip)                                                        │           │
+│  │   • Gán nhãn cho các Boundingbox (classficication)                           │           │
 │  └──────────────────────────────────────────────────────────────────────────────┘           │
 │        │                                                                                    │
 │        ▼                                                                                    │
@@ -150,49 +155,49 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 │  ┌──────────────────────────────────────────────────────────────────────────────┐           │
 │  │  [3.4] Auto-Annotation (Priority Order)                                      │           │
 │  │                                                                              │           │
-│  │  Vấn đề: Stable Diffusion chỉ trả về pixels, không có bounding boxes        │           │
-│  │  Giải pháp: Open-vocabulary detection để tự động tạo annotations            │           │
+│  │  Vấn đề: Stable Diffusion chỉ trả về pixels, không có bounding boxes         │           │
+│  │  Giải pháp: Open-vocabulary detection để tự động tạo annotations             │           │
 │  │                                                                              │           │
 │  │  Flow:                                                                       │           │
 │  │  1. Input: Synthetic image + relationship triplet (subject, relation, object)│           │
-│  │  2. Extract text prompts: ["dog", "surfboard"] từ subject/object            │           │
+│  │  2. Extract text prompts: ["dog", "surfboard"] từ subject/object             │           │
 │  │  3. Chạy detector với text prompts                                           │           │
-│  │  4. Output: Objects với bbox [x1, y1, x2, y2] + class + confidence         │           │
+│  │  4. Output: Objects với bbox [x1, y1, x2, y2] + class + confidence           │           │
 │  │                                                                              │           │
-│  │  Backend Priority (tự động chọn theo thứ tự):                                 │           │
+│  │  Backend Priority (tự động chọn theo thứ tự):                                │           │
 │  │                                                                              │           │
-│  │  1. GroundingDINO (SOTA, chính xác nhất)                                    │           │
+│  │  1. GroundingDINO (SOTA, chính xác nhất)                                     │           │
 │  │     • Model: SwinT-OGC (Swin Transformer)                                    │           │
 │  │     • Input format: Image + text prompt "dog . surfboard"                    │           │
 │  │     • Thresholds: box_threshold=0.25, text_threshold=0.20                    │           │
 │  │     • Output: Normalized coords [cx, cy, w, h] → convert to [x1, y1, x2, y2] │           │
-│  │     • Auto-detect paths:                                                    │           │
+│  │     • Auto-detect paths:                                                     │           │
 │  │       - Config: GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py│           │
-│  │       - Weights: weights/groundingdino_swint_ogc.pth                        │           │
+│  │       - Weights: weights/groundingdino_swint_ogc.pth                         │           │
 │  │                                                                              │           │
-│  │  2. OWL-ViT (Lightweight, HuggingFace)                                      │           │
+│  │  2. OWL-ViT (Lightweight, HuggingFace)                                       │           │
 │  │     • Model: google/owlvit-base-patch32 (tự động download từ HuggingFace)    │           │
-│  │     • Input format: Image + text prompts ["a photo of a dog", "a photo of..."]│           │
-│  │     • Threshold: box_threshold=0.25                                           │           │
-│  │     • Output: Direct [x1, y1, x2, y2] coordinates                          │           │
+│  │     • Input format: Image + text prompts ["a photo of a dog", "a photo of..."]│          │
+│  │     • Threshold: box_threshold=0.25                                           │          │
+│  │     • Output: Direct [x1, y1, x2, y2] coordinates                            │           │
 │  │     • Fallback nếu GroundingDINO không có                                    │           │
 │  │                                                                              │           │
-│  │  3. YOLO + CLIP (Fallback)                                                  │           │
-│  │     • Pipeline: YOLO detect → CLIP classify với open vocabulary            │           │
-│  │     • Input: Image path                                                     │           │
-│  │     • Matching: Fuzzy match labels với text prompts                         │           │
-│  │     • Confidence: 0.7 nếu matched, 0.5 nếu không                           │           │
-│  │     • Limited vocabulary (chỉ detect classes YOLO biết)                    │           │
+│  │  3. YOLO + CLIP (Fallback)                                                   │           │
+│  │     • Pipeline: YOLO detect → CLIP classify với open vocabulary              │           │
+│  │     • Input: Image path                                                      │           │
+│  │     • Matching: Fuzzy match labels với text prompts                          │           │
+│  │     • Confidence: 0.7 nếu matched, 0.5 nếu không                             │           │
+│  │     • Limited vocabulary (chỉ detect classes YOLO biết)                      │           │
 │  │                                                                              │           │
-│  │  4. Pseudo-bbox (Heuristic, low quality - LAST RESORT)                      │           │
-│  │     • Chỉ dùng khi tất cả detectors đều fail                                │           │
+│  │  4. Pseudo-bbox (Heuristic, low quality - LAST RESORT)                       │           │
+│  │     • Chỉ dùng khi tất cả detectors đều fail                                 │           │
 │  │     • Heuristics dựa trên relation type:                                     │           │
-│  │       - "on"/"above"/"riding": Subject trên, Object dưới                   │           │
-│  │       - "under"/"below": Subject dưới, Object trên                          │           │
-│  │       - "holding"/"carrying": Subject lớn, Object nhỏ gần subject           │           │
-│  │       - Default: Subject trái, Object phải                                  │           │
-│  │     • Confidence: 0.3 (rất thấp)                                            │           │
-│  │     • WARNING: Chất lượng thấp, chỉ dùng khi không còn lựa chọn            │           │
+│  │       - "on"/"above"/"riding": Subject trên, Object dưới                     │           │
+│  │       - "under"/"below": Subject dưới, Object trên                           │           │
+│  │       - "holding"/"carrying": Subject lớn, Object nhỏ gần subject            │           │
+│  │       - Default: Subject trái, Object phải                                   │           │
+│  │     • Confidence: 0.3 (rất thấp)                                             │           │
+│  │     • WARNING: Chất lượng thấp, chỉ dùng khi không còn lựa chọn              ;o│           │
 │  └──────────────────────────────────────────────────────────────────────────────┘           │
 │        │                                                                                    │
 │        ▼                                                                                    │
@@ -211,9 +216,9 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 ├─────────────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                             │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [4.1] RelTR Fine-tuning                                                     │           │
+│  │  [4.1] VRD Fine-tuning                                                       │           │
 │  │  • Input: Dataset samples (original + synthetic)                             │           │
-│  │  • Prepare RelTR targets: entities + relationships                           │           │
+│  │  • Prepare VRD targets: entities + relationships                             │           │
 │  │  • Training loop:                                                            │           │
 │  │    - Forward pass với image tensor                                           │           │
 │  │    - Compute loss: bbox_loss + giou_loss + rel_loss                          │           │
@@ -226,7 +231,7 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 │  │  [4.2] Evaluation                                                            │           │
 │  │  • Detection metrics: Precision, Recall, F1                                  │           │
 │  │  • Relationship metrics: Precision, Recall, F1                               │           │
-│  │  • mR@K metrics: mR@10, mR@20, mR@50, mR@100 (công bằng cho long-tail)      │           │
+│  │  • mR@K metrics: mR@10, mR@20, mR@50, mR@100 (công bằng cho long-tail)       │           │
 │  │  • Long-tail loss: Loss riêng cho các quan hệ hiếm                           │           │
 │  │  • Diversity score: Đa dạng relation/object types                            │           │
 │  │  • Consistency score: Độ ổn định predictions                                 │           │
@@ -277,7 +282,7 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 
 ### Tóm tắt luồng hoạt động
 
-1. **VRD Pipeline**: Input image → YOLO detection → RelTR relationship prediction → Scene Graph
+1. **VRD Pipeline**: Input image → YOLO detection → Region Clip classficication  → RelTR relationship prediction → Scene Graph
 2. **RL State**: Xây dựng state vector 5D từ metrics hiện tại
 3. **DQN Decision**: Agent quyết định số lượng variations cần sinh cho mỗi relationship
 4. **GenAI Generation**: Stable Diffusion sinh ảnh từ relationship triplets với prompt variations
@@ -825,10 +830,307 @@ for synthetic_data in synthetic_samples:
     sample = {
         'image_path': annotation_result['image_path'],
         'objects': annotation_result['objects'],
-        'relationships': [...],  # Được infer từ RelTR sau
+        'relationships': [...],  # Được tạo ở bước tiếp theo
         'annotation_backend': annotation_result['annotation_backend']
     }
 ```
+
+### Relationship Generation (Tạo Relationships từ Objects)
+
+**Vấn đề**: Sau khi auto-annotation tạo được objects với bbox, cần tạo relationships (subject-relation-object triplets) để train RelTR.
+
+**Giải pháp**: Hệ thống sử dụng **3 phương pháp theo thứ tự ưu tiên**, tự động fallback nếu phương pháp trước fail.
+
+**File**: `RL/reinforcement_learning.py` - `_ingest_synthetic_samples()` (dòng 1040-1071)
+
+#### Flow tổng quan:
+
+```
+Synthetic Image + Objects (từ Auto-Annotation)
+         │
+         ▼
+┌────────────────────────────────────────┐
+│ Method 1: Build from Original          │
+│ Match objects với original_relationship│
+└────────────────────────────────────────┘
+         │
+         ├─ Success? → Use relationships
+         │
+         └─ Fail? ▼
+┌────────────────────────────────────────┐
+│ Method 2: RelTR Inference              │
+│ Dùng RelTR model để predict            │
+└────────────────────────────────────────┘
+         │
+         ├─ Success? → Use relationships
+         │
+         └─ Fail? ▼
+┌────────────────────────────────────────┐
+│ Method 3: Fallback                    │
+│ Tạo trực tiếp từ original_relationship │
+└────────────────────────────────────────┘
+```
+
+#### Method 1: Build from Original (Ưu tiên cao nhất)
+
+**Function**: `_build_relationship_from_original()` - dòng 753-774
+
+**Cách hoạt động**:
+```python
+def _build_relationship_from_original(objects, original_relationship):
+    # Input:
+    # - objects: [{'class': 'dog', 'bbox': [...]}, {'class': 'surfboard', 'bbox': [...]}]
+    # - original_relationship: {'subject': 'dog', 'relation': 'riding', 'object': 'surfboard'}
+    
+    # 1. Tìm index của subject và object trong objects list
+    subject_idx = _find_object_index(objects, original_relationship.get('subject', ''))
+    object_idx = _find_object_index(objects, original_relationship.get('object', ''))
+    
+    # 2. Nếu tìm thấy cả 2, tạo relationship
+    if subject_idx is not None and object_idx is not None:
+        return [{
+            'subject': objects[subject_idx].get('class'),  # 'dog'
+            'relation': original_relationship.get('relation'),  # 'riding'
+            'object': objects[object_idx].get('class'),  # 'surfboard'
+            'confidence': 1.0,  # High confidence vì match với original
+            'source': 'original'
+        }]
+    return []  # Fail nếu không match được
+```
+
+**Object Matching Logic** (`_find_object_index()` - dòng 729-751):
+
+Hệ thống sử dụng **3-level fuzzy matching** để tìm object:
+
+```python
+def _find_object_index(objects, class_name):
+    normalized = _normalize_label(class_name)  # Lowercase, strip
+    
+    # Level 1: Exact match
+    for idx, obj in enumerate(objects):
+        if _normalize_label(obj.get('class')) == normalized:
+            return idx  # ✅ Found
+    
+    # Level 2: Synonym matching
+    synonyms = _get_label_synonyms(class_name)
+    # Ví dụ: 'person' → ['man', 'woman', 'people', 'human', 'boy', 'girl', ...]
+    for idx, obj in enumerate(objects):
+        if _normalize_label(obj.get('class')) in synonyms:
+            return idx  # ✅ Found
+    
+    # Level 3: Partial matching (substring)
+    for idx, obj in enumerate(objects):
+        obj_label = _normalize_label(obj.get('class'))
+        if normalized in obj_label or obj_label in normalized:
+            return idx  # ✅ Found (ví dụ: 'dog' in 'doggy')
+    
+    return None  # ❌ Not found
+```
+
+**Synonym Dictionary** (`_LABEL_SYNONYMS` - dòng 698-710):
+```python
+_LABEL_SYNONYMS = {
+    'person': ['man', 'woman', 'people', 'human', 'boy', 'girl', 'child', 'adult'],
+    'vehicle': ['car', 'truck', 'bus', 'motorcycle', 'bike', 'bicycle'],
+    'animal': ['dog', 'cat', 'horse', 'bird', 'cow', 'sheep'],
+    # ... và nhiều synonyms khác
+}
+```
+
+**Ưu điểm**:
+- ✅ Chính xác cao (match với original relationship)
+- ✅ Confidence = 1.0 (tin cậy nhất)
+- ✅ Nhanh (không cần chạy model)
+
+**Nhược điểm**:
+- ⚠️ Chỉ hoạt động nếu objects được detect match với original
+- ⚠️ Nếu auto-annotation fail hoặc detect sai class → không tạo được relationship
+
+#### Method 2: RelTR Inference (Fallback 1)
+
+**Function**: `_run_reltr_inference()` → `_decode_relationships()` - dòng 911-1287
+
+**Cách hoạt động**:
+```python
+def _run_reltr_inference(image_tensor, objects, global_context, image_size):
+    # 1. Load RelTR model
+    model, _ = _ensure_relationship_model()
+    
+    # 2. Prepare inputs
+    samples = nested_tensor_from_tensor_list([image_tensor])
+    context_tensor = _prepare_global_context_tensor(global_context)
+    
+    # 3. Run inference
+    model.eval()
+    with torch.no_grad():
+        if context_tensor is not None:
+            outputs = model(samples, global_context=context_tensor)
+        else:
+            outputs = model(samples)
+    
+    # 4. Decode relationships từ outputs
+    return _decode_relationships(outputs, objects, image_size)
+```
+
+**Relationship Decoding** (`_decode_relationships()` - dòng 1180-1287):
+
+RelTR decode relationships theo **2 strategies**:
+
+**Strategy 1: Geometric Matching (Ưu tiên)** - dòng 1211-1258
+
+```python
+# Sử dụng sub_boxes và obj_boxes từ RelTR outputs
+if use_geometric:  # Nếu có sub_boxes và obj_boxes
+    sub_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(sub_boxes) * scale
+    obj_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(obj_boxes) * scale
+    
+    for idx in range(rel_scores.shape[0]):
+        # 1. Lấy relationship prediction
+        rel_vector = rel_scores[idx]
+        rel_conf, rel_idx = rel_vector.max(dim=0)
+        relation_name = RELATION_CLASSES[rel_idx]  # 'riding', 'on', ...
+        
+        # 2. Match predicted boxes với detected objects bằng IoU
+        subj_iou_vals = box_ops.box_iou(sub_boxes_xyxy[idx], object_boxes)[0]
+        obj_iou_vals = box_ops.box_iou(obj_boxes_xyxy[idx], object_boxes)[0]
+        
+        subj_iou, subj_idx = subj_iou_vals.max(dim=0)
+        obj_iou, obj_idx = obj_iou_vals.max(dim=0)
+        
+        # 3. Filter: IoU phải >= 0.05
+        if subj_iou >= 0.05 and obj_iou >= 0.05:
+            confidence = rel_conf * max(subj_iou, 0.05) * max(obj_iou, 0.05)
+            relationships.append({
+                'subject': objects[subj_idx].get('class'),
+                'relation': relation_name,
+                'object': objects[obj_idx].get('class'),
+                'confidence': confidence,
+                'source': 'model'
+            })
+```
+
+**Strategy 2: Pair-wise Fallback** - dòng 1262-1287
+
+```python
+# Nếu không có geometric boxes, tạo tất cả pairs
+keep = rel_scores.max(-1).values > 0.4  # Filter confidence > 0.4
+filtered = rel_scores[keep] if keep.any() else rel_scores
+
+pair_cursor = 0
+for i in range(total_objects):
+    for j in range(i + 1, total_objects):  # Tất cả pairs
+        vector = filtered[pair_cursor % num_queries]
+        rel_idx = int(vector.argmax().item())
+        confidence = float(vector.max().item())
+        relation_name = RELATION_CLASSES[rel_idx]
+        
+        relationships.append({
+            'subject': objects[i].get('class'),
+            'relation': relation_name,
+            'object': objects[j].get('class'),
+            'confidence': confidence,
+            'source': 'model_fallback'
+        })
+        pair_cursor += 1
+```
+
+**Ưu điểm**:
+- ✅ Tự động predict relationships từ ảnh
+- ✅ Không cần original_relationship
+- ✅ Có thể tạo nhiều relationships (không chỉ 1)
+
+**Nhược điểm**:
+- ⚠️ Phụ thuộc vào chất lượng RelTR model
+- ⚠️ Có thể predict sai nếu model chưa được train tốt
+- ⚠️ Chậm hơn Method 1 (cần chạy inference)
+
+#### Method 3: Fallback (Last Resort)
+
+**Code**: dòng 1060-1071
+
+**Cách hoạt động**:
+```python
+# Nếu cả 2 methods trên đều fail
+if not relationships and original_relationship:
+    fallback_relationship = {
+        'subject': original_relationship.get('subject', 'unknown'),
+        'relation': original_relationship.get('relation', 'unknown'),
+        'object': original_relationship.get('object', 'unknown'),
+        'confidence': 0.5,  # Low confidence
+        'source': 'fallback'
+    }
+    relationships = [fallback_relationship]
+```
+
+**Lưu ý**:
+- ⚠️ **WARNING**: Chất lượng thấp (confidence = 0.5)
+- ⚠️ Chỉ dùng khi không thể match objects hoặc RelTR inference fail
+- ⚠️ Relationship này có thể không chính xác với objects thực tế trong ảnh
+
+### Ví dụ Flow hoàn chỉnh
+
+```python
+# Input: Synthetic image từ Stable Diffusion
+original_relationship = {
+    'subject': 'dog',
+    'relation': 'riding',
+    'object': 'surfboard'
+}
+
+# Step 1: Auto-Annotation
+annotation_result = annotator.annotate_from_relationship(image_path, original_relationship)
+# Output: objects = [
+#   {'class': 'dog', 'bbox': [100, 150, 300, 400], 'confidence': 0.85},
+#   {'class': 'surfboard', 'bbox': [200, 300, 450, 500], 'confidence': 0.78}
+# ]
+
+# Step 2: Relationship Generation
+# Method 1: Build from Original
+relationships = _build_relationship_from_original(objects, original_relationship)
+# ✅ Success! Output: [{
+#   'subject': 'dog',
+#   'relation': 'riding',
+#   'object': 'surfboard',
+#   'confidence': 1.0,
+#   'source': 'original'
+# }]
+
+# Nếu Method 1 fail (ví dụ: detect sai class 'puppy' thay vì 'dog'):
+# Method 2: RelTR Inference
+relationships = _run_reltr_inference(image_tensor, objects, ...)
+# Output: [{
+#   'subject': 'dog',  # hoặc 'puppy' nếu detect sai
+#   'relation': 'riding',  # RelTR predict
+#   'object': 'surfboard',
+#   'confidence': 0.75,  # Confidence từ model
+#   'source': 'model'
+# }]
+
+# Nếu cả 2 methods đều fail:
+# Method 3: Fallback
+relationships = [{
+    'subject': 'dog',
+    'relation': 'riding',
+    'object': 'surfboard',
+    'confidence': 0.5,
+    'source': 'fallback'
+}]
+```
+
+### So sánh 3 Methods
+
+| Method | Confidence | Accuracy | Speed | Khi nào dùng |
+|--------|-----------|----------|-------|--------------|
+| **Build from Original** | 1.0 | Cao nhất | Nhanh nhất | Objects match với original |
+| **RelTR Inference** | 0.4-0.9 | Trung bình-Cao | Chậm | Objects không match, cần predict |
+| **Fallback** | 0.5 | Thấp | Instant | Tất cả methods khác fail |
+
+### Best Practices
+
+1. **Ưu tiên Method 1**: Đảm bảo auto-annotation chính xác để objects match với original
+2. **Cải thiện RelTR**: Train RelTR tốt để Method 2 chính xác hơn
+3. **Avoid Fallback**: Fallback chỉ nên dùng khi không còn lựa chọn
+4. **Monitor source field**: Track `source` để biết relationship được tạo bằng method nào
 
 ### Backend Selection Logic
 
@@ -945,6 +1247,282 @@ annotator = AutoAnnotator(
   }
 }
 ```
+
+##### Chi tiết Implementation: Các hàm tính Long-tail Loss
+
+**File**: `RL/reinforcement_learning.py`
+
+Hệ thống tính long-tail loss qua **3 bước chính**:
+
+###### Bước 1: Tính Tail Weights (`_recompute_tail_weights()`)
+
+**Function**: `_recompute_tail_weights()` - dòng 159-180
+
+**Mục đích**: Tính trọng số cho từng loại quan hệ dựa trên tần suất xuất hiện trong dataset. Quan hệ càng hiếm → trọng số càng cao.
+
+**Cách hoạt động**:
+```python
+def _recompute_tail_weights(self) -> None:
+    """Tính trọng số cho các quan hệ hiếm (long-tail) dựa trên tần suất."""
+    if not self.dataset_samples:
+        self.tail_weights = {}
+        return
+    
+    # 1. Đếm tần suất của từng quan hệ trong dataset
+    freq: Dict[str, int] = {}
+    for sample in self.dataset_samples:
+        for rel in sample.get('relationships', []) or []:
+            rel_name = self._normalize_label(rel.get('relation', ''))
+            if not rel_name:
+                continue
+            freq[rel_name] = freq.get(rel_name, 0) + 1
+    
+    # Ví dụ: freq = {
+    #   'on': 100,      # Quan hệ phổ biến (head)
+    #   'has': 80,
+    #   'riding': 5,    # Quan hệ hiếm (tail)
+    #   'playing': 3
+    # }
+    
+    if not freq:
+        self.tail_weights = {}
+        return
+    
+    # 2. Tính raw weights: 1/sqrt(freq) để ưu tiên lớp hiếm
+    # Quan hệ hiếm (freq nhỏ) → weight lớn
+    # Quan hệ phổ biến (freq lớn) → weight nhỏ
+    raw_weights = {k: 1.0 / math.sqrt(v + 1e-3) for k, v in freq.items()}
+    # Ví dụ: raw_weights = {
+    #   'on': 1/sqrt(100) = 0.1,
+    #   'has': 1/sqrt(80) = 0.112,
+    #   'riding': 1/sqrt(5) = 0.447,   # ← Cao hơn
+    #   'playing': 1/sqrt(3) = 0.577   # ← Cao nhất
+    # }
+    
+    # 3. Normalize để tổng = 1.0
+    total = sum(raw_weights.values()) or 1.0
+    self.tail_weights = {k: v / total for k, v in raw_weights.items()}
+    # Ví dụ: tail_weights = {
+    #   'on': 0.08,      # Trọng số thấp
+    #   'has': 0.09,
+    #   'riding': 0.36,  # Trọng số cao (quan hệ hiếm)
+    #   'playing': 0.47  # Trọng số cao nhất
+    # }
+```
+
+**Công thức**:
+```
+raw_weight(relation) = 1 / sqrt(frequency + ε)
+tail_weight(relation) = raw_weight(relation) / Σ(raw_weights)
+```
+
+**Ví dụ tính toán**:
+```
+Dataset có:
+- "on": 100 lần → raw = 1/√100 = 0.1
+- "has": 50 lần → raw = 1/√50 = 0.141
+- "riding": 5 lần → raw = 1/√5 = 0.447
+- "playing": 2 lần → raw = 1/√2 = 0.707
+
+Tổng raw = 1.395
+Normalize:
+- "on": 0.1/1.395 = 0.072
+- "has": 0.141/1.395 = 0.101
+- "riding": 0.447/1.395 = 0.320  ← Cao hơn
+- "playing": 0.707/1.395 = 0.507 ← Cao nhất
+```
+
+**Khi nào được gọi**:
+- Sau khi `_ingest_synthetic_samples()` (dòng 1088)
+- Sau khi `build_dataset_from_directory()` (dòng 1137)
+- Mỗi khi dataset thay đổi
+
+###### Bước 2: Tính Sample Tail Weight (`_get_sample_tail_weight()`)
+
+**Function**: `_get_sample_tail_weight()` - dòng 2164-2195
+
+**Mục đích**: Tính trọng số trung bình cho một training sample dựa trên các quan hệ trong sample đó.
+
+**Cách hoạt động**:
+```python
+def _get_sample_tail_weight(self, target: Dict[str, Any]) -> float:
+    """Tính tail weight cho một training sample."""
+    if not self.tail_weights:
+        return 0.0
+    
+    # Collect all relationship names từ dataset và tính average tail weight
+    tail_weights_in_dataset = []
+    for sample in self.dataset_samples:
+        for rel in sample.get('relationships', []):
+            rel_name = self._normalize_label(rel.get('relation', ''))
+            if rel_name in self.tail_weights:
+                tail_weights_in_dataset.append(self.tail_weights[rel_name])
+    
+    if not tail_weights_in_dataset:
+        return 0.0
+    
+    # Return average tail weight
+    # Đây là proxy measure: nếu dataset có nhiều quan hệ hiếm,
+    # thì average weight sẽ cao
+    return sum(tail_weights_in_dataset) / len(tail_weights_in_dataset)
+```
+
+**Ví dụ**:
+```python
+# Giả sử tail_weights = {
+#   'on': 0.08,
+#   'riding': 0.36,
+#   'playing': 0.47
+# }
+
+# Dataset có:
+# - Sample 1: relationships = [{'relation': 'on'}, {'relation': 'on'}]
+# - Sample 2: relationships = [{'relation': 'riding'}]
+# - Sample 3: relationships = [{'relation': 'playing'}]
+
+# tail_weights_in_dataset = [0.08, 0.08, 0.36, 0.47]
+# Average = (0.08 + 0.08 + 0.36 + 0.47) / 4 = 0.2475
+```
+
+**Lưu ý**: Hàm này sử dụng average weight của toàn bộ dataset làm proxy, vì không thể trực tiếp map từ RelTR target (chứa indices) sang relationship names.
+
+###### Bước 3: Tính Long-tail Loss trong Training (`train_relationship_model()`)
+
+**Function**: `train_relationship_model()` - dòng 2054-2162
+
+**Mục đích**: Tính long-tail loss bằng cách trọng số hóa relationship loss theo tail weights.
+
+**Cách hoạt động**:
+```python
+def train_relationship_model(self, synthetic_data, num_epochs: int = 1):
+    """Train RelTR và tính long-tail loss."""
+    # ... setup model, optimizer ...
+    
+    for epoch in range(num_epochs):
+        total_loss = 0.0
+        total_tail_loss = 0.0  # ← Tích lũy long-tail loss
+        tail_weighted_count = 0  # ← Đếm số samples có tail weight
+        
+        for i, (image_tensor, target, global_context) in enumerate(shuffled_samples):
+            # 1. Forward pass và tính loss thông thường
+            outputs = model(samples, global_context=context_tensor)
+            loss_dict = criterion(outputs, targets)
+            loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) 
+                      for k in loss_dict.keys() if k in weight_dict)
+            
+            loss.backward()
+            sample_loss = float(loss.item())
+            total_loss += sample_loss
+            
+            # 2. Tính long-tail loss: nhân loss với tail_weight
+            tail_weight = self._get_sample_tail_weight(target)
+            if tail_weight > 0:
+                total_tail_loss += sample_loss * tail_weight  # ← Weighted loss
+                tail_weighted_count += 1
+        
+        # 3. Tính average losses
+        epoch_avg_loss = total_loss / len(shuffled_samples)
+        epoch_tail_loss = total_tail_loss / max(tail_weighted_count, 1)
+        # ↑ Chia cho số samples có tail weight, không phải tổng số samples
+        
+        # ... lưu losses ...
+    
+    # 4. Return average across all epochs
+    average_loss = sum(all_epoch_losses) / len(all_epoch_losses)
+    long_tail_loss = sum(all_epoch_tail_losses) / len(all_epoch_tail_losses)
+    
+    return average_loss, long_tail_loss
+```
+
+**Công thức**:
+```
+For each training sample i:
+  sample_loss_i = RelTR_loss(sample_i)
+  tail_weight_i = _get_sample_tail_weight(sample_i)
+  
+  if tail_weight_i > 0:
+    tail_loss_i = sample_loss_i * tail_weight_i
+    total_tail_loss += tail_loss_i
+    tail_weighted_count += 1
+
+long_tail_loss = total_tail_loss / tail_weighted_count
+```
+
+**Ví dụ tính toán**:
+```python
+# Giả sử có 3 samples:
+# Sample 1: loss = 30.0, tail_weight = 0.08 (quan hệ "on" - phổ biến)
+# Sample 2: loss = 35.0, tail_weight = 0.36 (quan hệ "riding" - hiếm)
+# Sample 3: loss = 40.0, tail_weight = 0.47 (quan hệ "playing" - rất hiếm)
+
+# Tính long-tail loss:
+total_tail_loss = (30.0 * 0.08) + (35.0 * 0.36) + (40.0 * 0.47)
+                 = 2.4 + 12.6 + 18.8
+                 = 33.8
+
+tail_weighted_count = 3
+long_tail_loss = 33.8 / 3 = 11.27
+
+# So sánh với relationship_loss thông thường:
+relationship_loss = (30.0 + 35.0 + 40.0) / 3 = 35.0
+
+# → long_tail_loss (11.27) < relationship_loss (35.0) 
+# vì đã được normalize bởi tail_weights
+```
+
+**Lưu ý quan trọng**:
+- Long-tail loss **không phải** là loss riêng biệt, mà là **weighted version** của relationship loss
+- Chỉ tính cho các samples có `tail_weight > 0`
+- Được chia cho số samples có tail weight, không phải tổng số samples
+- Giá trị có thể nhỏ hơn relationship_loss vì đã được normalize
+
+### Flow hoàn chỉnh
+
+```
+1. Dataset được build/ingest
+   ↓
+2. _recompute_tail_weights() được gọi
+   ↓
+3. tail_weights được tính: {relation: weight}
+   ↓
+4. train_relationship_model() được gọi
+   ↓
+5. For each training sample:
+   a. Tính sample_loss (RelTR loss)
+   b. Tính tail_weight = _get_sample_tail_weight(sample)
+   c. Nếu tail_weight > 0:
+      total_tail_loss += sample_loss * tail_weight
+   ↓
+6. long_tail_loss = total_tail_loss / tail_weighted_count
+   ↓
+7. Return (relationship_loss, long_tail_loss)
+```
+
+### Sử dụng Long-tail Loss
+
+**Trong training metrics**:
+```python
+results = rl_system.train_episode(...)
+# results['long_tail_loss'] = 42.80
+```
+
+**Trong JSON metrics**:
+```json
+{
+  "relationship_loss": 31.20,
+  "long_tail_loss": 42.80,
+  "relationship_metrics": {
+    "precision": 0.28,
+    "recall": 0.47,
+    "f1": 0.35
+  }
+}
+```
+
+**Ý nghĩa**:
+- `long_tail_loss` cao → Model đang gặp khó khăn với quan hệ hiếm
+- `long_tail_loss` giảm → Model đang học tốt hơn trên long-tail
+- So sánh với `relationship_loss` để đánh giá sự chênh lệch giữa head và tail classes
 
 #### 2. **Multiple Epochs Training** ✅
 - **Mô tả**: Hỗ trợ training nhiều epochs trên toàn bộ dataset tích lũy

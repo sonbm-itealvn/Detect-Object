@@ -1,0 +1,188 @@
+@startuml AI Object Detection and Relationship Analysis System
+
+!theme plain
+skinparam backgroundColor #f5f5f5
+skinparam componentStyle rectangle
+skinparam defaultFontName Arial
+skinparam shadowing true
+skinparam roundcorner 15
+
+title **Hệ thống AI Nhận diện Đối tượng và Phân tích Mối quan hệ**\n(YOLOv11 + CLIP + RelTR + Reinforcement Learning)
+
+' ================== INPUT LAYER ==================
+package "📥 Input Layer" as input #e3f2fd {
+    component [🖼️ Image Input\n(JPG, PNG)] as img_input
+    component [🎬 Video Input\n(MP4, AVI)] as video_input
+    component [📁 Safe Zone\nConfiguration] as safe_zone_config
+}
+
+' ================== GUI LAYER ==================
+package "🖥️ GUI Application Layer" as gui_layer #fff3e0 {
+    component [**ObjectDetectionApp**\n(app.py)] as app {
+        component [Image Display] as img_display
+        component [Video Demo] as video_demo
+        component [Objects List] as obj_list
+        component [Relationships List] as rel_list
+        component [RL Training Interface] as rl_interface
+    }
+}
+
+' ================== OBJECT DETECTION MODULE ==================
+package "🔍 Object Detection Module" as detection_module #e8f5e9 {
+    component [**YOLOv11 Model**\n(Ultralytics)\nfine-tune.pt] as yolo_model #c8e6c9
+    component [Backbone Feature\nExtraction\n(SPPF Layer)] as backbone
+    component [**ROIAlign**\n(Feature Pooling)] as roi_align
+    component [detect_objects()\n→ Bounding Boxes] as detect_func
+}
+
+' ================== CLASSIFICATION MODULE ==================
+package "🏷️ Classification Module" as classification_module #e1f5fe {
+    component [**CLIP Model**\n(ViT-B/32)\nOpenAI] as clip_model #b3e5fc
+    component [Text Features\n(Pre-computed)] as text_features
+    component [classify_with_clip()\n→ Object Labels] as classify_func
+    
+    note right of text_features
+        Vocabulary Categories:
+        • Animals (26 labels)
+        • Vehicles (20 labels)
+        • Household Items (22 labels)
+        • Food & Drinks (18 labels)
+        • Electronics (19 labels)
+        • Nature (20 labels)
+        • Sports (15 labels)
+        • School Supplies (31 labels)
+    end note
+}
+
+' ================== RELATIONSHIP MODULE ==================
+package "🔗 Relationship Inference Module" as relationship_module #fce4ec {
+    component [**RelTR Model**\n(Transformer-based)\nreltr_finetuned.pth] as reltr_model #f8bbd0
+    
+    component [Backbone\n(ResNet50)] as reltr_backbone
+    component [Transformer Encoder\n(6 layers)] as transformer_enc
+    component [Transformer Decoder\n(6 layers)] as transformer_dec
+    component [Entity Query\n(100 slots)] as entity_query
+    component [Triplet Query\n(200 slots)] as triplet_query
+    
+    component [run_reltr_inference()\n→ Relationships] as reltr_infer
+    
+    note right of reltr_model
+        51 Relationship Classes:
+        • Spatial: above, below, near, behind
+        • Action: holding, carrying, riding
+        • Association: part of, belonging to
+        • State: wearing, covered in
+    end note
+}
+
+' ================== VIDEO PROCESSING MODULE ==================
+package "🎥 Video Processing Pipeline" as video_pipeline #f3e5f5 {
+    component [**VideoRelationPipeline**\n(video_relation_pipeline.py)] as video_processor #e1bee7
+    
+    component [Frame Extraction\n(stride=2)] as frame_extract
+    component [ByteTrack\nObject Tracking] as byte_track
+    component [**SafeZoneMonitor**\n(2m Safety Zone)] as safe_zone
+    component [Homography\nTransformation] as homography
+    component [Intrusion Detection] as intrusion_detect
+    
+    component [RelTRInferenceEngine\n(Optimized)] as reltr_engine
+}
+
+' ================== REINFORCEMENT LEARNING MODULE ==================
+package "🎯 Reinforcement Learning Module" as rl_module #fff8e1 {
+    component [**AppReinforcementLearning**\n(rl_enhancement.py)] as app_rl #ffecb3
+    
+    component [RelationshipImageGenerator\n(AI Images)] as img_generator
+    component [RelationshipDataAugmentation] as data_aug
+    component [RelationshipReinforcementLearning] as rl_system
+    component [ExperimentManager\n(Training Tracking)] as exp_manager
+    component [ExperienceManager\n(Replay Buffer)] as exp_buffer
+    component [TrainingEvaluator\n(Metrics)] as training_eval
+}
+
+' ================== OUTPUT LAYER ==================
+package "📤 Output Layer" as output #efebe9 {
+    component [result.json\n(Objects + Features)] as result_json
+    component [relationships.json\n(Triplets)] as rel_json
+    component [result.jpg\n(Annotated Image)] as result_img
+    component [video_outputs/\n(Processed Video)] as video_out
+    component [Training Metrics\n& Checkpoints] as training_out
+}
+
+' ================== CONNECTIONS ==================
+
+' Input to GUI
+img_input --> app
+video_input --> app
+safe_zone_config --> safe_zone
+
+' GUI to Detection
+app --> detect_func : "Image/Frame"
+
+' Detection Flow
+detect_func --> yolo_model : "Inference"
+yolo_model --> backbone : "Feature Map"
+backbone --> roi_align : "Spatial Features"
+yolo_model --> detect_func : "Bounding Boxes"
+
+' Detection to Classification
+detect_func --> classify_func : "Cropped Regions"
+classify_func --> clip_model : "Image Encoding"
+text_features --> clip_model : "Similarity Matching"
+clip_model --> classify_func : "Labels"
+
+' Classification to Relationship
+classify_func --> reltr_infer : "Objects + Labels"
+roi_align --> reltr_infer : "ROI Features"
+
+' RelTR Internal Flow
+reltr_infer --> reltr_model
+reltr_model --> reltr_backbone
+reltr_backbone --> transformer_enc
+transformer_enc --> transformer_dec
+entity_query --> transformer_dec
+triplet_query --> transformer_dec
+transformer_dec --> reltr_infer : "Relationship Logits"
+
+' Video Pipeline
+video_input --> video_processor
+video_processor --> frame_extract
+frame_extract --> byte_track
+byte_track --> reltr_engine
+reltr_engine --> safe_zone
+safe_zone --> homography
+homography --> intrusion_detect
+
+' RL Module
+app --> app_rl : "Start Training"
+app_rl --> img_generator
+app_rl --> data_aug
+app_rl --> rl_system
+rl_system --> exp_manager
+rl_system --> exp_buffer
+app_rl --> training_eval
+
+' Outputs
+classify_func --> result_json
+reltr_infer --> rel_json
+classify_func --> result_img
+video_processor --> video_out
+app_rl --> training_out
+
+' RL Feedback Loop
+training_eval --> yolo_model : "Updated Weights"
+training_eval --> reltr_model : "Fine-tuned Model"
+
+legend right
+    |= Component |= Technology |
+    | YOLOv11 | Ultralytics (PyTorch) |
+    | CLIP | OpenAI ViT-B/32 |
+    | RelTR | Transformer (PyTorch) |
+    | Tracking | ByteTrack |
+    | GUI | Tkinter |
+    | RL | Custom Implementation |
+endlegend
+
+footer Đồ án Tốt nghiệp - Hệ thống AI Nhận diện và Phân tích Mối quan hệ Đối tượng
+
+@enduml

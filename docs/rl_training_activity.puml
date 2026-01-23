@@ -1,0 +1,140 @@
+@startuml Reinforcement Learning Training Activity
+
+!theme plain
+skinparam backgroundColor #f5f5f5
+skinparam ActivityDiamondBackgroundColor #ffcc80
+skinparam ActivityBackgroundColor #fff9c4
+skinparam roundcorner 15
+skinparam defaultFontName Arial
+
+title **Quy trình Reinforcement Learning Training**\n(AppReinforcementLearning)
+
+start
+
+:🎯 Khởi tạo RL System;
+note right
+    - RelationshipImageGenerator
+    - RelationshipDataAugmentation
+    - ExperimentManager
+    - ExperienceManager
+end note
+
+:📊 setup_reinforcement_learning();
+:Load current model weights;
+:Khởi tạo training_metrics = {};
+
+partition "**Main Training Loop**" #e8f5e9 {
+    :Đặt total_epochs (default: 5);
+    
+    while (epoch < total_epochs?) is (Có)
+        :📅 **Bắt đầu Epoch** epoch_index;
+        
+        partition "**1. Data Generation**" #e3f2fd {
+            :🖼️ generate_ai_images_for_epoch();
+            
+            if (relationship_plan có sẵn?) then (Có)
+                :Tạo số ảnh khác nhau cho\nmỗi loại relationship;
+                note right
+                    Relationships có performance
+                    thấp → tạo nhiều ảnh hơn
+                end note
+            else (Không)
+                :Tạo num_variations ảnh\ncho mỗi relationship;
+            endif
+            
+            :🔀 RelationshipDataAugmentation;
+            :apply_augmentations();
+        }
+        
+        partition "**2. Model Training**" #fff3e0 {
+            :📦 Load training dataset;
+            :Chuyển sang training mode;
+            
+            fork
+                :🔍 **YOLO Detection Training**;
+                :Compute detection_loss;
+                :Backprop + Optimizer step;
+            fork again
+                :🔗 **RelTR Relationship Training**;
+                :Compute relationship_loss;
+                :Backprop + Optimizer step;
+            end fork
+            
+            :📊 Tính total_loss = det_loss + rel_loss;
+        }
+        
+        partition "**3. Reward Calculation**" #fce4ec {
+            :🎯 Evaluate trên validation set;
+            :Tính accuracy, precision, recall, F1;
+            
+            :💰 Tính reward = f(performance);
+            note right
+                reward = α × accuracy +
+                         β × (1 - loss_normalized) +
+                         γ × improvement_over_baseline
+            end note
+            
+            if (reward > best_reward?) then (Có)
+                #c8e6c9:💾 Save best checkpoint;
+                :Update best_reward;
+            endif
+        }
+        
+        partition "**4. Experience Storage**" #f3e5f5 {
+            :📦 _store_epoch_experiences();
+            
+            :Tạo experience entry:
+            - epoch_index
+            - reward
+            - detection_loss
+            - relationship_loss
+            - state features;
+            
+            :🗃️ Thêm vào experience_manager;
+            :Merge vào replay buffer;
+        }
+        
+        partition "**5. Policy Update**" #e1f5fe {
+            :📊 Sample batch từ replay buffer;
+            :🧠 Update policy parameters;
+            :Apply learning rate scheduling;
+        }
+        
+        :📈 save_training_metrics(epoch_metrics);
+        :epoch++;
+        
+        if (early_stopping_triggered?) then (Có)
+            break
+        endif
+        
+    endwhile (Không)
+}
+
+partition "**Finalization**" #efebe9 {
+    :📊 calculate_evaluation_metrics();
+    
+    :🏆 calculate_overall_score();
+    note right
+        Score (0-100) based on:
+        - Average reward
+        - Final accuracy
+        - Training stability
+        - Improvement rate
+    end note
+    
+    :💾 save_training_summary();
+    :🗄️ Archive experiment data;
+    :📋 Export final model checkpoints;
+}
+
+stop
+
+legend right
+    |= Metric |= Description |
+    | Reward | Performance-based score |
+    | Det Loss | Detection loss (YOLO) |
+    | Rel Loss | Relationship loss (RelTR) |
+    | F1 Score | Harmonic mean of P & R |
+endlegend
+
+@enduml

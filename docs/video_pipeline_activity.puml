@@ -1,0 +1,116 @@
+@startuml Video Processing Activity Diagram
+
+!theme plain
+skinparam backgroundColor #f5f5f5
+skinparam ActivityDiamondBackgroundColor #ffcc80
+skinparam ActivityBackgroundColor #e1f5fe
+skinparam roundcorner 15
+skinparam defaultFontName Arial
+
+title **Quy trình xử lý Video Real-time**\n(VideoRelationPipeline + SafeZoneMonitor)
+
+start
+
+:📹 Nhận video input;
+note right: video_path (MP4, AVI)
+
+:🎬 Đọc FPS và frame dimensions;
+:🔧 Khởi tạo VideoWriter để ghi output;
+:📦 Load ByteTrack tracker config;
+
+partition "**Frame Processing Loop**" {
+    while (Còn frame trong video?) is (Có)
+        :📷 Đọc frame tiếp theo;
+        
+        if (frame_idx % frame_stride == 0?) then (Có - Xử lý)
+            
+            :🔍 **YOLO Detection**]
+            :Chạy yolo_model(frame);
+            :Trích xuất bounding boxes;
+            :Lấy backbone feature map;
+            
+            :📊 **ROI Feature Extraction**]
+            :_safe_consume_feature_map();
+            :extract_roi_features();
+            
+            :🏷️ **CLIP Classification**]
+            :classify_with_clip();
+            :Gán labels cho objects;
+            
+            :🔗 **RelTR Relationship Inference**]
+            :reltr_engine.infer(frame, objects, context);
+            :Decode relationships;
+            
+            partition "**SafeZone Evaluation**" #fce4ec {
+                :🛡️ Lấy polygon từ config;
+                
+                if (Có homography matrix?) then (Có)
+                    :Áp dụng _project_world_polygon();
+                    :Tính khoảng cách thực tế;
+                else (Không)
+                    :Sử dụng normalized polygon;
+                endif
+                
+                while (Cho mỗi detected object) is (Next)
+                    :Tính bottom center của bbox;
+                    :cv2.pointPolygonTest();
+                    
+                    if (Point trong polygon?) then (Có)
+                        :Thêm vào intrusion list;
+                        :Tính estimated distance;
+                    endif
+                endwhile
+                
+                if (Có intrusions?) then (Có)
+                    :⚠️ Set danger_active = True;
+                    :Tăng danger_alpha dần;
+                    note right: Frame-based interpolation
+                else (Không)
+                    :Giảm danger_alpha dần;
+                    :danger_active = False;
+                endif
+            }
+            
+            :🎨 **Draw Annotations**]
+            :Vẽ bounding boxes;
+            :Vẽ relationship arrows/labels;
+            :Vẽ safe zone polygon;
+            
+            if (danger_active?) then (Có)
+                #ff5722:Vẽ overlay đỏ!;
+                :Hiển thị DANGER warning;
+                :Highlight các intrusions;
+            endif
+            
+            :📤 Callback: on_frame(annotated_frame);
+            :📤 Callback: on_relations(payload);
+            
+        else (Không - Bỏ qua)
+            :Skip frame (stride optimization);
+        endif
+        
+        :Ghi frame vào output video;
+        
+        if (stop_event.is_set()?) then (Có)
+            break
+        endif
+        
+    endwhile (Không)
+}
+
+:🏁 Release video resources;
+:💾 Lưu video output;
+:📋 Tạo video summary JSON;
+
+stop
+
+legend right
+    |= Ký hiệu |= Ý nghĩa |
+    | 🔍 | Detection |
+    | 🔗 | Relationship |
+    | 🛡️ | Safe Zone |
+    | ⚠️ | Warning |
+    | 📤 | Callback |
+endlegend
+
+@enduml

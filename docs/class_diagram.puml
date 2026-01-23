@@ -1,0 +1,236 @@
+@startuml AI System Class Diagram
+
+!theme plain
+skinparam backgroundColor #f5f5f5
+skinparam classAttributeIconSize 0
+skinparam roundcorner 10
+skinparam defaultFontName Arial
+
+title **Chi tiết Class Diagram - Hệ thống AI**
+
+' ================== GUI LAYER ==================
+package "GUI Layer (app.py)" #fff3e0 {
+    class ObjectDetectionApp {
+        - root: tk.Tk
+        - current_image_path: str
+        - current_video_path: str
+        - rl_module: AppReinforcementLearning
+        - video_pipeline: VideoRelationPipeline
+        --
+        + __init__(root)
+        + select_image()
+        + select_video()
+        + display_image(path)
+        + run_pipeline()
+        + run_video_demo()
+        + stop_video_demo()
+        + load_and_display_objects()
+        + load_and_display_relationships()
+        + draw_relationship_boxes_on_image()
+        + refresh_data()
+    }
+}
+
+' ================== DETECTION MODULE ==================
+package "Detection Module (detect_objects.py)" #e8f5e9 {
+    class "<<module>>\ndetect_objects" as detect_objects {
+        + yolo_model: YOLO
+        + clip_model: CLIPModel
+        + preprocess: Transform
+        - _BACKBONE_LAYER_INDEX: int
+        - _feature_map_queue: deque
+        - _precomputed_text_features: Tensor
+        --
+        + detect_objects(image_source) → (objects, labels, image, feature_map, context)
+        + classify_with_clip(detected_objects, yolo_labels) → results
+        + extract_roi_features(feature_map, boxes, image_shape) → features
+        + run_pipeline(image_path) → results_payload
+        - _resolve_yolo_weights() → str
+        - _compute_global_context(feature_map) → List[float]
+        - _capture_backbone_feature(module, inputs, output)
+        - _consume_feature_map() → Tensor
+    }
+    
+    note right of detect_objects
+        **Labels Vocabulary:**
+        - animals (26)
+        - vehicles (20)
+        - household_items (22)
+        - food_drinks (18)
+        - electronics (19)
+        - nature (20)
+        - sports (15)
+        - school_supplies (31)
+    end note
+}
+
+' ================== RELATIONSHIP MODULE ==================
+package "Relationship Module (boundingbox_objects.py)" #fce4ec {
+    class "<<module>>\nboundingbox_objects" as boundingbox_objects {
+        - _cached_reltr_model: nn.Module
+        - _RELTR_TRANSFORM: Transform
+        + REL_CLASSES: List[str]
+        --
+        + load_yolo_output(json_path) → entries
+        + convert_yolo_to_reltr(objects_list, img_size) → objects
+        + run_reltr_inference(objects, img_path, args, context, output_json) → relationships
+        + draw_relationships(image_path, objects, relationships, output_path)
+        - _get_cached_reltr_model(args, device) → nn.Module
+        - _resolve_device(device_arg) → torch.device
+    }
+}
+
+' ================== RELTR MODEL ==================
+package "RelTR Model (models/reltr.py)" #ede7f6 {
+    class RelTR {
+        - backbone: nn.Module
+        - transformer: Transformer
+        - entity_embed: nn.Embedding
+        - triplet_embed: nn.Embedding
+        - class_embed: nn.Linear
+        - bbox_embed: MLP
+        - rel_embed: nn.Linear
+        - context_proj: nn.Linear
+        --
+        + forward(samples, global_context) → outputs
+        + load_state_dict(state_dict, strict)
+        - _prepare_context_features(context, batch_size, reference)
+        - _project_context(context, device)
+        - _set_aux_loss(...)
+    }
+    
+    class SetCriterion {
+        - num_classes: int
+        - num_rel_classes: int
+        - matcher: HungarianMatcher
+        - weight_dict: dict
+        --
+        + forward(outputs, targets) → losses
+        + loss_labels(outputs, targets, indices, num_boxes)
+        + loss_boxes(outputs, targets, indices, num_boxes)
+        + loss_relations(outputs, targets, indices, num_boxes)
+    }
+    
+    class PostProcess {
+        + forward(outputs, target_sizes) → results
+    }
+}
+
+' ================== VIDEO PIPELINE ==================
+package "Video Pipeline (video_relation_pipeline.py)" #f3e5f5 {
+    class VideoRelationPipeline {
+        - reltr_checkpoint: str
+        - tracker_config: str
+        - min_confidence: float
+        - safe_zone: SafeZoneMonitor
+        - reltr_engine: RelTRInferenceEngine
+        --
+        + process_video(video_path, output_dir, frame_stride, on_frame, on_relations, stop_event)
+        - _safe_consume_feature_map()
+        - _prepare_objects(result, frame, feature_map)
+        - _draw_annotations(frame, objects, relations, safe_zone, intrusions, danger)
+        - _read_video_fps(video_path)
+    }
+    
+    class SafeZoneMonitor {
+        - config_path: Path
+        - normalized_polygon: Sequence
+        - H_inv: np.ndarray
+        - frame_alpha: float
+        - danger_alpha: float
+        --
+        + evaluate(frame_shape, objects, frame_idx) → (polygon, intrusions, danger)
+        + get_alpha_values() → (frame_alpha, danger_alpha)
+        - _load_config()
+        - _init_homography(homography_cfg)
+        - _get_polygon(frame_shape)
+        - _estimate_distance(image_point, frame_shape)
+    }
+    
+    class RelTRInferenceEngine {
+        - checkpoint_path: str
+        - model: nn.Module
+        - device: torch.device
+        --
+        + infer(frame_bgr, objects, global_context) → relationships
+        - _build_args()
+        - _ensure_model()
+        - _materialize_model(model)
+        - _prepare_context(global_context)
+        - _decode_relationships(outputs, objects, image_size)
+    }
+}
+
+' ================== RL MODULE ==================
+package "Reinforcement Learning (RL/)" #fff8e1 {
+    class AppReinforcementLearning {
+        - app: ObjectDetectionApp
+        - generator: RelationshipImageGenerator
+        - augmentation: RelationshipDataAugmentation
+        - rl_system: RelationshipReinforcementLearning
+        - experiment_manager: ExperimentManager
+        - experience_manager: ExperienceManager
+        --
+        + setup_reinforcement_learning()
+        + run_reinforcement_learning(epochs, continue_from, image_directory)
+        + generate_synthetic_dataset(num_variations)
+        + generate_ai_images_for_epoch(relationships, epoch, num_variations)
+        + save_training_metrics(metrics)
+        + save_training_summary(metrics, timestamp)
+        + calculate_evaluation_metrics(metrics)
+        + calculate_overall_score(metrics)
+        - _detect_yolo_weights_path()
+        - _store_epoch_experiences(experiences, experiment_dir, epoch, reward, det_loss, rel_loss)
+    }
+    
+    class RelationshipImageGenerator {
+        + generate_images(relationships, num_variations)
+    }
+    
+    class RelationshipDataAugmentation {
+        + augment_dataset(original_data)
+    }
+    
+    class RelationshipReinforcementLearning {
+        + train_epoch(data) → metrics
+        + update_policy(experiences)
+    }
+    
+    class ExperimentManager {
+        + create_experiment() → experiment_id
+        + save_checkpoint(model, epoch)
+        + load_checkpoint(experiment_id)
+    }
+    
+    class ExperienceManager {
+        + add_experience(experience)
+        + sample_batch(batch_size) → experiences
+        + merge_buffer(epoch_experiences)
+    }
+    
+    class TrainingEvaluator {
+        + evaluate(predictions, ground_truth) → metrics
+    }
+}
+
+' ================== RELATIONSHIPS ==================
+
+ObjectDetectionApp --> detect_objects : uses
+ObjectDetectionApp --> boundingbox_objects : uses
+ObjectDetectionApp --> VideoRelationPipeline : owns
+ObjectDetectionApp --> AppReinforcementLearning : owns
+
+boundingbox_objects --> RelTR : creates/uses
+
+VideoRelationPipeline --> SafeZoneMonitor : owns
+VideoRelationPipeline --> RelTRInferenceEngine : owns
+RelTRInferenceEngine --> RelTR : uses
+
+AppReinforcementLearning --> RelationshipImageGenerator : uses
+AppReinforcementLearning --> RelationshipDataAugmentation : uses
+AppReinforcementLearning --> RelationshipReinforcementLearning : uses
+AppReinforcementLearning --> ExperimentManager : uses
+AppReinforcementLearning --> ExperienceManager : uses
+AppReinforcementLearning --> TrainingEvaluator : uses
+
+@enduml

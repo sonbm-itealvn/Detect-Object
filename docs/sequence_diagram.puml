@@ -1,0 +1,116 @@
+@startuml Object Detection and Relationship Inference Sequence
+
+!theme plain
+skinparam backgroundColor #f5f5f5
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 200
+skinparam defaultFontName Arial
+
+title **Luồng xử lý Nhận diện Đối tượng và Phân tích Mối quan hệ**
+
+actor "Người dùng" as User
+participant "GUI\n(ObjectDetectionApp)" as App
+participant "YOLOv11\n(detect_objects)" as YOLO
+participant "Backbone\n(SPPF Layer)" as Backbone
+participant "CLIP\n(ViT-B/32)" as CLIP
+participant "ROIAlign\n(Feature Pooling)" as ROI
+participant "RelTR\n(Transformer)" as RelTR
+database "Output\n(JSON/Image)" as Output
+
+== 1. Khởi tạo hệ thống ==
+App -> YOLO : Load model (fine-tune.pt)
+YOLO -> Backbone : Register forward hook
+App -> CLIP : Load model (ViT-B/32)
+CLIP -> CLIP : Pre-compute text features\n(200+ labels)
+note right: Animals, Vehicles,\nElectronics, Food, etc.
+
+== 2. Chọn và nhập ảnh ==
+User -> App : select_image()
+App -> App : display_image()
+User -> App : run_pipeline()
+
+== 3. Object Detection với YOLO ==
+App -> YOLO : detect_objects(image)
+activate YOLO
+YOLO -> YOLO : Inference trên ảnh
+YOLO -> Backbone : Forward pass
+Backbone --> YOLO : Feature Map (C×H×W)
+YOLO --> App : Bounding Boxes + Classes
+deactivate YOLO
+
+note over YOLO, Backbone
+  Global Context Vector = 
+  L2_normalize(GAP(feature_map))
+end note
+
+== 4. Feature Extraction với ROIAlign ==
+App -> ROI : extract_roi_features(feature_map, boxes)
+activate ROI
+ROI -> ROI : Scale boxes to feature map
+ROI -> ROI : roi_align → 7×7 pooling
+ROI -> ROI : Adaptive avg pool → 1×1
+ROI --> App : ROI Features (per object)
+deactivate ROI
+
+== 5. Phân loại với CLIP ==
+loop Cho mỗi object được detect
+    App -> CLIP : classify_with_clip(cropped_image)
+    activate CLIP
+    CLIP -> CLIP : encode_image → image features
+    CLIP -> CLIP : cosine_similarity(image, text_features)
+    alt Confidence >= 0.3
+        CLIP --> App : CLIP Label
+    else Confidence < 0.3
+        CLIP --> App : Fallback YOLO Label
+    end
+    deactivate CLIP
+end
+
+== 6. Relationship Inference với RelTR ==
+App -> RelTR : run_reltr_inference(objects, image)
+activate RelTR
+
+RelTR -> RelTR : Transform image (Resize 800, Normalize)
+RelTR -> RelTR : Forward qua Backbone (ResNet50)
+RelTR -> RelTR : Transformer Encoder (6 layers)
+
+group Decoder với Dual Queries
+    RelTR -> RelTR : Entity Queries (100 slots)
+    RelTR -> RelTR : Triplet Queries (200 slots)
+    RelTR -> RelTR : Transformer Decoder (6 layers)
+end
+
+RelTR -> RelTR : Relation Logits → Softmax
+
+loop Cho mỗi cặp (object_i, object_j)
+    RelTR -> RelTR : Base vector từ rel_logits
+    alt ROI features có sẵn
+        RelTR -> RelTR : Compute visual similarity
+        RelTR -> RelTR : Adjust logits: base × (1 + 0.25×sim)
+    end
+    RelTR -> RelTR : Argmax → Relationship class
+end
+
+RelTR -> RelTR : Filter: similarity >= 0.5
+RelTR --> App : Relationships List\n(subject, relation, object)
+deactivate RelTR
+
+note over RelTR
+  51 Relationship Classes:
+  above, near, holding, wearing, 
+  riding, part_of, carrying, etc.
+end note
+
+== 7. Lưu kết quả ==
+App -> Output : result.json\n(objects + features + global_context)
+App -> Output : relationships.json\n(filtered triplets)
+App -> Output : result.jpg\n(annotated image)
+
+== 8. Hiển thị kết quả ==
+App -> App : load_and_display_objects()
+App -> App : load_and_display_relationships()
+App -> App : draw_relationship_boxes_on_image()
+App --> User : Hiển thị kết quả trên GUI
+
+@enduml
