@@ -11,12 +11,13 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 SAFE_ZONE_CONFIG_PATH = Path("safe_zone_config.json")
 
 import detect_objects as detection_pipeline
 from RL.reinforcement_learning import RELATION_CLASSES
+from RL.safety_classifier import SafetyClassifier, SafetyLevel
 from models import build_model
 from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
@@ -370,6 +371,7 @@ class VideoRelationPipeline:
         min_confidence: float = 0.55,
         announce_min_confidence: float = 0.6,
         safe_zone_config: Path = SAFE_ZONE_CONFIG_PATH,
+        safety_classifier_enabled: bool = True,
     ):
         self.rel_engine = RelTRInferenceEngine(reltr_checkpoint)
         self.yolo_model = detection_pipeline.yolo_model
@@ -377,6 +379,19 @@ class VideoRelationPipeline:
         self.min_confidence = min_confidence
         self.announce_threshold = announce_min_confidence
         self.safe_zone = SafeZoneMonitor(safe_zone_config)
+        
+        # Khởi tạo Safety Classifier (3 tầng: White/Black/Gray list + LLM + Local Rules)
+        self.safety_classifier = None
+        if safety_classifier_enabled:
+            try:
+                self.safety_classifier = SafetyClassifier()
+                print("✅ Safety Classifier initialized (3-tier system enabled)")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not initialize Safety Classifier: {e}")
+        
+        # Tracking cảnh báo
+        self.alert_history = []
+        self.max_alert_history = 100
 
     def process_video(
         self,
@@ -423,11 +438,51 @@ class VideoRelationPipeline:
                     rel for rel in self.rel_engine.infer(frame, objects, global_context)
                     if rel.get("confidence", 0.0) >= self.min_confidence
                 ]
+                
+                # Phân loại relationships với Safety Classifier (3 tầng)
+                safety_alerts = []
+                if self.safety_classifier and relations:
+                    classified_relations = self.safety_classifier.classify_batch(relations)
+                    for rel in classified_relations:
+                        safety_level = rel.get("safety_level", "safe")
+                        if safety_level in ["dangerous", "suspicious"]:
+                            safety_alerts.append({
+                                "subject": rel.get("subject", ""),
+                                "relation": rel.get("relation", ""),
+                                "object": rel.get("object", ""),
+                                "level": safety_level,
+                                "confidence": rel.get("safety_confidence", 0.0),
+                                "explanation": rel.get("safety_explanation", ""),
+                                "frame": frame_idx
+                            })
+                    relations = classified_relations
+                
                 for rel in relations:
                     key = f"{rel.get('subject','unknown')}|{rel.get('relation','')}|{rel.get('object','unknown')}"
                     relation_counter[key] += 1
-                polygon, intrusions, danger_active = self.safe_zone.evaluate(frame.shape, objects, frame_idx)
-                annotated = self._draw_annotations(frame.copy(), objects, relations, polygon, intrusions, danger_active)
+                
+                # Bỏ phần safe zone - chỉ chạy video bình thường
+                polygon, intrusions, danger_active = None, [], False
+                
+                # Kiểm tra cảnh báo an toàn
+                has_danger = any(alert.get("level") == "dangerous" for alert in safety_alerts)
+                has_suspicious = any(alert.get("level") == "suspicious" for alert in safety_alerts)
+                
+                # Lưu vào lịch sử cảnh báo
+                if safety_alerts:
+                    self.alert_history.extend(safety_alerts)
+                    if len(self.alert_history) > self.max_alert_history:
+                        self.alert_history = self.alert_history[-self.max_alert_history:]
+                
+                annotated = self._draw_annotations(
+                    frame.copy(),
+                    objects,
+                    relations,
+                    polygon,
+                    intrusions,
+                    danger_active,
+                    safety_alerts=safety_alerts
+                )
                 if writer is None:
                     height, width = annotated.shape[:2]
                     writer = cv2.VideoWriter(
@@ -447,10 +502,21 @@ class VideoRelationPipeline:
                         "intrusions": intrusions,
                         "safe_zone": polygon.tolist() if polygon is not None else [],
                         "danger": danger_active,
+                        "safety_alerts": safety_alerts,
+                        "has_danger": has_danger,
+                        "has_suspicious": has_suspicious,
                     })
         finally:
             if writer is not None:
                 writer.release()
+            # Thống kê cảnh báo
+            alert_stats = {
+                "total_alerts": len(self.alert_history),
+                "dangerous_count": sum(1 for a in self.alert_history if a.get("level") == "dangerous"),
+                "suspicious_count": sum(1 for a in self.alert_history if a.get("level") == "suspicious"),
+                "alerts": self.alert_history[-20:] if len(self.alert_history) > 20 else self.alert_history
+            }
+            
             stats_payload = {
                 "objects": [
                     {"label": label, "count": count}
@@ -466,6 +532,7 @@ class VideoRelationPipeline:
                     for key, count in relation_counter.most_common()
                     for parts in [key.split("|")]
                 ],
+                "safety_alerts": alert_stats,
             }
             with open(stats_path, "w", encoding="utf-8") as f:
                 json.dump(stats_payload, f, ensure_ascii=False, indent=2)
@@ -522,7 +589,7 @@ class VideoRelationPipeline:
             objects.append(obj)
         return objects
 
-    def _draw_annotations(self, frame, objects, relations, safe_zone=None, intrusions=None, danger_active=False):
+    def _draw_annotations(self, frame, objects, relations, safe_zone=None, intrusions=None, danger_active=False, safety_alerts=None):
         intrusions = intrusions or []
         intrusion_lookup = {}
         for alert in intrusions:
@@ -579,11 +646,288 @@ class VideoRelationPipeline:
                 txt = f"- {alert.get('class', 'object')} @ {alert.get('distance_m', 0):.1f}m"
                 cv2.putText(frame, txt, (25, frame.shape[0] - 60 - idx * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        for idx, rel in enumerate(relations[:10]):
-            text = f"{rel.get('subject', '?')} {rel.get('relation', '?')} {rel.get('object', '?')} ({rel.get('confidence', 0.0):.2f})"
-            cv2.putText(frame, text, (15, 25 + 20 * idx), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        # Vẽ relationships với đường nối giữa subject và object
+        self._draw_relationship_lines(frame, objects, relations)
+        
+        # Vẽ cảnh báo an toàn (nếu có)
+        if safety_alerts:
+            self._draw_safety_alerts(frame, safety_alerts)
+        
         return frame
 
+    def _draw_relationship_lines(self, frame, objects, relations):
+        """Vẽ đường nối giữa subject và object với relation text trên đường"""
+        if not relations or not objects:
+            return
+        
+        # Tạo lookup dictionary cho objects
+        objects_by_track_id = {}
+        objects_by_class = {}
+        for obj in objects:
+            track_id = obj.get('track_id')
+            class_name = obj.get('class', '').lower()
+            if track_id is not None:
+                objects_by_track_id[track_id] = obj
+            if class_name:
+                if class_name not in objects_by_class:
+                    objects_by_class[class_name] = []
+                objects_by_class[class_name].append(obj)
+        
+        # Màu sắc cho các relationships (BGR format)
+        colors = [
+            (0, 255, 255),    # Cyan
+            (255, 0, 255),    # Magenta
+            (255, 255, 0),    # Yellow
+            (0, 165, 255),    # Orange
+            (255, 0, 0),      # Blue
+            (0, 255, 0),      # Green
+            (128, 0, 128),    # Purple
+            (255, 192, 203),  # Pink
+        ]
+        
+        # Vẽ từng relationship
+        for idx, rel in enumerate(relations[:15]):  # Giới hạn 15 relationships để tránh quá tải
+            subject_name = rel.get('subject', '').lower()
+            object_name = rel.get('object', '').lower()
+            relation_text = rel.get('relation', '')
+            confidence = rel.get('confidence', 0.0)
+            
+            # Tìm subject object
+            subject_obj = None
+            subject_track_id = rel.get('subject_track_id')
+            if subject_track_id is not None and subject_track_id in objects_by_track_id:
+                subject_obj = objects_by_track_id[subject_track_id]
+            elif subject_name in objects_by_class and objects_by_class[subject_name]:
+                subject_obj = objects_by_class[subject_name][0]
+            
+            # Tìm object object
+            object_obj = None
+            object_track_id = rel.get('object_track_id')
+            if object_track_id is not None and object_track_id in objects_by_track_id:
+                object_obj = objects_by_track_id[object_track_id]
+            elif object_name in objects_by_class and objects_by_class[object_name]:
+                object_obj = objects_by_class[object_name][0]
+            
+            # Nếu không tìm thấy cả hai, bỏ qua
+            if not subject_obj or not object_obj:
+                continue
+            
+            # Lấy bounding boxes
+            sub_bbox = subject_obj.get('bbox', [])
+            obj_bbox = object_obj.get('bbox', [])
+            if len(sub_bbox) < 4 or len(obj_bbox) < 4:
+                continue
+            
+            sub_x1, sub_y1, sub_x2, sub_y2 = map(int, sub_bbox[:4])
+            obj_x1, obj_y1, obj_x2, obj_y2 = map(int, obj_bbox[:4])
+            
+            # Tính center points
+            sub_center = ((sub_x1 + sub_x2) // 2, (sub_y1 + sub_y2) // 2)
+            obj_center = ((obj_x1 + obj_x2) // 2, (obj_y1 + obj_y2) // 2)
+            
+            # Chọn màu
+            color = colors[idx % len(colors)]
+            
+            # Vẽ mũi tên từ subject đến object (đậm, dễ nhìn)
+            line_thickness = 3
+            cv2.arrowedLine(
+                frame,
+                sub_center,
+                obj_center,
+                color,
+                line_thickness,
+                tipLength=0.15,
+                line_type=cv2.LINE_AA
+            )
+            
+            # Tính điểm giữa để đặt text
+            mid_x = (sub_center[0] + obj_center[0]) // 2
+            mid_y = (sub_center[1] + obj_center[1]) // 2
+            
+            # Chuẩn bị text để hiển thị
+            display_text = f"{relation_text}"
+            if confidence > 0:
+                display_text += f" ({confidence:.2f})"
+            
+            # Tính kích thước text
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            font_thickness = 2
+            (text_width, text_height), baseline = cv2.getTextSize(display_text, font, font_scale, font_thickness)
+            
+            # Vẽ background cho text (để dễ đọc)
+            padding = 5
+            text_x = mid_x - text_width // 2
+            text_y = mid_y - text_height // 2 - 10
+            
+            # Đảm bảo text không ra ngoài frame
+            text_x = max(padding, min(text_x, frame.shape[1] - text_width - padding))
+            text_y = max(text_height + padding, min(text_y, frame.shape[0] - padding))
+            
+            # Vẽ background rectangle
+            bg_color = (0, 0, 0)  # Đen
+            cv2.rectangle(
+                frame,
+                (text_x - padding, text_y - text_height - padding),
+                (text_x + text_width + padding, text_y + baseline + padding),
+                bg_color,
+                -1
+            )
+            
+            # Vẽ text với màu sáng
+            text_color = (255, 255, 255)  # Trắng
+            cv2.putText(
+                frame,
+                display_text,
+                (text_x, text_y),
+                font,
+                font_scale,
+                text_color,
+                font_thickness,
+                cv2.LINE_AA
+            )
+
+    def _draw_safety_alerts(self, frame, safety_alerts):
+        """Vẽ cảnh báo an toàn trên frame với font hỗ trợ tiếng Việt"""
+        if not safety_alerts or not self.safety_classifier:
+            return
+        
+        # Phân loại cảnh báo theo mức độ
+        dangerous_alerts = [a for a in safety_alerts if a.get("level") == "dangerous"]
+        suspicious_alerts = [a for a in safety_alerts if a.get("level") == "suspicious"]
+        
+        # Chuyển frame sang PIL để vẽ text tiếng Việt
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(frame_rgb)
+        draw = ImageDraw.Draw(pil_image)
+        
+        # Load font hỗ trợ tiếng Việt
+        try:
+            # Thử các font phổ biến trên Windows
+            font_paths = [
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/tahoma.ttf",
+                "C:/Windows/Fonts/calibri.ttf",
+            ]
+            font_large = None
+            font_medium = None
+            font_small = None
+            
+            for font_path in font_paths:
+                if Path(font_path).exists():
+                    try:
+                        font_large = ImageFont.truetype(font_path, 36)  # Font lớn cho tiêu đề
+                        font_medium = ImageFont.truetype(font_path, 24)  # Font vừa cho chi tiết
+                        font_small = ImageFont.truetype(font_path, 20)   # Font nhỏ
+                        break
+                    except:
+                        continue
+            
+            if font_large is None:
+                # Fallback về font mặc định
+                font_large = ImageFont.load_default()
+                font_medium = ImageFont.load_default()
+                font_small = ImageFont.load_default()
+        except:
+            font_large = ImageFont.load_default()
+            font_medium = ImageFont.load_default()
+            font_small = ImageFont.load_default()
+        
+        # Vẽ cảnh báo nguy hiểm (ưu tiên cao nhất)
+        if dangerous_alerts:
+            alert_info = self.safety_classifier.get_alert_info(SafetyLevel.DANGEROUS)
+            # Chuyển đổi màu từ RGB sang BGR (OpenCV dùng BGR)
+            color_rgb = alert_info["color"]
+            color = (color_rgb[2], color_rgb[1], color_rgb[0])  # RGB -> BGR
+            message = alert_info["message"]
+            
+            # Vẽ banner cảnh báo ở trên cùng (lớn hơn)
+            banner_height = 100
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (frame.shape[1], banner_height), color, -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+            
+            # Chuyển lại sang PIL sau khi vẽ banner
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(frame_rgb)
+            draw = ImageDraw.Draw(pil_image)
+            
+            # Vẽ text cảnh báo chính (lớn, đậm)
+            bbox = draw.textbbox((0, 0), message, font=font_large)
+            text_width = bbox[2] - bbox[0]
+            text_x = (frame.shape[1] - text_width) // 2
+            text_y = 20
+            
+            # Vẽ outline (để text nổi bật)
+            for adj in range(-2, 3):
+                for adj2 in range(-2, 3):
+                    draw.text((text_x + adj, text_y + adj2), message, font=font_large, fill=(0, 0, 0))
+            draw.text((text_x, text_y), message, font=font_large, fill=(255, 255, 255))
+            
+            # Liệt kê các cảnh báo nguy hiểm
+            y_offset = 110
+            for idx, alert in enumerate(dangerous_alerts[:3]):  # Tối đa 3 cảnh báo
+                subject = alert.get('subject', '?')
+                relation = alert.get('relation', '?')
+                obj = alert.get('object', '?')
+                text = f"⚠️ {subject} {relation} {obj}"
+                
+                # Vẽ outline
+                for adj in range(-1, 2):
+                    for adj2 in range(-1, 2):
+                        draw.text((22 + adj, y_offset + idx * 35 + adj2), text, font=font_medium, fill=(0, 0, 0))
+                draw.text((22, y_offset + idx * 35), text, font=font_medium, fill=(255, 255, 255))
+        
+        # Vẽ cảnh báo nghi ngờ (mức độ thấp hơn)
+        elif suspicious_alerts:
+            alert_info = self.safety_classifier.get_alert_info(SafetyLevel.SUSPICIOUS)
+            # Chuyển đổi màu từ RGB sang BGR (OpenCV dùng BGR)
+            color_rgb = alert_info["color"]
+            color = (color_rgb[2], color_rgb[1], color_rgb[0])  # RGB -> BGR: [255, 165, 0] -> [0, 165, 255] (cam)
+            message = alert_info["message"]
+            
+            # Vẽ banner cảnh báo nhẹ (lớn hơn)
+            banner_height = 80
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (frame.shape[1], banner_height), color, -1)
+            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+            
+            # Chuyển lại sang PIL sau khi vẽ banner
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(frame_rgb)
+            draw = ImageDraw.Draw(pil_image)
+            
+            # Vẽ text cảnh báo chính
+            bbox = draw.textbbox((0, 0), message, font=font_medium)
+            text_width = bbox[2] - bbox[0]
+            text_x = (frame.shape[1] - text_width) // 2
+            text_y = 20
+            
+            # Vẽ outline
+            for adj in range(-1, 2):
+                for adj2 in range(-1, 2):
+                    draw.text((text_x + adj, text_y + adj2), message, font=font_medium, fill=(0, 0, 0))
+            draw.text((text_x, text_y), message, font=font_medium, fill=(255, 255, 255))
+            
+            # Liệt kê các cảnh báo nghi ngờ
+            y_offset = 90
+            for idx, alert in enumerate(suspicious_alerts[:2]):  # Tối đa 2 cảnh báo
+                subject = alert.get('subject', '?')
+                relation = alert.get('relation', '?')
+                obj = alert.get('object', '?')
+                text = f"⚠️ {subject} {relation} {obj}"
+                
+                # Vẽ outline
+                for adj in range(-1, 2):
+                    for adj2 in range(-1, 2):
+                        draw.text((22 + adj, y_offset + idx * 30 + adj2), text, font=font_small, fill=(0, 0, 0))
+                draw.text((22, y_offset + idx * 30), text, font=font_small, fill=(255, 255, 255))
+        
+        # Chuyển lại sang OpenCV format
+        frame_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        frame[:] = frame_bgr[:]
+    
     @staticmethod
     def _read_video_fps(video_path: str) -> float:
         capture = cv2.VideoCapture(video_path)

@@ -18,6 +18,7 @@
 - [Cấu trúc dự án](#-cấu-trúc-dự-án)
 - [Cấu hình](#-cấu-hình)
 - [Kết quả](#-kết-quả)
+- [Hệ thống Phân loại An toàn 3 Tầng](#-hệ-thống-phân-loại-an-toàn-3-tầng)
 - [Cập nhật và cải tiến](#-cập-nhật-và-cải-tiến)
 
 ---
@@ -37,6 +38,18 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 ---
 
 ## 🏗️ Kiến trúc hệ thống
+
+### Tổng quan kiến trúc
+
+Hệ thống bao gồm 2 luồng chính:
+
+1. **Video Processing Pipeline**: Xử lý video với Safety Analysis
+   - Input: Video file
+   - Output: Video đã annotate + JSON thống kê an toàn
+
+2. **RL Training Pipeline**: Training model với Reinforcement Learning
+   - Input: Images + Relationships
+   - Output: Trained model + Metrics
 
 ### Sơ đồ luồng hoạt động chi tiết
 
@@ -76,8 +89,46 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 │  │  • Relationships: [{subject, relation, object, confidence}]                  │           │
 │  │  • Long-tail analysis: Tính tần suất quan hệ                                 │           │
 │  └──────────────────────────────────────────────────────────────────────────────┘           │
+│        │                                                                                    │
+│        ├──────────────────────────────────────────────────────────────────────┐             │
+│        │                                                                      │             │
+│        │  [Video Mode - Safety Analysis Enabled]                              │             │
+│        │        │                                                             │             │
+│        │        ▼                                                             │             │
+│        │  ┌──────────────────────────────────────────────────────────────┐   │             │
+│        │  │  Safety Classifier (3-Tier System) ⭐                         │   │             │
+│        │  │  • Tầng 1: White/Black/Gray List                              │   │             │
+│        │  │    - White List: An toàn (SAFE)                               │   │             │
+│        │  │    - Black List: Nguy hiểm (DANGEROUS)                        │   │             │
+│        │  │    - Gray List: Không rõ → Chuyển Tầng 2                      │   │             │
+│        │  │  • Tầng 2: LLM Semantic Reasoning                             │   │             │
+│        │  │    - Hỏi OpenAI/Gemini: "Hành động này nguy hiểm không?"     │   │             │
+│        │  │    - Cache responses trong llm_safety_cache.json              │   │             │
+│        │  │    - Parse: SAFE/SUSPICIOUS/DANGEROUS                         │   │             │
+│        │  │  • Tầng 3: Local Rules Database                               │   │             │
+│        │  │    - Kiểm tra local_safety_rules.json (ưu tiên cao nhất)     │   │             │
+│        │  │    - Học từ phản hồi người dùng (Human-in-the-loop)            │   │             │
+│        │  │  • Output: Safety Level + Confidence + Explanation             │   │             │
+│        │  └──────────────────────────────────────────────────────────────┘   │             │
+│        │        │                                                             │             │
+│        │        ▼                                                             │             │
+│        │  ┌──────────────────────────────────────────────────────────────┐   │             │
+│        │  │  Video Annotation & Alert Rendering                          │   │             │
+│        │  │  • Vẽ relationships với mũi tên và text                     │   │             │
+│        │  │  • Hiển thị cảnh báo an toàn:                                │   │             │
+│        │  │    - DANGEROUS: Banner đỏ "NGUY HIỂM - Cần can thiệp ngay!"  │   │             │
+│        │  │    - SUSPICIOUS: Banner cam "Cảnh báo nhẹ - Cần kiểm tra"    │   │             │
+│        │  │  • Lưu thống kê vào *_summary.json                           │   │             │
+│        │  │  • Output: Annotated video + JSON statistics                  │   │             │
+│        │  └──────────────────────────────────────────────────────────────┘   │             │
+│        │                                                                      │             │
+│        └──────────────────────────────────────────────────────────────────────┘             │
 │                                                                                             │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        ▼
+                                        │
+                        [Image Mode - RL Training]
                                         │
                                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -282,7 +333,20 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 
 ### Tóm tắt luồng hoạt động
 
-1. **VRD Pipeline**: Input image → YOLO detection → Region Clip classficication  → RelTR relationship prediction → Scene Graph
+#### Luồng xử lý Video (VideoRelationPipeline)
+
+1. **VRD Pipeline**: Input video frame → YOLO detection → Region Clip classification → RelTR relationship prediction → Scene Graph
+2. **Safety Analysis** (nếu enabled):
+   - **Tầng 1**: Kiểm tra White/Black List → Nếu match → Return SAFE/DANGEROUS
+   - **Tầng 3**: Kiểm tra Local Rules (ưu tiên cao nhất) → Nếu có → Return từ rule
+   - **Tầng 2**: Nếu không match → Hỏi LLM (OpenAI/Gemini) → Cache response
+   - **Default**: Nếu LLM không hoạt động → Return SUSPICIOUS
+3. **Video Annotation**: Vẽ relationships và cảnh báo an toàn lên frame
+4. **Output**: Video đã annotate + JSON thống kê an toàn
+
+#### Luồng RL Training (Reinforcement Learning)
+
+1. **VRD Pipeline**: Input image → YOLO detection → Region Clip classification → RelTR relationship prediction → Scene Graph
 2. **RL State**: Xây dựng state vector 5D từ metrics hiện tại
 3. **DQN Decision**: Agent quyết định số lượng variations cần sinh cho mỗi relationship
 4. **GenAI Generation**: Stable Diffusion sinh ảnh từ relationship triplets với prompt variations
@@ -324,6 +388,19 @@ Sử dụng **Reinforcement Learning (DQN)** để:
 ### 5. Experiment Management
 - Lưu trữ metrics, plots, models theo experiment
 - So sánh và export kết quả
+
+### 6. Video Processing với Safety Analysis
+- Xử lý video frame-by-frame với YOLO + RelTR
+- Phân tích relationships và đánh giá mức độ nguy hiểm
+- Hiển thị cảnh báo trực quan trên video (banner đỏ/cam)
+- Xuất thống kê an toàn trong JSON
+
+### 7. Hệ thống Phân loại An toàn 3 Tầng ⭐ MỚI
+- **Tầng 1**: White/Black/Gray List - Phân loại nhanh các hành động đã biết
+- **Tầng 2**: LLM Semantic Reasoning - Sử dụng OpenAI/Gemini để đánh giá ngữ nghĩa
+- **Tầng 3**: Local Rules Database - Học từ phản hồi người dùng (Human-in-the-loop)
+- Tích hợp tự động với `VideoRelationPipeline`
+- Cache LLM responses để tiết kiệm chi phí API
 
 ---
 
@@ -403,9 +480,44 @@ pip install imagehash
 
 # Sentence similarity
 pip install sentence-transformers
+
+# Environment variables cho Safety System
+pip install python-dotenv
 ```
 
-### Bước 9: Download model weights
+### Bước 9: Cấu hình API Key cho Safety System (Tùy chọn)
+
+Nếu muốn sử dụng LLM Safety Analyzer (Tầng 2), cần cấu hình API key:
+
+**Cách 1: Tạo file `.env` (Khuyến nghị)**
+```bash
+# Tạo file .env ở thư mục gốc
+# Windows
+type nul > .env
+
+# Linux/Mac
+touch .env
+```
+
+Mở file `.env` và thêm:
+```
+OPENAI_API_KEY=your_openai_api_key_here
+# hoặc
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+**Cách 2: Environment variables**
+```bash
+# Windows PowerShell
+$env:OPENAI_API_KEY="your-api-key-here"
+
+# Linux/Mac
+export OPENAI_API_KEY="your-api-key-here"
+```
+
+**Lưu ý**: Nếu không có API key, hệ thống vẫn hoạt động nhưng sẽ mặc định về "SUSPICIOUS" cho các hành động không biết (không hỏi LLM).
+
+### Bước 10: Download model weights
 
 ```bash
 # YOLO weights (nếu chưa có)
@@ -452,9 +564,38 @@ python detect_objects.py <path_to_image>
 python boundingbox_objects.py --yolo_json converted_bboxes.json --img_path <image> --resume checkpoint.pth
 ```
 
-### Chạy video demo
-```bash
-# Trong app.py hoặc app_console.py, chọn video demo option
+### Chạy video với Safety Analysis
+
+```python
+from video_relation_pipeline import VideoRelationPipeline
+
+# Khởi tạo pipeline với safety classifier enabled
+pipeline = VideoRelationPipeline(
+    safety_classifier_enabled=True  # Bật hệ thống cảnh báo
+)
+
+# Xử lý video
+result = pipeline.process_video(
+    video_path="home_video.mp4",
+    output_dir="video_outputs",
+    frame_stride=2  # Xử lý mỗi 2 frames
+)
+
+# Kết quả:
+# - Video đã annotate: video_outputs/home_video_relations.avi
+# - Thống kê: video_outputs/home_video_summary.json
+```
+
+**Xem thống kê an toàn**:
+```python
+import json
+
+with open("video_outputs/home_video_summary.json", "r", encoding="utf-8") as f:
+    stats = json.load(f)
+    alerts = stats["safety_alerts"]
+    print(f"Tổng cảnh báo: {alerts['total_alerts']}")
+    print(f"Nguy hiểm: {alerts['dangerous_count']}")
+    print(f"Nghi ngờ: {alerts['suspicious_count']}")
 ```
 
 ---
@@ -480,7 +621,13 @@ yolov11/
 │   ├── experience_manager.py       # Replay buffer management
 │   ├── model_manager.py            # Model checkpointing
 │   ├── training_evaluator.py       # Evaluation metrics
-│   └── data_augmentation.py        # Data augmentation
+│   ├── data_augmentation.py        # Data augmentation
+│   │
+│   ├── safety_classifier.py        # ⭐ Safety System: 3-tier classifier
+│   ├── llm_safety_analyzer.py      # ⭐ Safety System: LLM integration
+│   ├── local_rules_db.py           # ⭐ Safety System: Local rules DB
+│   ├── safety_config.json          # ⭐ Safety System: Configuration
+│   └── README_SAFETY_SYSTEM.md     # ⭐ Safety System: Documentation
 │
 ├── models/                     # Model definitions
 │   ├── reltr.py                # RelTR model
@@ -510,6 +657,9 @@ yolov11/
 ├── checkpoint.pth             # RelTR checkpoint
 ├── reltr_finetuned.pth        # Fine-tuned RelTR
 ├── requirements.txt           # Python dependencies
+├── .env                       # API keys (tạo file này, không commit)
+├── llm_safety_cache.json      # LLM cache (tự động tạo)
+├── local_safety_rules.json   # Local safety rules (tự động tạo)
 └── README.md                  # This file
 ```
 
@@ -582,6 +732,125 @@ experiments/
     ├── plots/              # Visualization plots
     └── metadata.json       # Experiment config
 ```
+
+---
+
+## 🛡️ Hệ thống Phân loại An toàn 3 Tầng
+
+Hệ thống phân loại an toàn được tích hợp vào `VideoRelationPipeline` để phát hiện và cảnh báo các hành động nguy hiểm trong video, đặc biệt là trong môi trường gia đình có trẻ em.
+
+### Kiến trúc 3 Tầng
+
+#### Sơ đồ luồng xử lý Safety System
+
+```
+Relationship từ RelTR: {subject, relation, object}
+         │
+         ▼
+┌────────────────────────────────────────────────────────┐
+│  SafetyClassifier.classify()                          │
+└────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌────────────────────────────────────────────────────────┐
+│  Tầng 3: Local Rules Database (Ưu tiên cao nhất)      │
+│  • Kiểm tra local_safety_rules.json                   │
+│  • Nếu có rule → Return level từ rule                 │
+│  • Nếu không → Tiếp tục                               │
+└────────────────────────────────────────────────────────┘
+         │
+         ├─ Có rule? → Return (SAFE/SUSPICIOUS/DANGEROUS)
+         │
+         └─ Không có rule? ▼
+┌────────────────────────────────────────────────────────┐
+│  Tầng 1: White/Black/Gray List                       │
+│  • Kiểm tra Black List → Nếu match → DANGEROUS        │
+│  • Kiểm tra White List → Nếu match → SAFE             │
+│  • Không match → Gray List → Chuyển Tầng 2            │
+└────────────────────────────────────────────────────────┘
+         │
+         ├─ Match Black? → Return DANGEROUS
+         ├─ Match White? → Return SAFE
+         │
+         └─ Không match? ▼
+┌────────────────────────────────────────────────────────┐
+│  Tầng 2: LLM Semantic Reasoning                       │
+│  • Kiểm tra cache (llm_safety_cache.json)             │
+│  • Nếu có cache → Return từ cache                     │
+│  • Nếu không → Gọi LLM API (OpenAI/Gemini)            │
+│    - Build prompt: "Hành động này nguy hiểm không?"   │
+│    - Parse response: SAFE/SUSPICIOUS/DANGEROUS        │
+│    - Lưu vào cache                                     │
+│  • Nếu LLM không hoạt động → Default SUSPICIOUS      │
+└────────────────────────────────────────────────────────┘
+         │
+         ▼
+Return: (SafetyLevel, confidence, explanation)
+```
+
+#### Tầng 1: White/Black/Gray List
+- **White List**: Các hành động an toàn (ví dụ: `person sitting on chair`)
+- **Black List**: Các hành động nguy hiểm (ví dụ: `child holding knife`)
+- **Gray List**: Các hành động không rõ ràng → Chuyển sang Tầng 2
+
+#### Tầng 2: LLM Semantic Reasoning
+- Sử dụng OpenAI/Gemini để đánh giá ngữ nghĩa
+- Hỏi LLM: "Hành động này có nguy hiểm không?"
+- Cache responses trong `llm_safety_cache.json` để tiết kiệm chi phí API
+- Hỗ trợ nhiều model: `gpt-3.5-turbo`, `gpt-4o`, `gpt-5.2`, `gemini-pro`, etc.
+
+#### Tầng 3: Local Rules Database
+- Học từ phản hồi người dùng (Human-in-the-loop)
+- **Ưu tiên cao nhất** - kiểm tra trước cả white/black list
+- Lưu trong `local_safety_rules.json`
+- Tự động track `usage_count` cho mỗi rule
+
+### Sử dụng
+
+```python
+from video_relation_pipeline import VideoRelationPipeline
+
+# Bật safety classifier
+pipeline = VideoRelationPipeline(
+    safety_classifier_enabled=True
+)
+
+# Xử lý video
+result = pipeline.process_video("video.mp4")
+```
+
+### Cấu hình
+
+File `RL/safety_config.json` chứa:
+- `white_list`: Danh sách hành động an toàn
+- `black_list`: Danh sách hành động nguy hiểm
+- `llm_enabled`: Bật/tắt LLM
+- `llm_provider`: "openai" hoặc "gemini"
+- `llm_model`: Model name (ví dụ: "gpt-3.5-turbo")
+
+### Thêm quy tắc cục bộ
+
+```python
+from RL.local_rules_db import LocalRulesDatabase
+from RL.llm_safety_analyzer import SafetyLevel
+
+db = LocalRulesDatabase()
+db.add_rule(
+    subject="child",
+    relation="playing with",
+    object_name="toy",
+    level=SafetyLevel.SAFE,
+    source="user_feedback"
+)
+```
+
+### Xem tài liệu chi tiết
+
+Xem file [`RL/README_SAFETY_SYSTEM.md`](RL/README_SAFETY_SYSTEM.md) để biết thêm chi tiết về:
+- Cách hoạt động của từng tầng
+- Cấu hình chi tiết
+- Ví dụ sử dụng
+- Luồng xử lý
 
 ---
 
@@ -1654,6 +1923,35 @@ with open('experiments/exp_001/metrics/training_metrics_epoch_01.json') as f:
     print(f"mR@100: {data['relationship_metrics']['mr@100']:.4f}")
 ```
 
+#### 5. **Hệ thống Phân loại An toàn 3 Tầng** ✅
+- **Mô tả**: Hệ thống phát hiện và cảnh báo các hành động nguy hiểm trong video
+- **Tích hợp**: Tự động tích hợp với `VideoRelationPipeline`
+- **3 Tầng**:
+  1. White/Black/Gray List - Phân loại nhanh
+  2. LLM Semantic Reasoning - Đánh giá ngữ nghĩa (OpenAI/Gemini)
+  3. Local Rules Database - Học từ người dùng
+- **Tính năng**:
+  - Cache LLM responses để tiết kiệm chi phí
+  - Hiển thị cảnh báo trực quan trên video (banner đỏ/cam)
+  - Thống kê an toàn trong JSON output
+  - Hỗ trợ thêm quy tắc cục bộ từ phản hồi người dùng
+- **Cấu hình**: File `RL/safety_config.json`
+- **Tài liệu**: Xem [`RL/README_SAFETY_SYSTEM.md`](RL/README_SAFETY_SYSTEM.md)
+
+**Ví dụ sử dụng**:
+```python
+from video_relation_pipeline import VideoRelationPipeline
+
+pipeline = VideoRelationPipeline(safety_classifier_enabled=True)
+result = pipeline.process_video("video.mp4")
+
+# Xem thống kê an toàn
+import json
+with open(result["summary"], "r") as f:
+    stats = json.load(f)
+    print(f"Cảnh báo: {stats['safety_alerts']['total_alerts']}")
+```
+
 ---
 
 ## 📝 License
@@ -1676,4 +1974,6 @@ with open('experiments/exp_001/metrics/training_metrics_epoch_01.json') as f:
 - [RelTR](https://github.com/yrcong/RelTR) - Scene Graph Generation
 - [Stable Diffusion](https://github.com/CompVis/stable-diffusion) - Image Generation
 - [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) - Open-Vocabulary Detection
+- [OpenAI](https://openai.com/) - GPT Models cho Safety Analysis
+- [Google Gemini](https://gemini.google.com/) - Gemini Models cho Safety Analysis
 

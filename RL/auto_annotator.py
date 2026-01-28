@@ -93,35 +93,49 @@ class AutoAnnotator:
                 if groundingdino_config is None:
                     # Common paths
                     candidates = [
-                        "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",
-                        "groundingdino/config/GroundingDINO_SwinT_OGC.py",
-                        os.path.expanduser("~/.cache/groundingdino/GroundingDINO_SwinT_OGC.py"),
+                        "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",  # Thư mục GroundingDINO trong project
+                        "groundingdino/config/GroundingDINO_SwinT_OGC.py",  # Relative path
+                        os.path.expanduser("~/.cache/groundingdino/GroundingDINO_SwinT_OGC.py"),  # Cache directory
                     ]
                     for c in candidates:
                         if os.path.exists(c):
                             groundingdino_config = c
+                            print(f"[AutoAnnotator] Found GroundingDINO config at: {c}")
                             break
                 
                 if groundingdino_checkpoint is None:
                     candidates = [
-                        "groundingdino_swint_ogc.pth",
-                        "weights/groundingdino_swint_ogc.pth",
-                        os.path.expanduser("~/.cache/groundingdino/groundingdino_swint_ogc.pth"),
+                        "GroundingDINO/weights/groundingdino_swint_ogc.pth",  # Thư mục GroundingDINO trong project
+                        "groundingdino_swint_ogc.pth",  # Root directory
+                        "weights/groundingdino_swint_ogc.pth",  # Relative weights folder
+                        os.path.expanduser("~/.cache/groundingdino/groundingdino_swint_ogc.pth"),  # Cache directory
                     ]
                     for c in candidates:
                         if os.path.exists(c):
                             groundingdino_checkpoint = c
+                            print(f"[AutoAnnotator] Found GroundingDINO checkpoint at: {c}")
                             break
                 
                 if groundingdino_config and groundingdino_checkpoint:
+                    print(f"[AutoAnnotator] Loading GroundingDINO model...")
+                    print(f"  Config: {groundingdino_config}")
+                    print(f"  Checkpoint: {groundingdino_checkpoint}")
                     self.groundingdino_model = load_model(
                         groundingdino_config,
                         groundingdino_checkpoint,
                         device=self.device,
                     )
+                    print(f"[AutoAnnotator] ✅ GroundingDINO loaded successfully!")
                     return "groundingdino"
+                else:
+                    if not groundingdino_config:
+                        print(f"[AutoAnnotator] ⚠️ GroundingDINO config not found in candidates")
+                    if not groundingdino_checkpoint:
+                        print(f"[AutoAnnotator] ⚠️ GroundingDINO checkpoint not found in candidates")
             except Exception as e:
-                print(f"[AutoAnnotator] Failed to load GroundingDINO: {e}")
+                print(f"[AutoAnnotator] ❌ Failed to load GroundingDINO: {e}")
+                import traceback
+                traceback.print_exc()
         
         # 2. Try OWL-ViT
         if OWLVIT_AVAILABLE:
