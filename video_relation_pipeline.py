@@ -28,6 +28,383 @@ RelationCallback = Optional[Callable[[Dict[str, List[Dict[str, object]]]], None]
 _LOAD_STATE_HAS_ASSIGN = "assign" in inspect.signature(torch.nn.Module.load_state_dict).parameters
 
 
+# ============= SPATIAL VALIDATION FOR RELATIONSHIPS =============
+# Classes that should be considered for spatial relationship validation
+VEHICLE_CLASSES = {
+    "car", "vehicle", "truck", "trunk", "bus", "van", "automobile", "taxi", 
+    "motorcycle", "motorbike", "bicycle", "bike"
+}
+PERSON_CLASSES = {
+    "person", "human", "man", "woman", "child", "boy", "girl", 
+    "people", "pedestrian", "worker"
+}
+
+# Additional class sets for semantic validation
+ANIMAL_CLASSES = {
+    "dog", "cat", "horse", "cow", "sheep", "bird", "elephant", "bear",
+    "zebra", "giraffe", "animal", "pet"
+}
+TRANSPORT_CLASSES = {
+    "skateboard", "surfboard", "snowboard", "bicycle", "bike", "motorcycle",
+    "horse", "elephant", "scooter", "skis", "sled"
+}
+WEARABLE_CLASSES = {
+    "hat", "cap", "shirt", "jacket", "coat", "pants", "shoes", "glasses",
+    "tie", "dress", "helmet", "gloves", "bag", "backpack", "watch", "scarf"
+}
+
+# Spatial relationship mappings
+ABOVE_RELATIONS = {"on", "above", "over", "riding", "sitting on", "standing on", "on back of"}
+BELOW_RELATIONS = {"under", "below", "beneath", "lying on", "laying on"}
+
+# ============= SEMANTIC RELATIONSHIP CORRECTIONS =============
+# Rules: (subject_pattern, object_pattern, wrong_relations) -> correct_relation
+SEMANTIC_CORRECTIONS = [
+    # Animals on transport → should be "riding" not "wearing"
+    {
+        "subject": ANIMAL_CLASSES | PERSON_CLASSES,
+        "object": TRANSPORT_CLASSES,
+        "wrong_relations": {"wearing", "wears", "has", "holding", "carrying"},
+        "correct_relation": "riding",
+        "description": "Living beings ride transport, not wear them"
+    },
+    # Person/animal cannot "wear" large objects
+    {
+        "subject": ANIMAL_CLASSES | PERSON_CLASSES,
+        "object": {"skateboard", "surfboard", "snowboard", "bicycle", "car", "truck", "table", "chair", "bed"},
+        "wrong_relations": {"wearing", "wears"},
+        "correct_relation": "on",
+        "description": "Cannot wear large objects"
+    },
+    # Objects cannot "ride" things - only living beings can
+    {
+        "subject": {"table", "chair", "bottle", "cup", "book", "phone", "laptop"},
+        "object": TRANSPORT_CLASSES | ANIMAL_CLASSES,
+        "wrong_relations": {"riding", "sitting on", "standing on"},
+        "correct_relation": "on",
+        "description": "Inanimate objects are 'on' not 'riding'"
+    },
+]
+
+
+def validate_semantic_relationship(
+    subject_class: str,
+    object_class: str,
+    predicted_relation: str,
+    confidence: float,
+) -> Tuple[str, float]:
+    """
+    Validate and correct semantically invalid relationships.
+    
+    For example: "dog wearing skateboard" → "dog riding skateboard"
+    """
+    subject_lower = subject_class.lower().strip()
+    object_lower = object_class.lower().strip()
+    relation_lower = predicted_relation.lower().strip()
+    
+    for rule in SEMANTIC_CORRECTIONS:
+        # Check if subject matches
+        subject_match = any(s in subject_lower for s in rule["subject"])
+        # Check if object matches
+        object_match = any(o in object_lower for o in rule["object"])
+        # Check if relation is in wrong_relations
+        relation_wrong = relation_lower in rule["wrong_relations"]
+        
+        if subject_match and object_match and relation_wrong:
+            correct = rule["correct_relation"]
+            print(f"🔧 [Semantic] Correcting: '{subject_class} {predicted_relation} {object_class}' → '{correct}'")
+            print(f"   Reason: {rule['description']}")
+            return correct, max(confidence * 0.85, 0.6)
+    
+    return predicted_relation, confidence
+
+
+
+def validate_spatial_relationship(
+    subject_bbox: List[float],
+    object_bbox: List[float],
+    subject_class: str,
+    object_class: str,
+    predicted_relation: str,
+    confidence: float,
+) -> Tuple[str, float]:
+    """
+    Validate and correct predicted spatial relationships based on bounding box positions.
+    
+    This function checks if the predicted relation matches the actual geometric
+    relationship between subject and object. For example, if RelTR predicts
+    "person on car" but the person's bounding box is actually BELOW the car's
+    bounding box (lower y-coordinate = higher in image), it should be "person under car".
+    
+    Args:
+        subject_bbox: [x1, y1, x2, y2] bounding box of subject
+        object_bbox: [x1, y1, x2, y2] bounding box of object
+        subject_class: class name of subject (e.g., "person")
+        object_class: class name of object (e.g., "car")
+        predicted_relation: relation predicted by RelTR
+        confidence: confidence score of prediction
+        
+    Returns:
+        Tuple of (corrected_relation, adjusted_confidence)
+    """
+    if len(subject_bbox) < 4 or len(object_bbox) < 4:
+        return predicted_relation, confidence
+    
+    # Normalize class names
+    subject_lower = subject_class.lower().strip()
+    object_lower = object_class.lower().strip()
+    relation_lower = predicted_relation.lower().strip()
+    
+    # Calculate bounding box centers and positions
+    subj_x1, subj_y1, subj_x2, subj_y2 = subject_bbox[:4]
+    obj_x1, obj_y1, obj_x2, obj_y2 = object_bbox[:4]
+    
+    subj_center_y = (subj_y1 + subj_y2) / 2
+    obj_center_y = (obj_y1 + obj_y2) / 2
+    
+    subj_bottom = subj_y2  # Bottom edge (higher y = lower in image)
+    subj_top = subj_y1     # Top edge
+    obj_bottom = obj_y2
+    obj_top = obj_y1
+    
+    obj_height = max(obj_y2 - obj_y1, 1)
+    subj_height = max(subj_y2 - subj_y1, 1)
+    
+    # Calculate vertical position difference ratio
+    # Positive = subject is below object (in image coordinates where y increases downward)
+    vertical_diff_ratio = (subj_center_y - obj_center_y) / obj_height
+    
+    # Check overlap in horizontal direction
+    horizontal_overlap = (
+        max(0, min(subj_x2, obj_x2) - max(subj_x1, obj_x1)) / 
+        max(min(subj_x2 - subj_x1, obj_x2 - obj_x1), 1)
+    )
+    
+    # Special case: Person and Vehicle interaction
+    is_person_subject = any(p in subject_lower for p in PERSON_CLASSES)
+    is_vehicle_object = any(v in object_lower for v in VEHICLE_CLASSES)
+    
+    if is_person_subject and is_vehicle_object and horizontal_overlap > 0.3:
+        # Person is significantly BELOW the vehicle (center of person is lower in image)
+        # This likely means person is UNDER the vehicle
+        if vertical_diff_ratio > 0.5:  # Subject center is below object center by > 50% of object height
+            if relation_lower in ABOVE_RELATIONS or relation_lower == "near":
+                # Correct to "under" - this is likely a dangerous situation
+                return "under", max(confidence * 0.9, 0.6)
+        
+        # Person is significantly ABOVE the vehicle
+        # This likely means person is ON the vehicle
+        elif vertical_diff_ratio < -0.3:  # Subject center is above object center
+            if relation_lower in BELOW_RELATIONS:
+                # Correct to "on"
+                return "on", max(confidence * 0.9, 0.6)
+    
+    # Check if subject's bottom is below object's bottom (subject is lower in image)
+    # This is a strong indicator that subject is physically UNDER the object
+    if subj_bottom > obj_bottom + obj_height * 0.3:
+        if relation_lower in ABOVE_RELATIONS:
+            # Person detected as "on" car but they're actually below it
+            if is_person_subject and is_vehicle_object:
+                return "under", max(confidence * 0.85, 0.55)
+    
+    # Check if subject's top is above object's top (subject is higher in image)
+    # This indicates subject is physically ABOVE/ON the object
+    if subj_top < obj_top - obj_height * 0.2:
+        if relation_lower in BELOW_RELATIONS:
+            if is_person_subject and is_vehicle_object:
+                return "on", max(confidence * 0.85, 0.55)
+    
+    # Additional check: very small subject compared to object, positioned at bottom
+    size_ratio = (subj_height * (subj_x2 - subj_x1)) / max((obj_height * (obj_x2 - obj_x1)), 1)
+    if size_ratio < 0.3 and subj_center_y > obj_center_y:
+        # Small subject below large object - likely "under" or occluded
+        if relation_lower in ABOVE_RELATIONS and is_person_subject and is_vehicle_object:
+            return "under", max(confidence * 0.8, 0.5)
+    
+    return predicted_relation, confidence
+
+
+def generate_heuristic_relationships(
+    objects: List[Dict[str, object]],
+    existing_relations: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """
+    Generate heuristic-based relationships between person and vehicle when RelTR 
+    doesn't detect them. This is a FALLBACK mechanism for critical safety scenarios.
+    
+    This function analyzes the geometric positions of detected objects and generates
+    spatial relationships like "person under car", "child near vehicle", etc.
+    
+    Args:
+        objects: List of detected objects with 'class' and 'bbox' keys
+        existing_relations: List of relationships already detected by RelTR
+        
+    Returns:
+        List of additional heuristic-generated relationships
+    """
+    heuristic_relations: List[Dict[str, object]] = []
+    
+    if len(objects) < 2:
+        return heuristic_relations
+    
+    # Build dict of existing relationship pairs -> their relations
+    # This allows us to check if we should override with a better spatial relation
+    CRITICAL_SPATIAL_RELATIONS = {"under", "below", "beneath", "on", "above", "behind", "in front of"}
+    
+    existing_pairs_relations = {}  # (subj, obj) -> relation
+    for rel in existing_relations:
+        subj = rel.get('subject', '').lower()
+        obj = rel.get('object', '').lower()
+        relation = rel.get('relation', '').lower()
+        existing_pairs_relations[(subj, obj)] = relation
+        existing_pairs_relations[(obj, subj)] = relation  # Also check reverse
+    
+    # Find all persons and vehicles
+    persons = []
+    vehicles = []
+    
+    for idx, obj in enumerate(objects):
+        # Check both 'class' and 'label' keys since different pipelines use different keys
+        class_name = (obj.get('class') or obj.get('label') or '').lower().strip()
+        bbox = obj.get('bbox', [])
+        if len(bbox) < 4:
+            continue
+        
+        # Debug: print detected classes
+        if idx == 0:
+            print(f"🔍 [Heuristic Debug] Object keys: {list(obj.keys())}, class_name: '{class_name}'")
+            
+        if any(p in class_name for p in PERSON_CLASSES):
+            persons.append((idx, obj))
+        elif any(v in class_name for v in VEHICLE_CLASSES):
+            vehicles.append((idx, obj))
+    
+    print(f"🔍 [Heuristic] Found {len(persons)} persons, {len(vehicles)} vehicles")
+    
+    # Generate relationships for each person-vehicle pair
+    for person_idx, person_obj in persons:
+        person_class = person_obj.get('class', 'person')
+        person_bbox = person_obj.get('bbox', [])
+        
+        if len(person_bbox) < 4:
+            continue
+            
+        px1, py1, px2, py2 = [float(x) for x in person_bbox[:4]]
+        person_center_x = (px1 + px2) / 2
+        person_center_y = (py1 + py2) / 2
+        person_width = px2 - px1
+        person_height = py2 - py1
+        person_area = person_width * person_height
+        
+        for vehicle_idx, vehicle_obj in vehicles:
+            vehicle_class = vehicle_obj.get('class') or vehicle_obj.get('label') or 'car'
+            vehicle_bbox = vehicle_obj.get('bbox', [])
+            
+            if len(vehicle_bbox) < 4:
+                continue
+            
+            # Check if relationship already exists and if we should override
+            pair_key = (person_class.lower(), vehicle_class.lower())
+            existing_relation = existing_pairs_relations.get(pair_key, None)
+            
+            # Only skip if existing relation is already a critical spatial relation
+            if existing_relation and existing_relation in CRITICAL_SPATIAL_RELATIONS:
+                print(f"⏭️ [Heuristic] Skipping {pair_key} - has critical relation '{existing_relation}'")
+                continue
+            
+            if existing_relation:
+                print(f"🔄 [Heuristic] Will override {pair_key} - has weak relation '{existing_relation}'")
+            
+            print(f"📍 [Heuristic] Checking: {person_class} vs {vehicle_class}")
+            print(f"   Person bbox: {person_bbox[:4]}, Vehicle bbox: {vehicle_bbox[:4]}")
+                
+            vx1, vy1, vx2, vy2 = [float(x) for x in vehicle_bbox[:4]]
+            vehicle_center_x = (vx1 + vx2) / 2
+            vehicle_center_y = (vy1 + vy2) / 2
+            vehicle_top = vy1
+            vehicle_bottom = vy2
+            vehicle_width = vx2 - vx1
+            vehicle_height = max(vy2 - vy1, 1)
+            
+            # Calculate overlaps
+            overlap_x = max(0, min(px2, vx2) - max(px1, vx1))
+            overlap_y = max(0, min(py2, vy2) - max(py1, vy1))
+            overlap_area = overlap_x * overlap_y
+            
+            horizontal_overlap_ratio = overlap_x / max(min(person_width, vehicle_width), 1)
+            person_inside_vehicle_ratio = overlap_area / max(person_area, 1)
+            
+            print(f"   overlap_x={overlap_x:.1f}, overlap_y={overlap_y:.1f}")
+            print(f"   h_overlap_ratio={horizontal_overlap_ratio:.2f}, person_inside={person_inside_vehicle_ratio:.2f}")
+            
+            # Determine relationship based on geometry
+            relation = None
+            confidence = 0.0
+            description = ""
+            
+            # === CASE 1: Person UNDER vehicle ===
+            # Scenario A: Person working under elevated vehicle (bbox overlaps)
+            if person_inside_vehicle_ratio > 0.2:  # Relaxed from 0.3
+                person_relative_y = (person_center_y - vehicle_top) / vehicle_height
+                print(f"   person_relative_y={person_relative_y:.2f} (need > 0.4)")
+                if person_relative_y > 0.4:  # Relaxed from 0.5
+                    relation = "under"
+                    confidence = 0.80
+                    description = "Person inside vehicle bbox - working under"
+            
+            # Scenario B: Person is below vehicle (traditional case)
+            if relation is None and horizontal_overlap_ratio > 0.2:
+                if person_center_y > vehicle_bottom - vehicle_height * 0.3:
+                    relation = "under"
+                    confidence = 0.75
+                    description = "Person below vehicle"
+                elif py2 > vehicle_bottom:
+                    relation = "under"
+                    confidence = 0.65
+                    description = "Person partially under vehicle"
+            
+            # === CASE 2: Person BEHIND/IN FRONT OF vehicle ===
+            if relation is None and horizontal_overlap_ratio > 0.1:
+                vertical_distance = abs(person_center_y - vehicle_center_y)
+                if vertical_distance < vehicle_height * 0.7:
+                    if person_center_x > vehicle_center_x + vehicle_width * 0.2:
+                        relation = "behind"
+                        confidence = 0.55
+                        description = "Person in vehicle blind spot"
+                    elif person_center_x < vehicle_center_x - vehicle_width * 0.2:
+                        relation = "in front of"
+                        confidence = 0.55
+                        description = "Person in front of vehicle"
+            
+            # === CASE 3: Person NEAR vehicle (fallback) ===
+            if relation is None:
+                dist_x = max(0, max(px1 - vx2, vx1 - px2))
+                dist_y = max(0, max(py1 - vy2, vy1 - py2))
+                edge_distance = (dist_x**2 + dist_y**2)**0.5
+                proximity_threshold = max(vehicle_width, vehicle_height) * 0.3
+                if edge_distance < proximity_threshold:
+                    relation = "near"
+                    confidence = 0.50
+                    description = "Person in proximity to vehicle"
+            
+            # Add the generated relationship (only if it's a critical spatial relation)
+            if relation is not None and relation in CRITICAL_SPATIAL_RELATIONS:
+                heuristic_relations.append({
+                    'subject': person_class,
+                    'relation': relation,
+                    'object': vehicle_class,
+                    'confidence': confidence,
+                    'subject_track_id': person_obj.get('track_id'),
+                    'object_track_id': vehicle_obj.get('track_id'),
+                    'source': 'heuristic_spatial',
+                    'heuristic_description': description,
+                })
+                existing_pairs_relations[(person_class.lower(), vehicle_class.lower())] = relation
+                print(f"✅ [Heuristic] Generated: {person_class} {relation} {vehicle_class}")
+    
+    return heuristic_relations
+
+
 class SafeZoneMonitor:
     """Monitor and render the 2m safety zone in front of the ego vehicle."""
 
@@ -321,14 +698,39 @@ class RelTRInferenceEngine:
                             continue
                         relation_name = RELATION_CLASSES[int(rel_idx) % len(RELATION_CLASSES)]
                         confidence = float(rel_conf.item() * max(subj_iou.item(), min_iou) * max(obj_iou.item(), min_iou))
+                        
+                        # Apply spatial validation to correct mispredicted relationships
+                        subject_class = objects[int(subj_idx)].get('class', 'unknown')
+                        object_class = objects[int(obj_idx)].get('class', 'unknown')
+                        subject_bbox = objects[int(subj_idx)].get('bbox', [])
+                        object_bbox = objects[int(obj_idx)].get('bbox', [])
+                        
+                        validated_relation, validated_confidence = validate_spatial_relationship(
+                            subject_bbox, object_bbox,
+                            subject_class, object_class,
+                            relation_name, confidence
+                        )
+                        
+                        # Apply semantic validation
+                        final_relation, final_confidence = validate_semantic_relationship(
+                            subject_class, object_class,
+                            validated_relation, validated_confidence
+                        )
+                        
+                        # Determine source
+                        if final_relation != relation_name:
+                            source = 'model_semantic_corrected' if validated_relation == relation_name else 'model_spatial_corrected'
+                        else:
+                            source = 'model'
+                        
                         relationships.append({
-                            'subject': objects[int(subj_idx)].get('class', 'unknown'),
-                            'relation': relation_name,
-                            'object': objects[int(obj_idx)].get('class', 'unknown'),
-                            'confidence': min(confidence, 1.0),
+                            'subject': subject_class,
+                            'relation': final_relation,
+                            'object': object_class,
+                            'confidence': min(final_confidence, 1.0),
                             'subject_track_id': objects[int(subj_idx)].get('track_id'),
                             'object_track_id': objects[int(obj_idx)].get('track_id'),
-                            'source': 'model',
+                            'source': source,
                         })
                     if relationships:
                         return relationships
@@ -348,16 +750,50 @@ class RelTRInferenceEngine:
                 rel_idx = int(vector.argmax().item())
                 confidence = float(vector.max().item())
                 relation_name = RELATION_CLASSES[rel_idx % len(RELATION_CLASSES)]
+                
+                # Apply spatial validation to correct mispredicted relationships
+                subject_class = objects[i].get('class', 'unknown')
+                object_class = objects[j].get('class', 'unknown')
+                subject_bbox = objects[i].get('bbox', [])
+                object_bbox = objects[j].get('bbox', [])
+                
+                validated_relation, validated_confidence = validate_spatial_relationship(
+                    subject_bbox, object_bbox,
+                    subject_class, object_class,
+                    relation_name, confidence
+                )
+                
+                # Apply semantic validation to fix nonsensical relations
+                final_relation, final_confidence = validate_semantic_relationship(
+                    subject_class, object_class,
+                    validated_relation, validated_confidence
+                )
+                
+                # Determine source based on what corrections were made
+                if final_relation != relation_name:
+                    if validated_relation != relation_name:
+                        source = 'fallback_spatial_corrected'
+                    else:
+                        source = 'fallback_semantic_corrected'
+                else:
+                    source = 'fallback'
+                
                 relationships.append({
-                    'subject': objects[i].get('class', 'unknown'),
-                    'relation': relation_name,
-                    'object': objects[j].get('class', 'unknown'),
-                    'confidence': confidence,
+                    'subject': subject_class,
+                    'relation': final_relation,
+                    'object': object_class,
+                    'confidence': final_confidence,
                     'subject_track_id': objects[i].get('track_id'),
                     'object_track_id': objects[j].get('track_id'),
-                    'source': 'model_fallback',
+                    'source': source,
                 })
                 pair_cursor += 1
+        
+        # === HEURISTIC FALLBACK: Generate person-vehicle relationships if RelTR missed them ===
+        heuristic_rels = generate_heuristic_relationships(objects, relationships)
+        if heuristic_rels:
+            relationships.extend(heuristic_rels)
+        
         return relationships
 
 

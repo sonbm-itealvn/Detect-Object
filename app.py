@@ -23,45 +23,58 @@ class ObjectDetectionApp:
         self.root.geometry("1400x800")
         self.root.minsize(800, 600)
         
-        # Ultra Modern Color Scheme - Light & Airy Design
+        # 🎨 Clean Modern Light Theme - Professional & Clear
         self.colors = {
-            # Backgrounds - Light theme với subtle gradients
-            'bg_main': '#f5f7fa',  # Soft gray-blue
-            'bg_sidebar': '#ffffff',  # Pure white sidebar
-            'bg_card': '#ffffff',
-            'bg_card_hover': '#f8fafc',
-            'bg_panel': '#fafbfc',
+            # Backgrounds - Clean white/gray palette
+            'bg_main': '#f8fafc',  # Light gray-blue
+            'bg_sidebar': '#ffffff',  # Pure white
+            'bg_card': '#ffffff',  # White cards
+            'bg_card_hover': '#f1f5f9',  # Light hover
+            'bg_panel': '#f8fafc',  # Light panel bg
+            'bg_elevated': '#f1f5f9',  # Elevated surfaces
             
-            # Accent Colors - Vibrant & Modern
-            'accent_primary': '#6366f1',  # Indigo
-            'accent_primary_light': '#818cf8',
-            'accent_primary_dark': '#4f46e5',
-            'accent_success': '#10b981',
-            'accent_success_light': '#34d399',
-            'accent_warning': '#f59e0b',
-            'accent_warning_light': '#fbbf24',
-            'accent_danger': '#ef4444',
-            'accent_danger_light': '#f87171',
-            'accent_purple': '#8b5cf6',
-            'accent_purple_light': '#a78bfa',
-            'accent_teal': '#14b8a6',
-            'accent_teal_light': '#5eead4',
-            'accent_orange': '#f97316',
-            'accent_orange_light': '#fb923c',
-            'accent_cyan': '#06b6d4',
-            'accent_cyan_light': '#22d3ee',
+            # Glass effect colors (for light theme)
+            'glass_bg': '#ffffff',
+            'glass_border': '#e2e8f0',
             
-            # Text Colors
-            'text_primary': '#1e293b',
-            'text_secondary': '#475569',
-            'text_muted': '#94a3b8',
-            'text_light': '#ffffff',
+            # Accent Colors - Professional & Vibrant
+            'accent_primary': '#4f46e5',  # Indigo
+            'accent_primary_light': '#6366f1',
+            'accent_primary_dark': '#4338ca',
+            'accent_primary_glow': '#4f46e5',
+            'accent_success': '#059669',  # Emerald
+            'accent_success_light': '#10b981',
+            'accent_success_glow': '#059669',
+            'accent_warning': '#d97706',  # Amber
+            'accent_warning_light': '#f59e0b',
+            'accent_danger': '#dc2626',  # Red
+            'accent_danger_light': '#ef4444',
+            'accent_danger_glow': '#dc2626',
+            'accent_purple': '#7c3aed',  # Violet
+            'accent_purple_light': '#8b5cf6',
+            'accent_purple_glow': '#7c3aed',
+            'accent_teal': '#0d9488',  # Teal
+            'accent_teal_light': '#14b8a6',
+            'accent_teal_glow': '#0d9488',
+            'accent_orange': '#ea580c',  # Orange
+            'accent_orange_light': '#f97316',
+            'accent_cyan': '#0891b2',  # Cyan
+            'accent_cyan_light': '#06b6d4',
+            'accent_cyan_glow': '#0891b2',
+            
+            # Text Colors - Dark for light theme
+            'text_primary': '#1e293b',  # Dark slate
+            'text_secondary': '#475569',  # Gray
+            'text_muted': '#94a3b8',  # Light gray
+            'text_light': '#ffffff',  # White
             'text_on_accent': '#ffffff',
+            'text_heading': '#0f172a',  # Very dark
             
             # Borders & Dividers
-            'border': '#e2e8f0',
+            'border': '#e2e8f0',  # Light border
             'border_light': '#f1f5f9',
             'border_dark': '#cbd5e1',
+            'border_glow': '#4f46e5',
             
             # Shadows
             'shadow_sm': '#e2e8f0',
@@ -69,9 +82,9 @@ class ObjectDetectionApp:
             'shadow_lg': '#94a3b8',
             
             # Status Colors
-            'status_safe': '#10b981',
-            'status_warning': '#f59e0b',
-            'status_danger': '#ef4444',
+            'status_safe': '#059669',
+            'status_warning': '#d97706',
+            'status_danger': '#dc2626',
         }
         
         self.root.configure(bg=self.colors['bg_main'])
@@ -92,40 +105,57 @@ class ObjectDetectionApp:
         sidebar.pack(side="left", fill="y", padx=(0, 1))
         sidebar.pack_propagate(False)
         
-        # Sidebar Header
-        sidebar_header = Frame(sidebar, bg=self.colors['accent_primary'], height=120)
+        # Sidebar Header - Clean Modern Design
+        sidebar_header = Frame(sidebar, bg=self.colors['accent_primary'], height=100)
         sidebar_header.pack(fill="x")
         sidebar_header.pack_propagate(False)
         
-        # Logo/Title in sidebar
-        logo_frame = Frame(sidebar_header, bg=self.colors['accent_primary'])
-        logo_frame.pack(expand=True, fill="both", padx=20, pady=20)
+        # Logo container with gradient effect (simulated)
+        logo_container = Frame(sidebar_header, bg=self.colors['accent_primary'])
+        logo_container.pack(expand=True, fill="both", padx=20, pady=15)
         
-        title_main = Label(logo_frame,
-                          text="🔍 AI Vision",
-                          font=("Segoe UI", 20, "bold"),
+        # Icon + Title row
+        title_row = Frame(logo_container, bg=self.colors['accent_primary'])
+        title_row.pack(fill="x")
+        
+        # App Icon
+        app_icon = Label(title_row,
+                        text="🎯",
+                        font=("Segoe UI", 28),
+                        bg=self.colors['accent_primary'],
+                        fg=self.colors['text_light'])
+        app_icon.pack(side="left", padx=(0, 10))
+        
+        # Title Stack
+        title_stack = Frame(title_row, bg=self.colors['accent_primary'])
+        title_stack.pack(side="left", fill="y")
+        
+        title_main = Label(title_stack,
+                          text="VRD Toolkit",
+                          font=("Segoe UI", 18, "bold"),
                           bg=self.colors['accent_primary'],
                           fg=self.colors['text_light'])
-        title_main.pack(anchor="w", pady=(0, 5))
+        title_main.pack(anchor="w")
         
-        title_sub = Label(logo_frame,
-                         text="Object Detection & Analysis",
+        title_sub = Label(title_stack,
+                         text="Relationship Detection + RL",
                          font=("Segoe UI", 9),
                          bg=self.colors['accent_primary'],
-                         fg=self.colors['text_light'])
+                         fg="#c7d2fe")  # Light indigo tint
         title_sub.pack(anchor="w")
         
-        # Status indicator
-        self.status_indicator = Frame(sidebar_header, bg=self.colors['accent_primary'], height=30)
-        self.status_indicator.pack(fill="x", padx=20, pady=(0, 15))
+        # Status badge
+        status_badge = Frame(logo_container, bg=self.colors['accent_primary'])
+        status_badge.pack(fill="x", pady=(8, 0))
         
-        self.title_label = Label(self.status_indicator,
-                               text="● Ready",
-                               font=("Segoe UI", 10, "bold"),
-                               bg=self.colors['accent_primary'],
+        self.title_label = Label(status_badge,
+                               text="✓ Ready",
+                               font=("Segoe UI", 9),
+                               bg="#4338ca",  # Darker indigo
                                fg=self.colors['text_light'],
-                               anchor="w")
-        self.title_label.pack(fill="x")
+                               padx=10,
+                               pady=3)
+        self.title_label.pack(side="left")
         
         # Sidebar Content - Button Groups
         sidebar_content = Frame(sidebar, bg=self.colors['bg_sidebar'])
@@ -175,42 +205,67 @@ class ObjectDetectionApp:
         self.rl_enhancement = AppReinforcementLearning(self)
         self.training_evaluator = TrainingEvaluator()
 
-        # Ultra Modern Button Style - Full width, icon + text
+        # 🎨 Premium Modern Button Style - Glassmorphism with glow effects
         def create_sidebar_button(parent, icon, text, command, color, hover_color=None):
             if hover_color is None:
                 hover_color = color
             
+            # Container với subtle border
             btn_container = Frame(parent, bg=self.colors['bg_sidebar'], relief="flat", bd=0)
-            btn_container.pack(fill="x", pady=4)
+            btn_container.pack(fill="x", pady=3)
+            
+            # Indicator bar (colored left border)
+            indicator = Frame(btn_container, bg=self.colors['bg_sidebar'], width=3)
+            indicator.pack(side="left", fill="y")
             
             btn = Button(btn_container,
-                        text=f"{icon}  {text}",
+                        text=f" {icon}   {text}",
                         command=command,
-                        font=("Segoe UI", 10),
+                        font=("Segoe UI Semibold", 10),
                         bg=self.colors['bg_sidebar'],
-                        fg=self.colors['text_primary'],
+                        fg=self.colors['text_secondary'],
                         relief="flat",
                         bd=0,
                         anchor="w",
-                        padx=15,
-                        pady=12,
+                        padx=12,
+                        pady=14,
                         cursor="hand2",
-                        activebackground=self.colors['bg_card_hover'],
+                        activebackground=self.colors['bg_elevated'],
                         activeforeground=self.colors['text_primary'])
-            btn.pack(fill="x")
+            btn.pack(side="left", fill="x", expand=True)
             
-            # Hover effect với border highlight
+            # Animation state
+            btn._is_hovered = False
+            btn._original_color = color
+            
+            # Hover effect với gradient hint và indicator glow
             def on_enter(e):
-                btn.configure(bg=self.colors['bg_card_hover'], fg=color)
-                btn_container.configure(bg=self.colors['bg_card_hover'])
+                btn._is_hovered = True
+                btn.configure(bg=self.colors['bg_elevated'], fg=self.colors['text_primary'])
+                btn_container.configure(bg=self.colors['bg_elevated'])
+                indicator.configure(bg=color)  # Colored indicator on hover
+                
             def on_leave(e):
-                btn.configure(bg=self.colors['bg_sidebar'], fg=self.colors['text_primary'])
+                btn._is_hovered = False
+                btn.configure(bg=self.colors['bg_sidebar'], fg=self.colors['text_secondary'])
                 btn_container.configure(bg=self.colors['bg_sidebar'])
+                indicator.configure(bg=self.colors['bg_sidebar'])  # Hide indicator
+            
+            def on_click(e):
+                # Click feedback - brief flash
+                btn.configure(bg=color, fg=self.colors['text_light'])
+                btn.after(100, lambda: btn.configure(
+                    bg=self.colors['bg_elevated'] if btn._is_hovered else self.colors['bg_sidebar'],
+                    fg=self.colors['text_primary'] if btn._is_hovered else self.colors['text_secondary']
+                ))
             
             btn.bind("<Enter>", on_enter)
             btn.bind("<Leave>", on_leave)
+            btn.bind("<Button-1>", on_click)
             btn_container.bind("<Enter>", on_enter)
             btn_container.bind("<Leave>", on_leave)
+            indicator.bind("<Enter>", on_enter)
+            indicator.bind("<Leave>", on_leave)
             
             return btn
 
@@ -260,39 +315,59 @@ class ObjectDetectionApp:
         content_area = Frame(main_wrapper, bg=self.colors['bg_main'])
         content_area.pack(side="left", fill="both", expand=True)
         
-        # Top Status Bar
+        # Top Status Bar - Clean design
         status_bar = Frame(content_area, bg=self.colors['bg_card'], height=60)
-        status_bar.pack(fill="x", padx=15, pady=(15, 0))
+        status_bar.pack(fill="x", padx=20, pady=(15, 0))
         status_bar.pack_propagate(False)
         
         status_inner = Frame(status_bar, bg=self.colors['bg_card'])
-        status_inner.pack(fill="both", expand=True, padx=20, pady=15)
+        status_inner.pack(fill="both", expand=True, padx=15, pady=10)
         
         self.alert_normal_bg = self.colors['status_safe']
         self.alert_normal_fg = self.colors['text_light']
         self.alert_warning_bg = self.colors['status_danger']
         self.alert_warning_fg = self.colors['text_light']
         
+        # Status icon indicator
+        self.status_dot = Label(
+            status_inner,
+            text="●",
+            font=("Segoe UI", 14),
+            bg=self.colors['bg_card'],
+            fg=self.colors['status_safe']
+        )
+        self.status_dot.pack(side="left", padx=(5, 8))
+        
         self.alert_label = Label(
             status_inner,
-            text="🟢 Safe Zone: Ready (>=2m)",
-            font=("Segoe UI", 11, "bold"),
-            bg=self.alert_normal_bg,
-            fg=self.alert_normal_fg,
-            padx=20,
-            pady=8,
+            text="System Ready",
+            font=("Segoe UI Semibold", 11),
+            bg=self.colors['bg_card'],
+            fg=self.colors['text_primary'],
+            padx=10,
+            pady=5,
             relief="flat",
             bd=0
         )
         self.alert_label.pack(side="left")
+        
+        # Pipeline status label
+        self.pipeline_status = Label(
+            status_inner,
+            text="📊 Select an image to begin analysis",
+            font=("Segoe UI", 10),
+            bg=self.colors['bg_card'],
+            fg=self.colors['text_muted']
+        )
+        self.pipeline_status.pack(side="right", padx=10)
 
         # ========== MAIN CONTENT GRID ==========
         main_container = Frame(content_area, bg=self.colors['bg_main'])
         main_container.pack(fill="both", expand=True, padx=15, pady=15)
         
-        # Grid layout - 2 columns: Image (left) + Info Panels (right)
-        main_container.grid_columnconfigure(0, weight=2, minsize=500)
-        main_container.grid_columnconfigure(1, weight=1, minsize=350)
+        # Grid layout - 2 columns: Image (left, larger) + Info Panels (right, smaller)
+        main_container.grid_columnconfigure(0, weight=3, minsize=600)  # Image - 70%
+        main_container.grid_columnconfigure(1, weight=1, minsize=280)  # Panels - 30%
         main_container.grid_rowconfigure(0, weight=1)
         
         # ========== LEFT: Image Display Card ==========
@@ -303,39 +378,58 @@ class ObjectDetectionApp:
         image_card = Frame(image_card_container, bg=self.colors['bg_card'], relief="flat", bd=1, highlightbackground=self.colors['border'])
         image_card.pack(fill="both", expand=True)
         
-        # Card Header
-        image_header = Frame(image_card, bg=self.colors['bg_card'], height=60)
+        # Card Header with accent border
+        image_header = Frame(image_card, bg=self.colors['accent_primary'], height=4)
         image_header.pack(fill="x")
-        image_header.pack_propagate(False)
         
-        image_header_inner = Frame(image_header, bg=self.colors['bg_card'])
-        image_header_inner.pack(fill="both", expand=True, padx=20, pady=15)
+        image_header_content = Frame(image_card, bg=self.colors['bg_card'], height=55)
+        image_header_content.pack(fill="x")
+        image_header_content.pack_propagate(False)
+        
+        image_header_inner = Frame(image_header_content, bg=self.colors['bg_card'])
+        image_header_inner.pack(fill="both", expand=True, padx=20, pady=12)
         
         image_title = Label(image_header_inner,
                            text="🖼️ Image Preview",
-                           font=("Segoe UI", 13, "bold"),
+                           font=("Segoe UI Semibold", 13),
                            bg=self.colors['bg_card'],
-                           fg=self.colors['text_primary'],
+                           fg=self.colors['text_heading'],
                            anchor="w")
         image_title.pack(side="left")
         
-        # Canvas container
-        canvas_container = Frame(image_card, bg=self.colors['bg_panel'])
-        canvas_container.pack(fill="both", expand=True, padx=20, pady=20)
+        # Canvas container with subtle inner glow
+        canvas_container = Frame(image_card, bg=self.colors['bg_elevated'])
+        canvas_container.pack(fill="both", expand=True, padx=20, pady=(10, 20))
         
         self.canvas = Canvas(canvas_container,
                            bg=self.colors['bg_panel'],
                            relief="flat",
-                           highlightthickness=1,
-                           highlightbackground=self.colors['border_light'],
+                           highlightthickness=2,
+                           highlightbackground=self.colors['border'],
                            highlightcolor=self.colors['accent_primary'])
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas.pack(fill="both", expand=True, padx=2, pady=2)
         
-        # Empty state với styling tốt hơn
+        # Enhanced empty state with better visual
         self.canvas_empty_text = self.canvas.create_text(
-            300, 250,
-            text="📷 No Image Selected\n\nClick 'Select Image' in the sidebar\nto get started",
-            font=("Segoe UI", 13),
+            300, 220,
+            text="📷",
+            font=("Segoe UI", 48),
+            fill=self.colors['text_muted'],
+            justify="center",
+            tags="empty_state"
+        )
+        self.canvas.create_text(
+            300, 290,
+            text="No Image Selected",
+            font=("Segoe UI Semibold", 14),
+            fill=self.colors['text_secondary'],
+            justify="center",
+            tags="empty_state"
+        )
+        self.canvas.create_text(
+            300, 325,
+            text="Click 'Select Image' in the sidebar to get started",
+            font=("Segoe UI", 10),
             fill=self.colors['text_muted'],
             justify="center",
             tags="empty_state"
@@ -352,42 +446,57 @@ class ObjectDetectionApp:
         objects_card = Frame(right_panel, bg=self.colors['bg_card'], relief="flat", bd=1, highlightbackground=self.colors['border'])
         objects_card.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         
+        # Accent header bar (Green)
+        objects_accent = Frame(objects_card, bg=self.colors['accent_success'], height=4)
+        objects_accent.pack(fill="x")
+        
         objects_header = Frame(objects_card, bg=self.colors['bg_card'], height=50)
         objects_header.pack(fill="x")
         objects_header.pack_propagate(False)
         
         objects_header_inner = Frame(objects_header, bg=self.colors['bg_card'])
-        objects_header_inner.pack(fill="both", expand=True, padx=15, pady=12)
+        objects_header_inner.pack(fill="both", expand=True, padx=15, pady=10)
         
         objects_title = Label(objects_header_inner,
                             text="📦 Detected Objects",
-                            font=("Segoe UI", 12, "bold"),
+                            font=("Segoe UI Semibold", 12),
                             bg=self.colors['bg_card'],
-                            fg=self.colors['text_primary'],
+                            fg=self.colors['text_heading'],
                             anchor="w")
         objects_title.pack(side="left")
         
+        # Object counter badge
+        self.objects_count = Label(objects_header_inner,
+                                  text="0",
+                                  font=("Segoe UI", 9),
+                                  bg=self.colors['accent_success'],
+                                  fg=self.colors['text_light'],
+                                  padx=8,
+                                  pady=2)
+        self.objects_count.pack(side="right")
+        
         objects_content = Frame(objects_card, bg=self.colors['bg_card'])
-        objects_content.pack(fill="both", expand=True, padx=15, pady=15)
+        objects_content.pack(fill="both", expand=True, padx=15, pady=(5, 15))
         
         self.objects_text = Text(objects_content,
-                               font=("Segoe UI", 9),
+                               font=("Consolas", 9),
                                bg=self.colors['bg_panel'],
                                fg=self.colors['text_primary'],
                                relief="flat",
                                bd=0,
                                wrap="word",
-                               padx=12,
-                               pady=12,
+                               padx=14,
+                               pady=14,
+                               insertbackground=self.colors['text_primary'],
                                selectbackground=self.colors['accent_success'],
                                selectforeground="white")
         objects_scrollbar = Scrollbar(objects_content,
                                      orient="vertical",
                                      command=self.objects_text.yview,
-                                     bg=self.colors['bg_card'],
+                                     bg=self.colors['bg_elevated'],
                                      troughcolor=self.colors['bg_panel'],
                                      activebackground=self.colors['accent_success'],
-                                     width=10)
+                                     width=8)
         self.objects_text.configure(yscrollcommand=objects_scrollbar.set)
         
         self.objects_text.pack(side="left", fill="both", expand=True)
@@ -400,42 +509,57 @@ class ObjectDetectionApp:
         relationships_card = Frame(right_panel, bg=self.colors['bg_card'], relief="flat", bd=1, highlightbackground=self.colors['border'])
         relationships_card.grid(row=1, column=0, sticky="nsew")
         
+        # Accent header bar (Purple)
+        relationships_accent = Frame(relationships_card, bg=self.colors['accent_purple'], height=4)
+        relationships_accent.pack(fill="x")
+        
         relationships_header = Frame(relationships_card, bg=self.colors['bg_card'], height=50)
         relationships_header.pack(fill="x")
         relationships_header.pack_propagate(False)
         
         relationships_header_inner = Frame(relationships_header, bg=self.colors['bg_card'])
-        relationships_header_inner.pack(fill="both", expand=True, padx=15, pady=12)
+        relationships_header_inner.pack(fill="both", expand=True, padx=15, pady=10)
         
         relationships_title = Label(relationships_header_inner,
                                   text="🔗 Relationships",
-                                  font=("Segoe UI", 12, "bold"),
+                                  font=("Segoe UI Semibold", 12),
                                   bg=self.colors['bg_card'],
-                                  fg=self.colors['text_primary'],
+                                  fg=self.colors['text_heading'],
                                   anchor="w")
         relationships_title.pack(side="left")
         
+        # Relationships counter badge
+        self.relationships_count = Label(relationships_header_inner,
+                                        text="0",
+                                        font=("Segoe UI", 9),
+                                        bg=self.colors['accent_purple'],
+                                        fg=self.colors['text_light'],
+                                        padx=8,
+                                        pady=2)
+        self.relationships_count.pack(side="right")
+        
         relationships_content = Frame(relationships_card, bg=self.colors['bg_card'])
-        relationships_content.pack(fill="both", expand=True, padx=15, pady=15)
+        relationships_content.pack(fill="both", expand=True, padx=15, pady=(5, 15))
         
         self.relationships_text = Text(relationships_content,
-                                     font=("Segoe UI", 9),
+                                     font=("Consolas", 9),
                                      bg=self.colors['bg_panel'],
                                      fg=self.colors['text_primary'],
                                      relief="flat",
                                      bd=0,
                                      wrap="word",
-                                     padx=12,
-                                     pady=12,
+                                     padx=14,
+                                     pady=14,
+                                     insertbackground=self.colors['text_primary'],
                                      selectbackground=self.colors['accent_purple'],
                                      selectforeground="white")
         relationships_scrollbar = Scrollbar(relationships_content,
                                          orient="vertical",
                                          command=self.relationships_text.yview,
-                                         bg=self.colors['bg_card'],
+                                         bg=self.colors['bg_elevated'],
                                          troughcolor=self.colors['bg_panel'],
                                          activebackground=self.colors['accent_purple'],
-                                         width=10)
+                                         width=8)
         self.relationships_text.configure(yscrollcommand=relationships_scrollbar.set)
         
         self.relationships_text.pack(side="left", fill="both", expand=True)
@@ -673,6 +797,7 @@ class ObjectDetectionApp:
                 self.objects_text.delete(1.0, tk.END)
                 self.objects_text.insert(tk.END, "❌ No objects detected\n\nPlease run 'Detect Objects' to detect objects in the image.")
                 self.objects_text.config(state="disabled")
+                self.objects_count.config(text="0")  # Update counter
                 return
 
             # Xóa nội dung cũ
@@ -703,6 +828,7 @@ class ObjectDetectionApp:
                 self.objects_text.insert(tk.END, info)
             
             self.objects_text.config(state="disabled")
+            self.objects_count.config(text=str(len(objects)))  # Update counter
                 
         except FileNotFoundError:
             self.objects_text.config(state="normal")
@@ -731,6 +857,7 @@ class ObjectDetectionApp:
                 self.relationships_text.delete(1.0, tk.END)
                 self.relationships_text.insert(tk.END, "❌ No relationships detected\n\nPlease run 'Detect Objects' to analyze relationships.")
                 self.relationships_text.config(state="disabled")
+                self.relationships_count.config(text="0")  # Update counter
                 return
 
             # Xóa nội dung cũ
@@ -769,6 +896,7 @@ class ObjectDetectionApp:
                 self.relationships_text.insert(tk.END, info)
             
             self.relationships_text.config(state="disabled")
+            self.relationships_count.config(text=str(len(relationships)))  # Update counter
                 
         except FileNotFoundError:
             self.relationships_text.config(state="normal")
@@ -853,58 +981,111 @@ class ObjectDetectionApp:
             for obj in objects:
                 _register_object(objects_dict, obj)
             
-            # Vẽ bbox cho từng mối quan hệ
-            colors = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"]
+            # Vẽ bbox cho từng mối quan hệ VÀ mũi tên
+            colors = [(255, 99, 71), (30, 144, 255), (50, 205, 50), (255, 215, 0), 
+                      (186, 85, 211), (255, 140, 0), (255, 105, 180), (0, 206, 209)]
+            
+            # Helper function để vẽ mũi tên
+            def draw_arrow(draw, start_point, end_point, color, width=4):
+                """Vẽ mũi tên từ start_point đến end_point"""
+                import math
+                x1, y1 = start_point
+                x2, y2 = end_point
+                
+                # Vẽ đường thẳng chính
+                draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+                
+                # Tính góc của mũi tên
+                angle = math.atan2(y2 - y1, x2 - x1)
+                arrow_length = 20
+                arrow_angle = math.pi / 6  # 30 độ
+                
+                # Vẽ đầu mũi tên
+                arrow_x1 = x2 - arrow_length * math.cos(angle - arrow_angle)
+                arrow_y1 = y2 - arrow_length * math.sin(angle - arrow_angle)
+                arrow_x2 = x2 - arrow_length * math.cos(angle + arrow_angle)
+                arrow_y2 = y2 - arrow_length * math.sin(angle + arrow_angle)
+                
+                # Vẽ tam giác mũi tên
+                draw.polygon([(x2, y2), (arrow_x1, arrow_y1), (arrow_x2, arrow_y2)], fill=color)
             
             for i, rel in enumerate(relationships_data):
                 subject = rel.get("subject", "").lower()
                 obj = rel.get("object", "").lower()
+                relation = rel.get("relation", "relates to")
                 
                 color = colors[i % len(colors)]
+                color_hex = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+                
+                # Load font
+                try:
+                    from PIL import ImageFont
+                    font = ImageFont.truetype("arial.ttf", 20)
+                    font_small = ImageFont.truetype("arial.ttf", 16)
+                except:
+                    font = ImageFont.load_default()
+                    font_small = font
+                
+                # Lấy thông tin subject và object
+                subject_entry = _next_object(objects_dict.get(subject))
+                object_entry = _next_object(objects_dict.get(obj))
+                
+                subject_center = None
+                object_center = None
                 
                 # Vẽ bbox cho subject
-                subject_entry = _next_object(objects_dict.get(subject))
                 if subject_entry:
                     bbox = subject_entry.get("bbox", [])
                     if len(bbox) >= 4:
-                        x, y, w, h = bbox[:4]
-                        # Vẽ box đậm hơn với width=6
-                        draw.rectangle([x, y, w, h], outline=color, width=6)
-                        # Vẽ chữ to hơn với font size 24
-                        try:
-                            from PIL import ImageFont
-                            # Thử sử dụng font mặc định với size lớn hơn
-                            font = ImageFont.truetype("arial.ttf", 24)
-                        except:
-                            # Nếu không tìm thấy font, sử dụng font mặc định
-                            font = ImageFont.load_default()
-                        draw.text((x, y - 30), f"S: {subject.upper()}", fill=color, font=font)
+                        x1, y1, x2, y2 = bbox[:4]
+                        # Vẽ box với viền đậm
+                        draw.rectangle([x1, y1, x2, y2], outline=color_hex, width=5)
+                        # Label
+                        label_text = f"S: {subject.upper()}"
+                        draw.rectangle([x1, y1-25, x1+len(label_text)*10, y1], fill=color_hex)
+                        draw.text((x1+5, y1-22), label_text, fill="white", font=font_small)
+                        # Tâm cho mũi tên
+                        subject_center = ((x1+x2)//2, (y1+y2)//2)
                 
                 # Vẽ bbox cho object
-                object_entry = _next_object(objects_dict.get(obj))
                 if object_entry:
                     bbox = object_entry.get("bbox", [])
                     if len(bbox) >= 4:
-                        x, y, w, h = bbox[:4]
-                        # Vẽ box đậm hơn với width=6
-                        draw.rectangle([x, y, w, h], outline=color, width=6)
-                        # Vẽ chữ to hơn với font size 24
-                        try:
-                            from PIL import ImageFont
-                            # Thử sử dụng font mặc định với size lớn hơn
-                            font = ImageFont.truetype("arial.ttf", 24)
-                        except:
-                            # Nếu không tìm thấy font, sử dụng font mặc định
-                            font = ImageFont.load_default()
-                        draw.text((x, y - 30), f"O: {obj.upper()}", fill=color, font=font)
+                        x1, y1, x2, y2 = bbox[:4]
+                        # Vẽ box bằng nét đứt (simulated với border khác)
+                        draw.rectangle([x1, y1, x2, y2], outline=color_hex, width=5)
+                        # Label
+                        label_text = f"O: {obj.upper()}"
+                        draw.rectangle([x1, y1-25, x1+len(label_text)*10, y1], fill=color_hex)
+                        draw.text((x1+5, y1-22), label_text, fill="white", font=font_small)
+                        # Tâm cho mũi tên
+                        object_center = ((x1+x2)//2, (y1+y2)//2)
+                
+                # 🔥 VẼ MŨI TÊN giữa subject và object
+                if subject_center and object_center:
+                    draw_arrow(draw, subject_center, object_center, color, width=4)
+                    
+                    # Vẽ label relationship ở giữa mũi tên
+                    mid_x = (subject_center[0] + object_center[0]) // 2
+                    mid_y = (subject_center[1] + object_center[1]) // 2
+                    
+                    # Background cho text
+                    rel_text = relation.upper()
+                    text_width = len(rel_text) * 8
+                    draw.rectangle(
+                        [mid_x - text_width//2 - 5, mid_y - 12, 
+                         mid_x + text_width//2 + 5, mid_y + 12], 
+                        fill=color_hex
+                    )
+                    draw.text((mid_x - text_width//2, mid_y - 8), rel_text, fill="white", font=font_small)
             
-            # Lưu ảnh với bbox
+            # Lưu ảnh với bbox và arrows
             result_path = f"relationship_result_{image_id}.jpg"
             image.save(result_path)
             
             # Hiển thị ảnh mới
             self.display_image(result_path)
-            print(f"✅ Relationship bbox drawn and saved at: {result_path}")
+            print(f"✅ Relationship bbox and arrows drawn and saved at: {result_path}")
             
         except Exception as e:
             print(f"❌ Error drawing relationship bbox: {e}")
