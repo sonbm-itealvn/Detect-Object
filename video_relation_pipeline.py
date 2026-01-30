@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
+from torchvision.ops import nms as torchvision_nms
 from PIL import Image, ImageDraw, ImageFont
 
 SAFE_ZONE_CONFIG_PATH = Path("safe_zone_config.json")
@@ -810,7 +811,8 @@ class VideoRelationPipeline:
         safety_classifier_enabled: bool = True,
     ):
         self.rel_engine = RelTRInferenceEngine(reltr_checkpoint)
-        self.yolo_model = detection_pipeline.yolo_model
+        self.yolo_model = detection_pipeline.yolo_model  # COCO model
+        self.fire_model = detection_pipeline.fire_model  # Fire model (optional)
         self.tracker_config = tracker_config
         self.min_confidence = min_confidence
         self.announce_threshold = announce_min_confidence
@@ -828,6 +830,13 @@ class VideoRelationPipeline:
         # Tracking cảnh báo
         self.alert_history = []
         self.max_alert_history = 100
+        
+        # Log dual model status
+        if self.fire_model is not None:
+            print(f"🔥 Video pipeline: Fire model loaded ({len(self.fire_model.names)} classes)")
+            print(f"   Dual model detection enabled: COCO + Fire")
+        else:
+            print(f"⚠️  Video pipeline: Fire model not available, using COCO model only")
 
     def process_video(
         self,
@@ -865,7 +874,14 @@ class VideoRelationPipeline:
                 frame = result.orig_img.copy()
                 feature_map = self._safe_consume_feature_map()
                 global_context = detection_pipeline._compute_global_context(feature_map) if feature_map is not None else []
-                objects = self._prepare_objects(result, frame, feature_map)
+                
+                # 🔥 Run fire model on this frame and merge with COCO results
+                fire_result = None
+                if self.fire_model is not None:
+                    fire_result = self.fire_model(frame, verbose=False)
+                
+                # Merge detections from both models
+                objects = self._prepare_objects(result, frame, feature_map, fire_result)
                 for obj in objects:
                     label = obj.get("class")
                     if label:
@@ -980,38 +996,103 @@ class VideoRelationPipeline:
         except Exception:
             return None
 
-    def _prepare_objects(self, result, frame, feature_map):
-        objects: List[Dict[str, object]] = []
-        boxes = result.boxes.xyxy.cpu().numpy().astype(int)
-        classes = result.boxes.cls.cpu().numpy().astype(int)
-        confs = result.boxes.conf.cpu().numpy().tolist() if result.boxes.conf is not None else [0.0] * len(boxes)
+    def _prepare_objects(self, result, frame, feature_map, fire_result=None):
+        """
+        Prepare objects from COCO model (with tracking) and optionally merge with fire model detections.
+        
+        Args:
+            result: YOLO result from COCO model (with tracking)
+            frame: Current frame image
+            feature_map: Feature map from COCO model backbone
+            fire_result: Optional YOLO result from fire model
+        """
+        # Collect COCO detections (with tracking)
+        coco_boxes = result.boxes.xyxy.cpu().numpy().astype(int)
+        coco_classes = result.boxes.cls.cpu().numpy().astype(int)
+        coco_confs = result.boxes.conf.cpu().numpy().tolist() if result.boxes.conf is not None else [0.0] * len(coco_boxes)
         track_ids = []
         if result.boxes.id is not None:
             track_ids = result.boxes.id.int().cpu().tolist()
         else:
-            track_ids = [None] * len(boxes)
+            track_ids = [None] * len(coco_boxes)
+        
+        # Collect fire detections (no tracking)
+        fire_boxes = []
+        fire_classes = []
+        fire_confs = []
+        if fire_result is not None and len(fire_result) > 0:
+            fire_boxes = fire_result[0].boxes.xyxy.cpu().numpy().astype(int)
+            fire_classes = fire_result[0].boxes.cls.cpu().numpy().astype(int)
+            fire_confs = fire_result[0].boxes.conf.cpu().numpy().tolist() if fire_result[0].boxes.conf is not None else [0.0] * len(fire_boxes)
+        
+        # Merge detections using NMS (same as detect_objects.py)
+        all_detections = []
+        
+        # Add COCO detections
+        coco_names = self.yolo_model.model.names if hasattr(self.yolo_model, "model") and hasattr(self.yolo_model.model, "names") else self.yolo_model.names
+        for idx, (bbox, cls_id, conf) in enumerate(zip(coco_boxes, coco_classes, coco_confs)):
+            all_detections.append({
+                'box': bbox,
+                'class': coco_names[int(cls_id)],
+                'confidence': float(conf),
+                'source': 'coco',
+                'track_id': track_ids[idx] if idx < len(track_ids) else None,
+            })
+        
+        # Add fire detections
+        if fire_result is not None and len(fire_result) > 0:
+            fire_names = self.fire_model.model.names if hasattr(self.fire_model, "model") and hasattr(self.fire_model.model, "names") else self.fire_model.names
+            for bbox, cls_id, conf in zip(fire_boxes, fire_classes, fire_confs):
+                all_detections.append({
+                    'box': bbox,
+                    'class': fire_names[int(cls_id)],
+                    'confidence': float(conf),
+                    'source': 'fire',
+                    'track_id': None,  # Fire detections don't have tracking
+                })
+        
+        if not all_detections:
+            return []
+        
+        # Apply NMS to merge overlapping detections
+        # Convert to numpy array first to avoid warning
+        boxes_array = np.array([det['box'] for det in all_detections], dtype=np.float32)
+        boxes_tensor = torch.from_numpy(boxes_array)
+        scores_tensor = torch.tensor([det['confidence'] for det in all_detections], dtype=torch.float32)
+        keep_indices = torchvision_nms(boxes_tensor, scores_tensor, iou_threshold=0.5)
+        
+        # Process merged detections
         detected_objects = []
         yolo_labels = []
         metadata = []
-        for idx, (bbox, cls_id) in enumerate(zip(boxes, classes)):
+        
+        for idx in keep_indices:
+            det = all_detections[idx]
+            bbox = det['box']
             x1, y1, x2, y2 = map(int, bbox)
+            
             if (x2 - x1) < 20 or (y2 - y1) < 20:
                 continue
+            
             cropped = detection_pipeline.add_padding(frame, (x1, y1, x2, y2))
             cropped_pil = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
             detected_objects.append((cropped_pil, (x1, y1, x2, y2)))
-            names_map = self.yolo_model.model.names if hasattr(self.yolo_model, "model") and hasattr(self.yolo_model.model, "names") else self.yolo_model.names
-            class_name = names_map[int(cls_id)]
-            yolo_labels.append(class_name)
+            yolo_labels.append(det['class'])
             metadata.append({
-                "track_id": track_ids[idx] if idx < len(track_ids) else None,
-                "confidence": float(confs[idx]) if idx < len(confs) else 0.0,
+                "track_id": det.get('track_id'),
+                "confidence": det['confidence'],
+                "source": det['source'],
             })
+        
         if not detected_objects:
             return []
+        
         classified = detection_pipeline.classify_with_clip(detected_objects, yolo_labels)
         box_list = [bbox for _, bbox in classified]
         roi_features = detection_pipeline.extract_roi_features(feature_map, box_list, frame.shape) if feature_map is not None else []
+        
+        # Initialize objects list
+        objects = []
         for idx, (label, bbox) in enumerate(classified):
             x1, y1, x2, y2 = map(int, bbox)
             obj = {

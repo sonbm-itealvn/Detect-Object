@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import json
 import clip
 import cv2
-from torchvision.ops import roi_align
+from torchvision.ops import roi_align, nms as torchvision_nms
 import sys
 import numpy as np
 from PIL import Image
@@ -16,14 +16,25 @@ from typing import List, Tuple, Dict, Any
 import tkinter as tk
 from tkinter import filedialog
 
+# Load .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Load từ file .env ở thư mục gốc
+except ImportError:
+    # python-dotenv không bắt buộc, sẽ dùng environment variables trực tiếp
+    pass
+
 def _resolve_yolo_weights() -> str:
     """Return a usable path to YOLO weights, preferring environment override."""
     env_path = os.getenv("YOLO_WEIGHTS_PATH")
     if env_path:
+        # Clean path: strip whitespace, newlines, quotes
+        env_path = env_path.strip().strip('"').strip("'").replace('\n', '').replace('\r', '')
         candidate = Path(env_path).expanduser()
         if candidate.exists():
             return str(candidate)
         print(f"[detect_objects] Warning: YOLO_WEIGHTS_PATH '{env_path}' does not exist, falling back.")
+        print(f"[detect_objects] Debug: Path length={len(env_path)}, contains newline={chr(10) in env_path or chr(13) in env_path}")
 
     default_path = Path(__file__).resolve().parent / "fine-tune.pt"
     if default_path.exists():
@@ -34,7 +45,42 @@ def _resolve_yolo_weights() -> str:
     )
 
 
+def _resolve_fire_model_weights() -> str:
+    """Return path to fire detection model weights."""
+    env_path = os.getenv("FIRE_MODEL_WEIGHTS_PATH")
+    if env_path:
+        # Clean path: strip whitespace, newlines, quotes
+        env_path = env_path.strip().strip('"').strip("'").replace('\n', '').replace('\r', '')
+        candidate = Path(env_path).expanduser()
+        if candidate.exists():
+            return str(candidate)
+    
+    # Try common paths
+    candidates = [
+        Path(__file__).resolve().parent / "fire-model.pt",
+        Path(__file__).resolve().parent / "fire_detection.pt",
+        Path(__file__).resolve().parent / "fire.pt",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    
+    return None  # Fire model is optional
+
+
+# Load main YOLO model (COCO 80 classes)
 yolo_model = YOLO(_resolve_yolo_weights())
+
+# Load fire detection model (optional)
+fire_model_weights = _resolve_fire_model_weights()
+fire_model = None
+if fire_model_weights:
+    print(f"🔥 Loading fire detection model from: {fire_model_weights}")
+    fire_model = YOLO(fire_model_weights)
+    print(f"✅ Fire model loaded with {len(fire_model.names)} classes")
+else:
+    print("⚠️  Fire model not found. Set FIRE_MODEL_WEIGHTS_PATH or place fire model in project directory.")
+    print("   Continuing with COCO model only...")
 
 # Backbone feature capture for RoIAlign descriptors
 _BACKBONE_LAYER_INDEX = 9  # SPPF layer index inside YOLO backbone
@@ -63,6 +109,7 @@ def _capture_backbone_feature(module, inputs, output):
         _feature_map_queue.append(feature_map)
 
 # Register hook once so every inference populates the shared store
+# Use main model (COCO) for feature extraction
 yolo_model.model.model[_BACKBONE_LAYER_INDEX].register_forward_hook(_capture_backbone_feature)
 
 # Load CLIP model with optimization
@@ -207,7 +254,64 @@ def add_padding(image, bbox, padding=10):
     img_height, img_width = image.shape[:2]
     return image[max(0, y1-padding):min(y2+padding, img_height), max(0, x1-padding):min(x2+padding, img_width)]
 
-# Detect objects with YOLO
+def _merge_detections(coco_results, fire_results, iou_threshold=0.5):
+    """
+    Merge detections from COCO model and Fire model.
+    Apply NMS to remove overlapping boxes from different models.
+    
+    Returns: merged list of (box, class_name, confidence, source_model)
+    """
+    all_detections = []
+    
+    # Collect COCO detections
+    for result in coco_results:
+        boxes = result.boxes.xyxy.cpu().numpy()
+        classes = result.boxes.cls.cpu().numpy()
+        confidences = result.boxes.conf.cpu().numpy() if result.boxes.conf is not None else np.ones(len(boxes))
+        for box, cls, conf in zip(boxes, classes, confidences):
+            class_name = result.names[int(cls)]
+            all_detections.append({
+                'box': box,
+                'class': class_name,
+                'confidence': float(conf),
+                'source': 'coco'
+            })
+    
+    # Collect Fire detections
+    if fire_results:
+        for result in fire_results:
+            boxes = result.boxes.xyxy.cpu().numpy()
+            classes = result.boxes.cls.cpu().numpy()
+            confidences = result.boxes.conf.cpu().numpy() if result.boxes.conf is not None else np.ones(len(boxes))
+            for box, cls, conf in zip(boxes, classes, confidences):
+                class_name = result.names[int(cls)]
+                all_detections.append({
+                    'box': box,
+                    'class': class_name,
+                    'confidence': float(conf),
+                    'source': 'fire'
+                })
+    
+    if not all_detections:
+        return []
+    
+    # Convert to tensor for NMS
+    boxes_tensor = torch.tensor([det['box'] for det in all_detections], dtype=torch.float32)
+    scores_tensor = torch.tensor([det['confidence'] for det in all_detections], dtype=torch.float32)
+    
+    # Apply NMS to remove overlapping detections
+    # Keep detection with higher confidence if IoU > threshold
+    keep_indices = torchvision_nms(boxes_tensor, scores_tensor, iou_threshold)
+    
+    # Return merged detections
+    merged = []
+    for idx in keep_indices:
+        merged.append(all_detections[idx])
+    
+    return merged
+
+
+# Detect objects with YOLO (COCO + Fire models)
 def detect_objects(image_source):
     if isinstance(image_source, str):
         image = cv2.imread(image_source)
@@ -223,22 +327,47 @@ def detect_objects(image_source):
     else:
         raise TypeError(f"Unsupported image source type: {type(image_source)}")
 
-    results = yolo_model(inference_input)
+    # 🔥 Run both models in parallel (or sequential if threading issues)
+    coco_results = yolo_model(inference_input)
+    
+    fire_results = None
+    if fire_model is not None:
+        fire_results = fire_model(inference_input)
+        print(f"🔥 Fire model detected {sum(len(r.boxes) for r in fire_results) if fire_results else 0} objects")
+    
+    # Merge detections from both models
+    merged_detections = _merge_detections(coco_results, fire_results, iou_threshold=0.5)
+    
+    # Get feature map from main model (COCO)
     feature_map = _consume_feature_map()
     global_context = _compute_global_context(feature_map)
+    
     detected_objects, yolo_labels = [], []
-
-    for result in results:
-        boxes = result.boxes.xyxy.cpu().numpy()
-        classes = result.boxes.cls.cpu().numpy()
-        for box, cls in zip(boxes, classes):
-            x1, y1, x2, y2 = map(int, box)
-            if (x2 - x1 < 20) or (y2 - y1 < 20):
-                print(f"⚠️ Bỏ qua đối tượng nhỏ quá [{x1}, {y1}, {x2}, {y2}]")
-                continue
-            cropped_pil = Image.fromarray(cv2.cvtColor(add_padding(image, (x1, y1, x2, y2)), cv2.COLOR_BGR2RGB))
-            detected_objects.append((cropped_pil, (x1, y1, x2, y2)))
-            yolo_labels.append(results[0].names[int(cls)])
+    
+    # Process merged detections
+    for det in merged_detections:
+        box = det['box']
+        x1, y1, x2, y2 = map(int, box)
+        
+        if (x2 - x1 < 20) or (y2 - y1 < 20):
+            print(f"⚠️ Bỏ qua đối tượng nhỏ quá [{x1}, {y1}, {x2}, {y2}]")
+            continue
+        
+        cropped_pil = Image.fromarray(cv2.cvtColor(add_padding(image, (x1, y1, x2, y2)), cv2.COLOR_BGR2RGB))
+        detected_objects.append((cropped_pil, (x1, y1, x2, y2)))
+        
+        # Keep class name from original model
+        class_name = det['class']
+        if det['source'] == 'fire':
+            # Optionally prefix fire classes to distinguish
+            # class_name = f"fire_{class_name}"  # Uncomment if needed
+            pass
+        
+        yolo_labels.append(class_name)
+        print(f"✅ {det['source'].upper()}: {class_name} (conf: {det['confidence']:.3f})")
+    
+    print(f"📊 Total merged detections: {len(detected_objects)} (COCO + Fire)")
+    
     return detected_objects, yolo_labels, image, feature_map, global_context
 
 # Phân loại với CLIP, fallback về YOLO nếu confidence thấp
@@ -248,8 +377,11 @@ def classify_with_clip(detected_objects, yolo_labels):
     # Use pre-computed text features instead of re-encoding
     text_features = _precomputed_text_features
 
-    # 🌟 Lấy toàn bộ nhãn từ YOLO làm nhãn quan trọng
+    # 🌟 Lấy toàn bộ nhãn từ cả 2 models làm nhãn quan trọng
     important_labels = list(yolo_model.names.values())
+    if fire_model is not None:
+        important_labels.extend(list(fire_model.names.values()))
+    important_labels = list(set(important_labels))  # Remove duplicates
     
     # OPTIMIZATION: Batch process all images at once
     valid_indices = []
