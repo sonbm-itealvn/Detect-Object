@@ -10,7 +10,18 @@ import torchvision.transforms as T
 from models import build_model
 from pathlib import Path
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
+
+# ============= LLM OPEN-VOCAB INTEGRATION =============
+# Import LLM predictor for open-vocabulary relationship prediction
+LLM_PREDICTOR_AVAILABLE = False
+_llm_predictor = None
+try:
+    from RL.llm_relationship_predictor import get_llm_predictor, LLMRelationshipPredictor
+    LLM_PREDICTOR_AVAILABLE = True
+    print("[RelTR] ✅ LLM Relationship Predictor available for open-vocab")
+except ImportError as e:
+    print(f"[RelTR] ⚠️ LLM predictor not available: {e}")
 
 # ============= MODEL CACHING FOR SPEED =============
 # Cache RelTR model to avoid reloading every inference
@@ -32,6 +43,10 @@ REL_CLASSES = ['__background__', 'above', 'across', 'against', 'along', 'and', '
                'looking at', 'lying on', 'made of', 'mounted on', 'near', 'of', 'on', 'on back of', 'over',
                'painted on', 'parked on', 'part of', 'playing', 'riding', 'says', 'sitting on', 'standing on',
                'to', 'under', 'using', 'walking in', 'walking on', 'watching', 'wearing', 'wears', 'with']
+
+# LLM Open-Vocab Configuration
+LLM_CONFIDENCE_THRESHOLD = 0.6  # Raised from 0.4 - LLM intervenes more often
+USE_LLM_ENHANCEMENT = True  # Enable/disable LLM enhancement
 
 
 # ============= SPATIAL VALIDATION FOR RELATIONSHIPS =============
@@ -269,6 +284,304 @@ def generate_heuristic_person_vehicle_relations(objects, existing_relations):
     
     return heuristic_relations
 
+
+# ============= LLM OPEN-VOCAB ENHANCEMENT =============
+def enhance_relationships_with_llm(
+    image: np.ndarray,
+    objects: List[Dict[str, Any]],
+    relationships: List[Dict[str, Any]],
+    global_context: Optional[List[float]] = None,
+    confidence_threshold: float = None,
+) -> List[Dict[str, Any]]:
+    """
+    Enhance relationships using LLM (GPT-4 Vision) for open-vocabulary prediction.
+    
+    Workflow:
+    1. Scan relationships with low confidence
+    2. For each low-confidence pair, query LLM with visual features
+    3. Replace or augment with LLM prediction
+    
+    Args:
+        image: Full image (BGR numpy array from cv2)
+        objects: List of detected objects with 'label' and 'bbox' keys
+        relationships: Existing relationships from RelTR
+        global_context: Optional scene context vector
+        confidence_threshold: Override default LLM_CONFIDENCE_THRESHOLD
+    
+    Returns:
+        Enhanced list of relationships with open-vocab predictions
+    """
+    global _llm_predictor
+    
+    if not USE_LLM_ENHANCEMENT:
+        print("[LLM] Enhancement disabled")
+        return relationships
+    
+    if not LLM_PREDICTOR_AVAILABLE:
+        print("[LLM] LLM predictor not available, returning original relationships")
+        return relationships
+    
+    threshold = confidence_threshold or LLM_CONFIDENCE_THRESHOLD
+    
+    # Initialize predictor if needed
+    if _llm_predictor is None:
+        try:
+            _llm_predictor = get_llm_predictor(confidence_threshold=threshold)
+        except Exception as e:
+            print(f"[LLM] Failed to initialize predictor: {e}")
+            return relationships
+    
+    if not _llm_predictor.is_available:
+        print("[LLM] LLM predictor not configured (check OPENAI_API_KEY in .env)")
+        return relationships
+    
+    # Find relationships that need LLM enhancement
+    enhanced_relationships = []
+    llm_count = 0
+    
+    for rel in relationships:
+        confidence = rel.get('confidence', 0)
+        source = rel.get('source', 'model')
+        
+        # Skip heuristic relations (already high quality)
+        if source == 'heuristic_spatial':
+            enhanced_relationships.append(rel)
+            continue
+        
+        # Check if this relationship needs LLM enhancement
+        if confidence >= threshold:
+            enhanced_relationships.append(rel)
+            continue
+        
+        # Find subject and object bboxes
+        subject_name = rel.get('subject', '')
+        object_name = rel.get('object', '')
+        
+        subject_obj = next((o for o in objects if o.get('label') == subject_name), None)
+        object_obj = next((o for o in objects if o.get('label') == object_name), None)
+        
+        if not subject_obj or not object_obj:
+            enhanced_relationships.append(rel)
+            continue
+        
+        subject_bbox = subject_obj.get('bbox', [])
+        object_bbox = object_obj.get('bbox', [])
+        
+        if len(subject_bbox) < 4 or len(object_bbox) < 4:
+            enhanced_relationships.append(rel)
+            continue
+        
+        # Convert normalized bbox to pixel coordinates if needed
+        img_h, img_w = image.shape[:2]
+        if all(0 <= v <= 1 for v in subject_bbox):
+            # Normalized format (cx, cy, w, h) - convert to (x1, y1, x2, y2)
+            cx, cy, w, h = subject_bbox
+            subject_bbox = [
+                int((cx - w/2) * img_w),
+                int((cy - h/2) * img_h),
+                int((cx + w/2) * img_w),
+                int((cy + h/2) * img_h)
+            ]
+        if all(0 <= v <= 1 for v in object_bbox):
+            cx, cy, w, h = object_bbox
+            object_bbox = [
+                int((cx - w/2) * img_w),
+                int((cy - h/2) * img_h),
+                int((cx + w/2) * img_w),
+                int((cy + h/2) * img_h)
+            ]
+        
+        # Query LLM
+        try:
+            llm_result = _llm_predictor.predict(
+                image=image,
+                subject_bbox=subject_bbox,
+                object_bbox=object_bbox,
+                subject_class=subject_name,
+                object_class=object_name,
+                reltr_prediction={'relation': rel.get('relation'), 'confidence': confidence},
+                global_context=global_context,
+            )
+            
+            if llm_result.get('llm_used'):
+                # Replace with LLM prediction
+                enhanced_rel = {
+                    'subject': subject_name,
+                    'relation': llm_result['relation'],
+                    'object': object_name,
+                    'confidence': llm_result['confidence'],
+                    'source': 'llm_open_vocab' if llm_result.get('is_open_vocab') else 'llm_enhanced',
+                    'original_relation': rel.get('relation'),
+                    'original_confidence': confidence,
+                }
+                enhanced_relationships.append(enhanced_rel)
+                llm_count += 1
+                
+                print(f"🤖 [LLM] Enhanced: {subject_name} '{rel.get('relation')}' {object_name} "
+                      f"→ '{llm_result['relation']}' (open_vocab={llm_result.get('is_open_vocab')})")
+            else:
+                enhanced_relationships.append(rel)
+                
+        except Exception as e:
+            print(f"[LLM] Error enhancing relationship: {e}")
+            enhanced_relationships.append(rel)
+    
+    if llm_count > 0:
+        print(f"🤖 [LLM] Enhanced {llm_count} relationships with open-vocabulary predictions")
+    
+    return enhanced_relationships
+
+
+def generate_llm_relations_for_missing_pairs(
+    image: np.ndarray,
+    objects: List[Dict[str, Any]],
+    existing_relationships: List[Dict[str, Any]],
+    global_context: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Generate relationships for ANY object pairs that RelTR completely missed.
+    
+    This is a GENERALIZED function - works for ALL object pair types, not just
+    specific categories. It:
+    1. Finds all possible object pairs
+    2. Filters out pairs that already have a relationship
+    3. Calls LLM for each missing pair
+    4. Only adds relationships if LLM returns meaningful relations
+    
+    Args:
+        image: Full image (BGR numpy array from cv2)
+        objects: List of detected objects with 'label' and 'bbox' keys
+        existing_relationships: Existing relationships from RelTR
+        global_context: Optional scene context vector
+    
+    Returns:
+        List of new relationships generated by LLM for missing pairs
+    """
+    global _llm_predictor
+    
+    if not USE_LLM_ENHANCEMENT:
+        return []
+    
+    if not LLM_PREDICTOR_AVAILABLE:
+        return []
+    
+    if len(objects) < 2:
+        return []
+    
+    # Initialize predictor if needed
+    if _llm_predictor is None:
+        try:
+            _llm_predictor = get_llm_predictor(confidence_threshold=LLM_CONFIDENCE_THRESHOLD)
+        except Exception as e:
+            print(f"[LLM-Missing] Failed to initialize predictor: {e}")
+            return []
+    
+    if not _llm_predictor.is_available:
+        return []
+    
+    # Build set of existing pairs (both directions)
+    existing_pairs = set()
+    for rel in existing_relationships:
+        subj = rel.get('subject', '').lower()
+        obj = rel.get('object', '').lower()
+        existing_pairs.add((subj, obj))
+        existing_pairs.add((obj, subj))
+    
+    # Helper to get class name from object
+    def get_class_name(o):
+        return (o.get('label') or o.get('class') or '').lower().strip()
+    
+    # Count missing pairs
+    missing_count = 0
+    for i in range(len(objects)):
+        for j in range(i + 1, len(objects)):
+            subj_class = get_class_name(objects[i])
+            obj_class = get_class_name(objects[j])
+            if (subj_class, obj_class) not in existing_pairs:
+                missing_count += 1
+    
+    if missing_count == 0:
+        return []
+    
+    print(f"🔍 [LLM-Missing] Found {missing_count} object pairs without relations, analyzing with LLM...")
+    
+    new_relations = []
+    img_h, img_w = image.shape[:2]
+    
+    # Helper to convert bbox to pixel coordinates
+    def convert_bbox(bbox):
+        if len(bbox) < 4:
+            return None
+        b = list(bbox[:4])
+        if all(0 <= v <= 1 for v in b):
+            # Normalized format (cx, cy, w, h) -> (x1, y1, x2, y2)
+            cx, cy, w, h = b
+            return [
+                int((cx - w/2) * img_w),
+                int((cy - h/2) * img_h),
+                int((cx + w/2) * img_w),
+                int((cy + h/2) * img_h)
+            ]
+        else:
+            return [int(x) for x in b]
+    
+    # Iterate over ALL object pairs
+    for i in range(len(objects)):
+        subj_obj = objects[i]
+        subj_class = subj_obj.get('label') or subj_obj.get('class') or 'unknown'
+        subj_bbox = convert_bbox(subj_obj.get('bbox', []))
+        
+        if subj_bbox is None:
+            continue
+        
+        for j in range(i + 1, len(objects)):
+            obj_obj = objects[j]
+            obj_class = obj_obj.get('label') or obj_obj.get('class') or 'unknown'
+            
+            # Skip if relation already exists
+            if (subj_class.lower(), obj_class.lower()) in existing_pairs:
+                continue
+            
+            obj_bbox = convert_bbox(obj_obj.get('bbox', []))
+            if obj_bbox is None:
+                continue
+            
+            print(f"🔍 [LLM-Missing] Analyzing: {subj_class} - {obj_class}")
+            
+            # Call LLM for missing pair
+            try:
+                result = _llm_predictor.predict_for_missing_pair(
+                    image=image,
+                    subject_bbox=subj_bbox,
+                    object_bbox=obj_bbox,
+                    subject_class=subj_class,
+                    object_class=obj_class,
+                    global_context=global_context,
+                )
+                
+                if result is not None:
+                    new_rel = {
+                        'subject': subj_class,
+                        'relation': result['relation'],
+                        'object': obj_class,
+                        'confidence': result['confidence'],
+                        'source': result['source'],
+                        'is_open_vocab': result.get('is_open_vocab', False),
+                    }
+                    new_relations.append(new_rel)
+                    existing_pairs.add((subj_class.lower(), obj_class.lower()))
+                    
+                    print(f"✅ [LLM-Missing] Added: {subj_class} '{result['relation']}' {obj_class}")
+                    
+            except Exception as e:
+                print(f"[LLM-Missing] Error processing pair {subj_class}-{obj_class}: {e}")
+    
+    if new_relations:
+        print(f"🤖 [LLM-Missing] Generated {len(new_relations)} new relations for previously undetected pairs")
+    
+    return new_relations
+
+
 def _get_cached_reltr_model(args, device):
     """Get or create cached RelTR model - avoids reloading checkpoint every call."""
     global _cached_reltr_model, _cached_reltr_device, _cached_reltr_checkpoint_path
@@ -476,17 +789,47 @@ def run_reltr_inference(objects, img_path, args, global_context=None, output_jso
             pair_cursor += 1
     
     # === HEURISTIC FALLBACK: Generate person-vehicle relationships if RelTR missed them ===
-    heuristic_rels = generate_heuristic_person_vehicle_relations(objects, relationships)
-    if heuristic_rels:
-        relationships.extend(heuristic_rels)
-        print(f"🔍 Added {len(heuristic_rels)} heuristic person-vehicle relationships")
+    # COMMENTED OUT FOR OPEN-VOCAB TESTING
+    # heuristic_rels = generate_heuristic_person_vehicle_relations(objects, relationships)
+    # if heuristic_rels:
+    #     relationships.extend(heuristic_rels)
+    #     print(f"🔍 Added {len(heuristic_rels)} heuristic person-vehicle relationships")
+    
+    # === LLM OPEN-VOCAB ENHANCEMENT ===
+    # For low-confidence predictions, query GPT-4 Vision for open-vocabulary relationships
+    if USE_LLM_ENHANCEMENT and LLM_PREDICTOR_AVAILABLE:
+        try:
+            image_cv2 = cv2.imread(img_path)
+            if image_cv2 is not None:
+                # Step 1: Enhance low-confidence existing relationships
+                relationships = enhance_relationships_with_llm(
+                    image=image_cv2,
+                    objects=objects,
+                    relationships=relationships,
+                    global_context=global_context,
+                    confidence_threshold=LLM_CONFIDENCE_THRESHOLD,
+                )
+                
+                # Step 2: Generate relations for completely missed person-vehicle pairs
+                missing_pair_rels = generate_llm_relations_for_missing_pairs(
+                    image=image_cv2,
+                    objects=objects,
+                    existing_relationships=relationships,
+                    global_context=global_context,
+                )
+                if missing_pair_rels:
+                    relationships.extend(missing_pair_rels)
+                    print(f"🤖 [LLM] Added {len(missing_pair_rels)} relations for previously undetected pairs")
+        except Exception as e:
+            print(f"[LLM] Enhancement failed: {e}")
     
     threshold = 0.2
     filtered_relationships = []
     for rel in relationships:
         similarity = rel.get("visual_similarity")
-        # Always keep heuristic_spatial relations (critical safety)
-        if rel.get("source") == "heuristic_spatial":
+        # Always keep heuristic_spatial and LLM relations
+        source = rel.get("source", "model")
+        if source in ("heuristic_spatial", "llm_open_vocab", "llm_enhanced", "llm_missing_pair"):
             filtered_relationships.append(rel)
         elif similarity is None or similarity >= threshold:
             filtered_relationships.append(rel)

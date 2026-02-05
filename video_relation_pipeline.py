@@ -23,6 +23,20 @@ from models import build_model
 from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
 
+# ============= LLM OPEN-VOCAB INTEGRATION =============
+LLM_PREDICTOR_AVAILABLE = False
+_llm_predictor = None
+LLM_CONFIDENCE_THRESHOLD = 0.6  # Raised from 0.4 - LLM intervenes more often
+USE_LLM_ENHANCEMENT_VIDEO = True  # Enable for video pipeline
+
+try:
+    from RL.llm_relationship_predictor import get_llm_predictor, LLMRelationshipPredictor
+    from RL.visual_features import extract_all_visual_features
+    LLM_PREDICTOR_AVAILABLE = True
+    print("[VideoRelation] ✅ LLM Relationship Predictor available for video")
+except ImportError as e:
+    print(f"[VideoRelation] ⚠️ LLM predictor not available: {e}")
+
 
 FrameCallback = Optional[Callable[[np.ndarray], None]]
 RelationCallback = Optional[Callable[[Dict[str, List[Dict[str, object]]]], None]]
@@ -653,7 +667,225 @@ class RelTRInferenceEngine:
         context_tensor = self._prepare_context(global_context)
         with torch.no_grad():
             outputs = model(samples, global_context=context_tensor) if context_tensor is not None else model(samples)
-        return self._decode_relationships(outputs, objects, pil_image.size)
+        
+        relationships = self._decode_relationships(outputs, objects, pil_image.size)
+        
+        # === LLM OPEN-VOCAB ENHANCEMENT ===
+        if USE_LLM_ENHANCEMENT_VIDEO and LLM_PREDICTOR_AVAILABLE:
+            # Step 1: Enhance low-confidence existing relationships
+            relationships = self._enhance_with_llm(
+                frame_bgr, objects, relationships, global_context
+            )
+            
+            # Step 2: Generate relations for completely missed person-vehicle pairs
+            missing_pair_rels = self._generate_llm_missing_relations(
+                frame_bgr, objects, relationships, global_context
+            )
+            if missing_pair_rels:
+                relationships.extend(missing_pair_rels)
+        
+        return relationships
+
+    def _enhance_with_llm(
+        self,
+        frame_bgr: np.ndarray,
+        objects: List[Dict],
+        relationships: List[Dict],
+        global_context: Optional[List[float]] = None,
+    ) -> List[Dict]:
+        """Enhance relationships using LLM for open-vocabulary prediction in video."""
+        global _llm_predictor
+        
+        if _llm_predictor is None:
+            try:
+                _llm_predictor = get_llm_predictor(confidence_threshold=LLM_CONFIDENCE_THRESHOLD)
+            except Exception as e:
+                print(f"[VideoRelation] LLM init failed: {e}")
+                return relationships
+        
+        if not _llm_predictor.is_available:
+            return relationships
+        
+        enhanced = []
+        llm_count = 0
+        
+        for rel in relationships:
+            confidence = rel.get('confidence', 0)
+            source = rel.get('source', 'model')
+            
+            # Skip heuristic (already high quality)
+            if source == 'heuristic_spatial':
+                enhanced.append(rel)
+                continue
+            
+            # Skip if confidence is good
+            if confidence >= LLM_CONFIDENCE_THRESHOLD:
+                enhanced.append(rel)
+                continue
+            
+            # Find subject and object
+            subject_name = rel.get('subject', '')
+            object_name = rel.get('object', '')
+            
+            subject_obj = next((o for o in objects if o.get('class') == subject_name), None)
+            object_obj = next((o for o in objects if o.get('class') == object_name), None)
+            
+            if not subject_obj or not object_obj:
+                enhanced.append(rel)
+                continue
+            
+            subject_bbox = subject_obj.get('bbox', [])
+            object_bbox = object_obj.get('bbox', [])
+            
+            if len(subject_bbox) < 4 or len(object_bbox) < 4:
+                enhanced.append(rel)
+                continue
+            
+            # Query LLM (limit to avoid latency)
+            try:
+                llm_result = _llm_predictor.predict(
+                    image=frame_bgr,
+                    subject_bbox=subject_bbox,
+                    object_bbox=object_bbox,
+                    subject_class=subject_name,
+                    object_class=object_name,
+                    reltr_prediction={'relation': rel.get('relation'), 'confidence': confidence},
+                    global_context=global_context,
+                )
+                
+                if llm_result.get('llm_used'):
+                    enhanced_rel = {
+                        'subject': subject_name,
+                        'relation': llm_result['relation'],
+                        'object': object_name,
+                        'confidence': llm_result['confidence'],
+                        'source': 'llm_open_vocab' if llm_result.get('is_open_vocab') else 'llm_enhanced',
+                        'subject_track_id': rel.get('subject_track_id'),
+                        'object_track_id': rel.get('object_track_id'),
+                    }
+                    enhanced.append(enhanced_rel)
+                    llm_count += 1
+                else:
+                    enhanced.append(rel)
+            except Exception:
+                enhanced.append(rel)
+        
+        if llm_count > 0:
+            print(f"🤖 [Video-LLM] Enhanced {llm_count} relationships")
+        
+        return enhanced
+
+    def _generate_llm_missing_relations(
+        self,
+        frame_bgr: np.ndarray,
+        objects: List[Dict],
+        existing_relationships: List[Dict],
+        global_context: Optional[List[float]] = None,
+    ) -> List[Dict]:
+        """Generate LLM relations for ANY object pairs that RelTR completely missed.
+        
+        This is a GENERALIZED method - works for ALL object pair types.
+        """
+        global _llm_predictor
+        
+        if len(objects) < 2:
+            return []
+        
+        if _llm_predictor is None:
+            try:
+                _llm_predictor = get_llm_predictor(confidence_threshold=LLM_CONFIDENCE_THRESHOLD)
+            except Exception as e:
+                print(f"[VideoRelation] LLM init failed: {e}")
+                return []
+        
+        if not _llm_predictor.is_available:
+            return []
+        
+        # Build set of existing pairs (both directions)
+        existing_pairs = set()
+        for rel in existing_relationships:
+            subj = rel.get('subject', '').lower()
+            obj = rel.get('object', '').lower()
+            existing_pairs.add((subj, obj))
+            existing_pairs.add((obj, subj))
+        
+        # Helper to get class name
+        def get_class_name(o):
+            return (o.get('class') or o.get('label') or '').lower().strip()
+        
+        # Count missing pairs
+        missing_count = 0
+        for i in range(len(objects)):
+            for j in range(i + 1, len(objects)):
+                subj_class = get_class_name(objects[i])
+                obj_class = get_class_name(objects[j])
+                if (subj_class, obj_class) not in existing_pairs:
+                    missing_count += 1
+        
+        if missing_count == 0:
+            return []
+        
+        new_relations = []
+        
+        # Iterate over ALL object pairs
+        for i in range(len(objects)):
+            subj_obj = objects[i]
+            subj_class = subj_obj.get('class') or subj_obj.get('label') or 'unknown'
+            subj_bbox = subj_obj.get('bbox', [])
+            
+            if len(subj_bbox) < 4:
+                continue
+            
+            for j in range(i + 1, len(objects)):
+                obj_obj = objects[j]
+                obj_class = obj_obj.get('class') or obj_obj.get('label') or 'unknown'
+                
+                # Skip if relation already exists
+                if (subj_class.lower(), obj_class.lower()) in existing_pairs:
+                    continue
+                
+                obj_bbox = obj_obj.get('bbox', [])
+                if len(obj_bbox) < 4:
+                    continue
+                
+                # Convert to int
+                s_bbox = [int(x) for x in subj_bbox[:4]]
+                o_bbox = [int(x) for x in obj_bbox[:4]]
+                
+                # Call LLM for missing pair
+                try:
+                    result = _llm_predictor.predict_for_missing_pair(
+                        image=frame_bgr,
+                        subject_bbox=s_bbox,
+                        object_bbox=o_bbox,
+                        subject_class=subj_class,
+                        object_class=obj_class,
+                        global_context=global_context,
+                    )
+                    
+                    if result is not None:
+                        new_rel = {
+                            'subject': subj_class,
+                            'relation': result['relation'],
+                            'object': obj_class,
+                            'confidence': result['confidence'],
+                            'source': result['source'],
+                            'subject_track_id': subj_obj.get('track_id'),
+                            'object_track_id': obj_obj.get('track_id'),
+                            'is_open_vocab': result.get('is_open_vocab', False),
+                        }
+                        new_relations.append(new_rel)
+                        existing_pairs.add((subj_class.lower(), obj_class.lower()))
+                        
+                        print(f"✅ [Video-LLM-Missing] Added: {subj_class} '{result['relation']}' {obj_class}")
+                        
+                except Exception as e:
+                    print(f"[Video-LLM-Missing] Error for {subj_class}-{obj_class}: {e}")
+        
+        if new_relations:
+            print(f"🤖 [Video-LLM-Missing] Generated {len(new_relations)} new relations for undetected pairs")
+        
+        return new_relations
 
     def _decode_relationships(self, outputs, objects, image_size):
         rel_logits = outputs.get("rel_logits")
@@ -791,9 +1023,10 @@ class RelTRInferenceEngine:
                 pair_cursor += 1
         
         # === HEURISTIC FALLBACK: Generate person-vehicle relationships if RelTR missed them ===
-        heuristic_rels = generate_heuristic_relationships(objects, relationships)
-        if heuristic_rels:
-            relationships.extend(heuristic_rels)
+        # COMMENTED OUT FOR OPEN-VOCAB TESTING - LLM now handles this
+        # heuristic_rels = generate_heuristic_relationships(objects, relationships)
+        # if heuristic_rels:
+        #     relationships.extend(heuristic_rels)
         
         return relationships
 

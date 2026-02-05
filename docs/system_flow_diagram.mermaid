@@ -1,0 +1,63 @@
+graph TD
+    %% Define Styles
+    classDef vrd fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef loop fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
+    classDef app fill:#e0f2f1,stroke:#004d40,stroke-width:2px;
+    classDef component fill:#ffffff,stroke:#333,stroke-width:1px;
+
+    %% Block 1: VRD (Visual Relationship Detection)
+    subgraph VRD [BLOCK 1: VRD CORE]
+        direction TB
+        YOLO[YOLO v11\nObject Detection]:::component
+        ReClip[ReClip\nClassification]:::component
+        RelTR[RelTR\nRelationship Prediction]:::component
+        SceneGraph[Scene Graph Output]:::component
+        
+        YOLO --> ReClip
+        ReClip --> RelTR
+        RelTR --> SceneGraph
+    end
+    class VRD vrd
+
+    %% Block 2: Data Loop (RL + GenAI + Training)
+    subgraph DataLoop [BLOCK 2: DATA LOOP]
+        direction TB
+        Metrics[Performance Metrics]:::component
+        RL_Agent[RL Agent DQN\nAction: Prompt Variations]:::component
+        GenAI[Stable Diffusion\nSynthetic Data Gen]:::component
+        AutoAnnot[Auto-Annotation\nGroundingDINO/OWL-ViT]:::component
+        Dataset[Synthetic Dataset]:::component
+        FineTune[Model Fine-tuning]:::component
+
+        Metrics --> RL_Agent
+        RL_Agent --> GenAI
+        GenAI --> AutoAnnot
+        AutoAnnot --> Dataset
+        Dataset --> FineTune
+    end
+    class DataLoop loop
+
+    %% Block 3: Application (Video/Safety)
+    subgraph App [BLOCK 3: APPLICATION]
+        direction TB
+        VideoInput[Video Input]:::component
+        Safety[Safety Analysis\n3-Tier System]:::component
+        Alerts[Alerts & Visualization]:::component
+        GUI[User Interface]:::component
+
+        VideoInput --> Safety
+        Safety --> Alerts
+        Alerts --> GUI
+    end
+    class App app
+
+    %% Connections between Blocks
+    %% Application uses VRD
+    VideoInput -.->|Frames| YOLO
+    SceneGraph ==>|Graph Data| Safety
+
+    %% VRD feeds Data Loop
+    SceneGraph -.->|Evaluation| Metrics
+    
+    %% Data Loop updates VRD
+    FineTune ==>|Refined Weights| RelTR
