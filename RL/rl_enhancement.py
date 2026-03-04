@@ -233,6 +233,9 @@ class AppReinforcementLearning:
                     'reward_components': results.get('reward_components'),
                     'detection_metrics': results.get('detection_metrics'),
                     'relationship_metrics': results.get('relationship_metrics'),
+                    # NEW: Active Learning, Uncertainty, Approximation Algorithm metrics
+                    'subset_selection_stats': results.get('subset_selection_stats'),
+                    'uncertainty_reduction_score': (results.get('reward_components') or {}).get('uncertainty_reduction_score'),
                 }
                 self.experiment_manager.save_training_metrics(epoch_metrics, epoch + 1)
                 
@@ -250,6 +253,9 @@ class AppReinforcementLearning:
                     'detection_f1': (results.get('detection_metrics') or {}).get('f1'),
                     'relationship_f1': (results.get('relationship_metrics') or {}).get('f1'),
                     'reward_components': results.get('reward_components'),
+                    # NEW metrics
+                    'subset_selection_stats': results.get('subset_selection_stats'),
+                    'uncertainty_reduction': (results.get('reward_components') or {}).get('uncertainty_reduction_score'),
                 }
                 training_metrics['training_progress'].append(progress)
                 

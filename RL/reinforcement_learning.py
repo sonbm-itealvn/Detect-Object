@@ -26,6 +26,9 @@ from RL.auto_annotator import get_annotator, AutoAnnotator
 from util import box_ops
 from util.misc import nested_tensor_from_tensor_list
 from RL.model_manager import ModelManager
+from RL.uncertainty_estimator import UncertaintyEstimator
+from RL.active_learning import ActiveLearningSelector
+from RL.approximation_algorithm import GreedySubsetSelector
 from models import build_model
 
 
@@ -142,9 +145,33 @@ class RelationshipReinforcementLearning:
         # Increase this value (e.g., 3-5) to train multiple epochs on accumulated dataset
         self.reltr_training_epochs = 1  # Default: 1 epoch per episode (can be increased for better learning)
 
+        # === NEW: Active Learning, Uncertainty Learning, Approximation Algorithm ===
+        self.uncertainty_estimator: Optional[UncertaintyEstimator] = None  # Lazy init
+        self.active_learner: Optional[ActiveLearningSelector] = None       # Lazy init
+        self.subset_selector = GreedySubsetSelector(
+            diversity_weight=0.5,
+            quality_weight=0.3,
+            representativeness_weight=0.2,
+        )
+        self._previous_epoch_uncertainties: Dict[str, float] = {}  # Track uncertainty reduction
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+
+    def _ensure_uncertainty_estimator(self):
+        """Lazy initialization cho UncertaintyEstimator và ActiveLearningSelector."""
+        if self.uncertainty_estimator is None:
+            model, _ = self._ensure_relationship_model()
+            self.uncertainty_estimator = UncertaintyEstimator(
+                model, self.reltr_device, n_forward_passes=10
+            )
+            self.active_learner = ActiveLearningSelector(
+                self.uncertainty_estimator, strategy='combined'
+            )
+            print("[RL] Initialized UncertaintyEstimator (MC Dropout, T=10) "
+                  "and ActiveLearningSelector (combined strategy)")
+        return self.uncertainty_estimator, self.active_learner
     def _build_reltr_transform(self) -> T.Compose:
         return T.Compose([
             T.Resize(800),
@@ -329,7 +356,7 @@ class RelationshipReinforcementLearning:
     def decide_action(self, original_relationships: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Choose an action for the next training episode using epsilon-greedy DQN policy.
-        NEW: Bây giờ agent có thể quyết định sinh bao nhiêu ảnh cho TỪNG relationship cụ thể.
+        NEW: Sử dụng Active Learning (uncertainty-based) để tạo generation plan.
         
         Returns a context dictionary that should be passed back after the episode completes.
         """
@@ -338,22 +365,60 @@ class RelationshipReinforcementLearning:
         self.last_state = state
         self.last_action_index = action_index
         
-        # NEW: Tính toán relationship-specific generation plan
+        # === Active Learning: Uncertainty-based generation plan ===
         relationship_plan = {}
+        active_learning_stats = {}
         if original_relationships:
-            relationship_plan = self._get_relationship_priorities(original_relationships, action_value)
-            print(f"[RL] Relationship-specific generation plan:")
-            for rel_key, variations in relationship_plan.items():
-                rel_info = self.relationship_performance.get(rel_key, {}).get('relationship', {})
-                avg_f1 = self.relationship_performance.get(rel_key, {}).get('avg_f1', 0.0)
-                print(f"  - {rel_info.get('subject', '?')} {rel_info.get('relation', '?')} {rel_info.get('object', '?')}: "
-                      f"{variations} variations (avg F1: {avg_f1:.3f})")
+            try:
+                # Lazy init uncertainty estimator & active learner
+                self._ensure_uncertainty_estimator()
+                
+                # Score relationships using uncertainty + performance + tail_weight
+                scored_relationships = self.active_learner.score_relationships(
+                    relationships=original_relationships,
+                    evaluation_samples=self.dataset_samples or [],
+                    relationship_performance=self.relationship_performance,
+                    tail_weights=self.tail_weights,
+                    transform_fn=self.reltr_transform,
+                )
+                
+                # Create generation plan with total budget
+                total_budget = action_value * len(original_relationships)
+                relationship_plan = self.active_learner.create_generation_plan(
+                    scored_relationships,
+                    total_budget=total_budget,
+                    min_per_rel=1,
+                    max_per_rel=max(action_value * 3, 10),
+                )
+                
+                # Log detailed reasoning
+                self.active_learner.log_selection_reasoning(relationship_plan, scored_relationships)
+                
+                active_learning_stats = {
+                    'scored_relationships': [
+                        {
+                            'rel_key': sr['rel_key'],
+                            'acquisition_score': sr['acquisition_score'],
+                            'uncertainty_score': sr['uncertainty_score'],
+                            'performance_score': sr['performance_score'],
+                            'tail_score': sr['tail_score'],
+                        }
+                        for sr in scored_relationships
+                    ],
+                    'total_budget': total_budget,
+                    'strategy': self.active_learner.strategy,
+                }
+                
+            except Exception as e:
+                print(f"[RL] Active Learning scoring failed, falling back to F1-heuristic: {e}")
+                relationship_plan = self._get_relationship_priorities(original_relationships, action_value)
         
         return {
             'state': state.clone().detach(),
             'action_index': action_index,
             'num_variations': action_value,  # Base variations (backward compatibility)
-            'relationship_plan': relationship_plan,  # NEW: Plan cho từng relationship
+            'relationship_plan': relationship_plan,
+            'active_learning_stats': active_learning_stats,  # NEW
             'epsilon': self.epsilon,
         }
 
@@ -1801,6 +1866,35 @@ class RelationshipReinforcementLearning:
             else:
                 print(f"Step 1: Using provided synthetic data: {len(synthetic_data)} images (variations per relation: {action_variations})")
 
+        # === Approximation Algorithm: Greedy Submodular Subset Selection ===
+        subset_selection_stats = {}
+        if len(synthetic_data) > 3:
+            try:
+                # Step 1.5: Loại bỏ samples trùng lặp
+                filtered_data = self.subset_selector.filter_redundant_samples(
+                    synthetic_data, min_distance=0.08
+                )
+                
+                # Step 1.6: Chọn subset tối ưu nếu pool lớn hơn budget hợp lý
+                # Budget = 70% pool size (giữ lại đa dạng nhất, bỏ 30% kém chất lượng/trùng lặp)
+                subset_budget = max(3, int(len(filtered_data) * 0.7))
+                if len(filtered_data) > subset_budget:
+                    synthetic_data, subset_selection_stats = self.subset_selector.select_optimal_subset(
+                        filtered_data, budget=subset_budget
+                    )
+                    print(f"[RL] Approximation Algorithm: {subset_selection_stats['pool_size']} → "
+                          f"{subset_selection_stats['selected']} samples "
+                          f"(coverage: {subset_selection_stats['relationship_coverage']:.1%})")
+                else:
+                    synthetic_data = filtered_data
+                    subset_selection_stats = {
+                        'pool_size': len(filtered_data), 'selected': len(filtered_data),
+                        'skipped': True, 'reason': 'pool_too_small',
+                    }
+            except Exception as e:
+                print(f"[RL] Approximation Algorithm failed, using full pool: {e}")
+                subset_selection_stats = {'error': str(e)}
+
         ingested_count = self._ingest_synthetic_samples(synthetic_data)
         if ingested_count == 0:
             print("[RL] Warning: no synthetic samples ingested into the training dataset.")
@@ -1914,6 +2008,7 @@ class RelationshipReinforcementLearning:
             'reward_components': reward_components,
             'detection_metrics': detection_metrics_snapshot,
             'relationship_metrics': relationship_metrics_snapshot,
+            'subset_selection_stats': subset_selection_stats,  # NEW: Approximation Algorithm stats
         }
     
     def calculate_reward(self, synthetic_data, original_relationships):
@@ -1950,17 +2045,48 @@ class RelationshipReinforcementLearning:
         consistency_score = self._calculate_consistency_score(per_sample_f1, relationship_metrics.get('f1_std'))
         improvement_score = self._calculate_improvement_score()
         
+        # === NEW: Uncertainty Reduction Score ===
+        uncertainty_reduction_score = 0.0
+        try:
+            if self.uncertainty_estimator is not None and evaluation_samples:
+                batch_unc = self.uncertainty_estimator.estimate_batch(
+                    evaluation_samples, transform_fn=self.reltr_transform, max_samples=10
+                )
+                if batch_unc:
+                    current_uncertainties = {
+                        str(k): v.get('uncertainty_score', 0.5) for k, v in batch_unc.items()
+                    }
+                    uncertainty_reduction_score = self.uncertainty_estimator.compute_uncertainty_reduction(
+                        current_uncertainties
+                    )
+                    # Map [-1, 1] → [0, 1]: 0.5 = no change, 1.0 = full reduction, 0.0 = doubled
+                    uncertainty_reduction_score = max(0.0, min(1.0, 0.5 + uncertainty_reduction_score * 0.5))
+                    print(f"    🔍 Debug - Uncertainty reduction score: {uncertainty_reduction_score:.4f}")
+        except Exception as e:
+            print(f"    ⚠️ Uncertainty estimation in reward failed: {e}")
+            uncertainty_reduction_score = 0.5  # Neutral on failure
+        
         # Debug scores
         print(f"    🔍 Debug - Detection score: {detection_score:.4f}")
         print(f"    🔍 Debug - Relationship score: {relationship_score:.4f}")
         print(f"    🔍 Debug - Diversity score: {diversity_score:.4f}")
         print(f"    🔍 Debug - Consistency score: {consistency_score:.4f}")
         print(f"    🔍 Debug - Improvement score: {improvement_score:.4f}")
+        print(f"    🔍 Debug - Uncertainty reduction score: {uncertainty_reduction_score:.4f}")
         
         # 3. Tính trọng số động dựa trên hiệu suất hiện tại
         dynamic_weights = self._calculate_dynamic_weights(
             detection_score, relationship_score, diversity_score, consistency_score
         )
+        # Add weight for uncertainty component
+        uncertainty_weight = 0.10
+        # Re-normalize existing weights to make room for uncertainty_weight
+        existing_total = sum(dynamic_weights.values())
+        if existing_total > 0:
+            scale_factor = (1.0 - uncertainty_weight) / existing_total
+            for k in dynamic_weights:
+                dynamic_weights[k] *= scale_factor
+        dynamic_weights['uncertainty_reduction'] = uncertainty_weight
         
         # 4. Tính điểm tổng hợp với trọng số thích ứng
         total_reward = (
@@ -1968,7 +2094,8 @@ class RelationshipReinforcementLearning:
             dynamic_weights['relationship'] * relationship_score +
             dynamic_weights['diversity'] * diversity_score +
             dynamic_weights['consistency'] * consistency_score +
-            dynamic_weights['improvement'] * improvement_score
+            dynamic_weights['improvement'] * improvement_score +
+            dynamic_weights['uncertainty_reduction'] * uncertainty_reduction_score
         )
         
         # 5. Áp dụng hàm điều chỉnh để đảm bảo điểm trong khoảng hợp lý
@@ -1983,6 +2110,7 @@ class RelationshipReinforcementLearning:
             'diversity_score': diversity_score,
             'consistency_score': consistency_score,
             'improvement_score': improvement_score,
+            'uncertainty_reduction_score': uncertainty_reduction_score,  # NEW
             'dynamic_weights': dynamic_weights,
             'total_reward': total_reward,
             'scaling_factor': self._get_current_scaling_factor(),
