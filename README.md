@@ -1,2232 +1,1564 @@
-# 🔍 Scene Graph Generation với Reinforcement Learning
+# Hình thức hóa Toán học Hệ thống Phát hiện Quan hệ Thị giác (VRD)
 
-> Hệ thống phát hiện đối tượng và dự đoán quan hệ (Scene Graph Generation) kết hợp học tăng cường (Deep Q-Network) để giải quyết vấn đề **long-tail distribution** trong dữ liệu. Hệ thống hỗ trợ xử lý ảnh, video với phân tích an toàn, và tự động sinh dữ liệu synthetic để cải thiện hiệu suất model.
+> **Tài liệu khoa học** mô tả chi tiết kiến trúc, thuật toán, công thức toán học và chứng minh tính đúng đắn của toàn bộ hệ thống Visual Relationship Detection Pipeline.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)
-![CUDA](https://img.shields.io/badge/CUDA-11.8+-green.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
-
----
-
-## 📋 Mục lục
-
-- [Giới thiệu](#-giới-thiệu)
-- [Kiến trúc hệ thống](#-kiến-trúc-hệ-thống)
-- [Tính năng chính](#-tính-năng-chính)
-- [Cài đặt](#-cài-đặt)
-- [Sử dụng](#-sử-dụng)
-- [Cấu trúc dự án](#-cấu-trúc-dự-án)
-- [Cấu hình](#-cấu-hình)
-- [Kết quả](#-kết-quả)
-- [Hệ thống Phân loại An toàn 3 Tầng](#-hệ-thống-phân-loại-an-toàn-3-tầng)
-- [Cập nhật và cải tiến](#-cập-nhật-và-cải-tiến)
+**Tham chiếu chính:**
+- Cong et al., "RelTR: Relation Transformer for Scene Graph Generation," *ACMMM 2022*
+- Redmon et al., "You Only Look Once," *CVPR 2016*; Jocher et al., "Ultralytics YOLOv11," 2024
+- Radford et al., "Learning Transferable Visual Models From Natural Language Supervision (CLIP)," *ICML 2021*
+- Gal & Ghahramani, "Dropout as a Bayesian Approximation," *ICML 2016*
+- Nemhauser, Wolsey & Fisher, "An analysis of approximations for maximizing submodular set functions," *Math. Programming 1978*
+- Watkins & Dayan, "Q-Learning," *Machine Learning 1992*
 
 ---
 
-## 🎯 Giới thiệu
+## Mục lục
 
-### Vấn đề
-- **Long-tail distribution**: Trong các dataset Scene Graph (như Visual Genome), một số quan hệ xuất hiện rất thường xuyên (head classes: "on", "has", "wearing") trong khi đa số quan hệ xuất hiện rất hiếm (tail classes: "riding", "playing with", "looking at").
-- Model thường học tốt head classes nhưng kém với tail classes.
-- Thiếu dữ liệu training cho các quan hệ hiếm làm giảm hiệu suất tổng thể.
-
-### Giải pháp
-Hệ thống sử dụng **Reinforcement Learning (Deep Q-Network)** để:
-1. **Tự động sinh dữ liệu synthetic**: Sử dụng Stable Diffusion để tạo ảnh cho các quan hệ hiếm
-2. **Auto-annotation**: Tự động tạo bounding boxes cho synthetic images bằng GroundingDINO/OWL-ViT
-3. **Reward optimization**: Điều chỉnh trọng số reward ưu tiên tail classes (`1/sqrt(frequency)`)
-4. **Adaptive training**: DQN agent tự động quyết định số lượng variations cần sinh cho mỗi relationship
-5. **Safety analysis**: Hệ thống 3 tầng phân tích an toàn cho video (White/Black List, LLM Reasoning, Local Rules)
-
-### Ứng dụng
-- **Scene Graph Generation**: Phát hiện objects và relationships trong ảnh/video
-- **Video Safety Monitoring**: Phát hiện và cảnh báo hành động nguy hiểm trong video
-- **Data Augmentation**: Tự động sinh dữ liệu training cho các quan hệ hiếm
-- **Research**: Nghiên cứu về long-tail distribution trong Scene Graph Generation
-
----
-
-## 🏗️ Kiến trúc hệ thống
-
-### Tổng quan kiến trúc
-
-Hệ thống bao gồm 2 luồng chính:
-
-1. **Video Processing Pipeline**: Xử lý video với Safety Analysis
-   - Input: Video file
-   - Output: Video đã annotate + JSON thống kê an toàn
-
-2. **RL Training Pipeline**: Training model với Reinforcement Learning
-   - Input: Images + Relationships
-   - Output: Trained model + Metrics
-
-### Sơ đồ luồng hoạt động chi tiết
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                          PHASE 1: VRD PIPELINE (Visual Relationship Detection)              │
-├─────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                             │
-│  [1] Input Image                                                                            │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  YOLO v11 Detection                                                          │           │
-│  │  • Phát hiện bounding boxes                                                  │           │
-│  │  • ROI features extraction                                                   │           │
-│  │  • Global context vector                                                     │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘  
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  ReClip (Region Clip)                                                        │           │
-│  │   • Gán nhãn cho các Boundingbox (classficication)                           │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  RelTR (Relationship Transformer)                                            │           │
-│  │  • Transformer-based Scene Graph Generation                                  │           │
-│  │  • Dự đoán triplets: (Subject, Predicate, Object)                            │           │
-│  │  • Geometric + semantic relationship prediction                              │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  Scene Graph Output                                                          │           │
-│  │  • Objects: [{bbox, class, confidence, features}]                            │           │
-│  │  • Relationships: [{subject, relation, object, confidence}]                  │           │
-│  │  • Long-tail analysis: Tính tần suất quan hệ                                 │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ├──────────────────────────────────────────────────────────────────────┐             │
-│        │                                                                      │             │
-│        │  [Video Mode - Safety Analysis Enabled]                              │             │
-│        │        │                                                             │             │
-│        │        ▼                                                             │             │
-│        │  ┌──────────────────────────────────────────────────────────────┐   │             │
-│        │  │  Safety Classifier (3-Tier System) ⭐                         │   │             │
-│        │  │  • Tầng 1: White/Black/Gray List                              │   │             │
-│        │  │    - White List: An toàn (SAFE)                               │   │             │
-│        │  │    - Black List: Nguy hiểm (DANGEROUS)                        │   │             │
-│        │  │    - Gray List: Không rõ → Chuyển Tầng 2                      │   │             │
-│        │  │  • Tầng 2: LLM Semantic Reasoning                             │   │             │
-│        │  │    - Hỏi OpenAI/Gemini: "Hành động này nguy hiểm không?"     │   │             │
-│        │  │    - Cache responses trong llm_safety_cache.json              │   │             │
-│        │  │    - Parse: SAFE/SUSPICIOUS/DANGEROUS                         │   │             │
-│        │  │  • Tầng 3: Local Rules Database                               │   │             │
-│        │  │    - Kiểm tra local_safety_rules.json (ưu tiên cao nhất)     │   │             │
-│        │  │    - Học từ phản hồi người dùng (Human-in-the-loop)            │   │             │
-│        │  │  • Output: Safety Level + Confidence + Explanation             │   │             │
-│        │  └──────────────────────────────────────────────────────────────┘   │             │
-│        │        │                                                             │             │
-│        │        ▼                                                             │             │
-│        │  ┌──────────────────────────────────────────────────────────────┐   │             │
-│        │  │  Video Annotation & Alert Rendering                          │   │             │
-│        │  │  • Vẽ relationships với mũi tên và text                     │   │             │
-│        │  │  • Hiển thị cảnh báo an toàn:                                │   │             │
-│        │  │    - DANGEROUS: Banner đỏ "NGUY HIỂM - Cần can thiệp ngay!"  │   │             │
-│        │  │    - SUSPICIOUS: Banner cam "Cảnh báo nhẹ - Cần kiểm tra"    │   │             │
-│        │  │  • Lưu thống kê vào *_summary.json                           │   │             │
-│        │  │  • Output: Annotated video + JSON statistics                  │   │             │
-│        │  └──────────────────────────────────────────────────────────────┘   │             │
-│        │                                                                      │             │
-│        └──────────────────────────────────────────────────────────────────────┘             │
-│                                                                                             │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-                                        │
-                                        ▼
-                                        │
-                        [Image Mode - RL Training]
-                                        │
-                                        ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 2: REINFORCEMENT LEARNING TRAINING LOOP (DQN)                      │
-├─────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                             │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [2.1] State Vector Construction (5D)                                        │           │
-│  │  • detection_f1: F1 score từ detection model (normalized [0,1])              │           │
-│  │  • relationship_f1: F1 score từ relationship model (normalized [0,1])        │           │
-│  │  • reward: Reward hiện tại (tanh normalized)                                 │           │
-│  │  • dataset_norm: Kích thước dataset / 50 (normalized)                        │           │
-│  │  • epsilon: Exploration rate hiện tại (normalized)                           │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [2.2] DQN Agent Decision                                                    │           │
-│  │  • Q-Network: Input(5) → Linear(64) → ReLU → Linear(64) → ReLU → Linear(10)  │           │
-│  │  • Epsilon-greedy: Exploration vs Exploitation                               │           │
-│  │  • Action Space: Số biến thể prompt [1-10]                                   │           │
-│  │  • Relationship-specific priorities:                                         │           │
-│  │    - F1 thấp (<0.3) → sinh 3x variations                                     │           │
-│  │    - F1 trung bình (0.3-0.7) → sinh 1-2x variations                          │           │
-│  │    - F1 cao (>0.7) → sinh 0.5x variations                                    │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [2.3] Action Execution: Generate Synthetic Data                             │           │
-│  │  • Input: Relationship triplets từ Scene Graph                               │           │
-│  │  • Output: Số lượng variations cho mỗi relationship                          │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-                                        │
-                                        ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 3: GENERATIVE AI (Stable Diffusion + Annotation)                   │
-├─────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                             │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [3.1] Prompt Generation                                                     │           │
-│  │  • Relationship template mapping:                                            │           │
-│  │    "holding" → "{subject} holding {object}"                                  │           │
-│  │    "riding" → "{subject} riding {object}"                                    │           │
-│  │  • Prompt variations:                                                        │           │
-│  │    - Context: "in hands", "on street", "in room"                             │           │
-│  │    - Quality: "high quality", "detailed", "realistic"                        │           │
-│  │    - Lighting: "bright daylight", "soft lighting"                            │           │
-│  │    - Background: "on the street", "in the park"                              │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [3.2] Stable Diffusion Image Generation                                     │           │
-│  │  • Batch generation (batch_size=2) để tối ưu GPU                             │           │
-│  │  • num_inference_steps: 50 (default)                                         │           │
-│  │  • guidance_scale: 7.5 (default)                                             │           │
-│  │  • Output: PIL Images                                                        │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [3.3] Quality Filter                                                        │           │
-│  │  • Size/Aspect: min 512×512, max aspect 2.2                                  │           │
-│  │  • Blur check: Laplacian variance ≥ 60                                       │           │
-│  │  • Exposure: mean [20, 235], clip ratio ≤ 0.20                               │           │
-│  │  • Duplicate: pHash comparison                                               │           │
-│  │  • CLIP similarity: ≥ 0.23 với prompt                                        │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [3.4] Auto-Annotation (Priority Order)                                      │           │
-│  │                                                                              │           │
-│  │  Vấn đề: Stable Diffusion chỉ trả về pixels, không có bounding boxes         │           │
-│  │  Giải pháp: Open-vocabulary detection để tự động tạo annotations             │           │
-│  │                                                                              │           │
-│  │  Flow:                                                                       │           │
-│  │  1. Input: Synthetic image + relationship triplet (subject, relation, object)│           │
-│  │  2. Extract text prompts: ["dog", "surfboard"] từ subject/object             │           │
-│  │  3. Chạy detector với text prompts                                           │           │
-│  │  4. Output: Objects với bbox [x1, y1, x2, y2] + class + confidence           │           │
-│  │                                                                              │           │
-│  │  Backend Priority (tự động chọn theo thứ tự):                                │           │
-│  │                                                                              │           │
-│  │  1. GroundingDINO (SOTA, chính xác nhất)                                     │           │
-│  │     • Model: SwinT-OGC (Swin Transformer)                                    │           │
-│  │     • Input format: Image + text prompt "dog . surfboard"                    │           │
-│  │     • Thresholds: box_threshold=0.25, text_threshold=0.20                    │           │
-│  │     • Output: Normalized coords [cx, cy, w, h] → convert to [x1, y1, x2, y2] │           │
-│  │     • Auto-detect paths:                                                     │           │
-│  │       - Config: GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py│           │
-│  │       - Weights: weights/groundingdino_swint_ogc.pth                         │           │
-│  │                                                                              │           │
-│  │  2. OWL-ViT (Lightweight, HuggingFace)                                       │           │
-│  │     • Model: google/owlvit-base-patch32 (tự động download từ HuggingFace)    │           │
-│  │     • Input format: Image + text prompts ["a photo of a dog", "a photo of..."]│          │
-│  │     • Threshold: box_threshold=0.25                                           │          │
-│  │     • Output: Direct [x1, y1, x2, y2] coordinates                            │           │
-│  │     • Fallback nếu GroundingDINO không có                                    │           │
-│  │                                                                              │           │
-│  │  3. YOLO + CLIP (Fallback)                                                   │           │
-│  │     • Pipeline: YOLO detect → CLIP classify với open vocabulary              │           │
-│  │     • Input: Image path                                                      │           │
-│  │     • Matching: Fuzzy match labels với text prompts                          │           │
-│  │     • Confidence: 0.7 nếu matched, 0.5 nếu không                             │           │
-│  │     • Limited vocabulary (chỉ detect classes YOLO biết)                      │           │
-│  │                                                                              │           │
-│  │  4. Pseudo-bbox (Heuristic, low quality - LAST RESORT)                       │           │
-│  │     • Chỉ dùng khi tất cả detectors đều fail                                 │           │
-│  │     • Heuristics dựa trên relation type:                                     │           │
-│  │       - "on"/"above"/"riding": Subject trên, Object dưới                     │           │
-│  │       - "under"/"below": Subject dưới, Object trên                           │           │
-│  │       - "holding"/"carrying": Subject lớn, Object nhỏ gần subject            │           │
-│  │       - Default: Subject trái, Object phải                                   │           │
-│  │     • Confidence: 0.3 (rất thấp)                                             │           │
-│  │     • WARNING: Chất lượng thấp, chỉ dùng khi không còn lựa chọn              ;o│           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [3.5] Dataset Ingestion                                                     │           │
-│  │  • Synthetic samples: {image_path, objects, relationships, metadata}         │           │
-│  │  • Relationship inference: RelTR trên synthetic images                       │           │
-│  │  • Fallback relationships nếu RelTR không detect được                        │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│                                                                                             │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-                                        │
-                                        ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 4: MODEL TRAINING & EVALUATION                                     │
-├─────────────────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                             │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [4.1] VRD Fine-tuning                                                       │           │
-│  │  • Input: Dataset samples (original + synthetic)                             │           │
-│  │  • Prepare VRD targets: entities + relationships                             │           │
-│  │  • Training loop:                                                            │           │
-│  │    - Forward pass với image tensor                                           │           │
-│  │    - Compute loss: bbox_loss + giou_loss + rel_loss                          │           │
-│  │    - Backward pass + optimizer step                                          │           │
-│  │  • Checkpoint saving theo epoch                                              │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [4.2] Evaluation                                                            │           │
-│  │  • Detection metrics: Precision, Recall, F1                                  │           │
-│  │  • Relationship metrics: Precision, Recall, F1                               │           │
-│  │  • mR@K metrics: mR@10, mR@20, mR@50, mR@100 (công bằng cho long-tail)       │           │
-│  │  • Long-tail loss: Loss riêng cho các quan hệ hiếm                           │           │
-│  │  • Diversity score: Đa dạng relation/object types                            │           │
-│  │  • Consistency score: Độ ổn định predictions                                 │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [4.3] Reward Calculation                                                    │           │
-│  │  • Base components:                                                          │           │ 
-│  │    - Detection F1 × 0.25                                                     │           │
-│  │    - Relationship F1 × 0.45 (cao nhất)                                       │           │
-│  │    - Diversity × 0.15                                                        │           │
-│  │    - Improvement × 0.05                                                      │           │
-│  │  • Long-tail boost:                                                          │           │
-│  │    tail_weight = 1 / sqrt(frequency + 1e-3)                                  │           │
-│  │    relationship_score *= (1 + tail_weight)                                   │           │
-│  │  • Final reward: Sum of all components                                       │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [4.4] DQN Update                                                            │           │
-│  │  • Store experience: (state, action, reward, next_state)                     │           │
-│  │  • Experience replay: Sample batch từ buffer (size=10,000)                   │           │
-│  │  • Q-learning update:                                                        │           │
-│  │    Q(s,a) ← Q(s,a) + α[r + γ max Q(s',a') - Q(s,a)]                          │           │
-│  │  • Target network update: Mỗi 20 steps                                       │           │
-│  │  • Epsilon decay: ε ← ε × 0.995 (min=0.01)                                   │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        ▼                                                                                    │
-│  ┌──────────────────────────────────────────────────────────────────────────────┐           │
-│  │  [4.5] Experiment Tracking                                                   │           │
-│  │  • Save metrics: JSON files                                                  │           │
-│  │  • Save plots: Reward vs Epoch, Components breakdown                         │           │
-│  │  • Save models: Checkpoints theo epoch                                       │           │
-│  │  • Save synthetic images: experiments/exp_XXX/ai_images/                     │           │
-│  │  • Metadata: Config, hyperparameters, timestamps                             │           │
-│  └──────────────────────────────────────────────────────────────────────────────┘           │
-│        │                                                                                    │
-│        └──────────────────────────────────────────────────────────────────────┐             │
-│                                                                               │             │
-│                                                                               ▼             │
-│                                                                    [Lặp lại từ Phase 2.1]   │
-│                                                                                             │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Tóm tắt luồng hoạt động
-
-#### Luồng xử lý Video (VideoRelationPipeline)
-
-1. **VRD Pipeline**: Input video frame → YOLO detection → Region Clip classification → RelTR relationship prediction → Scene Graph
-2. **Safety Analysis** (nếu enabled):
-   - **Tầng 1**: Kiểm tra White/Black List → Nếu match → Return SAFE/DANGEROUS
-   - **Tầng 3**: Kiểm tra Local Rules (ưu tiên cao nhất) → Nếu có → Return từ rule
-   - **Tầng 2**: Nếu không match → Hỏi LLM (OpenAI/Gemini) → Cache response
-   - **Default**: Nếu LLM không hoạt động → Return SUSPICIOUS
-3. **Video Annotation**: Vẽ relationships và cảnh báo an toàn lên frame
-4. **Output**: Video đã annotate + JSON thống kê an toàn
-
-#### Luồng RL Training (Reinforcement Learning)
-
-1. **VRD Pipeline**: Input image → YOLO detection → Region Clip classification → RelTR relationship prediction → Scene Graph
-2. **RL State**: Xây dựng state vector 5D từ metrics hiện tại
-3. **DQN Decision**: Agent quyết định số lượng variations cần sinh cho mỗi relationship
-4. **GenAI Generation**: Stable Diffusion sinh ảnh từ relationship triplets với prompt variations
-5. **Quality Filter**: Lọc ảnh chất lượng thấp (blur, exposure, duplicate, CLIP similarity)
-6. **Auto-Annotation**: GroundingDINO/OWL-ViT tự động tạo bounding boxes cho synthetic images
-7. **Dataset Ingestion**: Thêm synthetic samples vào training dataset
-8. **Model Training**: Fine-tune RelTR với dataset mới (hỗ trợ multiple epochs)
-9. **Evaluation**: Tính metrics (Detection F1, Relationship F1, mR@K, Long-tail Loss, Diversity, Consistency)
-10. **Reward Calculation**: Tính reward với long-tail boost cho quan hệ hiếm
-11. **DQN Update**: Cập nhật Q-network từ experience replay
-12. **Loop**: Lặp lại từ bước 2 cho đến khi đạt convergence hoặc max epochs
+1. [Ký hiệu và Quy ước](#1-ký-hiệu-và-quy-ước)
+2. [Tổng quan Kiến trúc](#2-tổng-quan-kiến-trúc)
+3. [Object Detection – YOLOv11](#3-object-detection--yolov11)
+4. [Zero-shot Classification – CLIP](#4-zero-shot-classification--clip)
+5. [ROI Feature Extraction – RoIAlign](#5-roi-feature-extraction--roialign)
+6. [Scene Graph Generation – RelTR Transformer](#6-scene-graph-generation--reltr-transformer)
+7. [Spatial-Semantic Validation](#7-spatial-semantic-validation)
+8. [LLM Open-Vocabulary Enhancement](#8-llm-open-vocabulary-enhancement)
+9. [Video Processing Pipeline](#9-video-processing-pipeline)
+10. [Safety Classification System](#10-safety-classification-system)
+11. [Deep Q-Network (DQN) Agent](#11-deep-q-network-dqn-agent)
+12. [Adaptive Reward Function](#12-adaptive-reward-function)
+13. [MC Dropout Uncertainty Estimation](#13-mc-dropout-uncertainty-estimation)
+14. [Active Learning Acquisition](#14-active-learning-acquisition)
+15. [Greedy Submodular Maximization](#15-greedy-submodular-maximization)
+16. [Synthetic Data Generation & Auto-Annotation](#16-synthetic-data-generation--auto-annotation)
+17. [Tổng kết End-to-End Pipeline](#17-tổng-kết-end-to-end-pipeline)
 
 ---
 
-## ✨ Tính năng chính
+## 1. Ký hiệu và Quy ước
 
-### 1. Object Detection (YOLO v11 + CLIP)
-- **YOLO v11**: Phát hiện bounding boxes với độ chính xác cao
-- **CLIP Re-classification**: Open-vocabulary classification để mở rộng vocabulary
-- **ROI Features Extraction**: Trích xuất feature vectors từ bounding boxes
-- **Global Context**: Tính toán context vector cho toàn bộ ảnh
-- **Output**: `converted_bboxes.json` với objects (bbox, class, confidence, features)
-
-### 2. Relationship Prediction (RelTR - Relationship Transformer)
-- **Transformer-based Architecture**: Dựa trên DETR (Detection Transformer)
-- **51 Relationship Types**: "on", "holding", "riding", "wearing", "sitting on", etc.
-- **Triplet Prediction**: Dự đoán (Subject, Predicate, Object) với confidence scores
-- **Geometric + Semantic**: Kết hợp thông tin không gian và ngữ nghĩa
-- **Output**: `relationships.json` với list các relationships
-
-### 3. Reinforcement Learning (Deep Q-Network - DQN)
-- **State Vector (5D)**: 
-  - `detection_f1`: F1 score từ detection model (normalized [0,1])
-  - `relationship_f1`: F1 score từ relationship model (normalized [0,1])
-  - `reward`: Reward hiện tại (tanh normalized)
-  - `dataset_norm`: Kích thước dataset / 50 (normalized)
-  - `epsilon`: Exploration rate hiện tại (normalized)
-- **Action Space**: Số biến thể prompt sinh ảnh [1-10]
-- **Q-Network**: Input(5) → Linear(64) → ReLU → Linear(64) → ReLU → Linear(10)
-- **Reward Function**: Weighted sum với long-tail boost
-  - Detection F1 × 0.25
-  - Relationship F1 × 0.45 (cao nhất)
-  - Diversity × 0.15
-  - Consistency × 0.10
-  - Improvement × 0.05
-  - Long-tail boost: `tail_weight = 1/sqrt(frequency + 1e-3)`
-- **Experience Replay**: Buffer size 10,000, batch size 32
-- **Target Network**: Update mỗi 20 steps
-- **Epsilon Decay**: ε ← ε × 0.995 (min=0.01)
-- **Multiple Epochs Training**: Hỗ trợ training nhiều epochs trên toàn bộ dataset tích lũy
-- **Dataset Input**: Cho phép chọn/nhập dataset từ thư mục ảnh khi training
-
-### 4. Synthetic Data Generation (Stable Diffusion)
-- **Stable Diffusion v1.5**: Text-to-image generation
-- **Prompt Engineering**: Template-based với variations (context, quality, lighting, background)
-- **Batch Generation**: Batch size=2 để tối ưu GPU
-- **Quality Filter**: 
-  - Size/Aspect: min 512×512, max aspect 2.2
-  - Blur check: Laplacian variance ≥ 60
-  - Exposure: mean [20, 235], clip ratio ≤ 0.20
-  - Duplicate: pHash comparison
-  - CLIP similarity: ≥ 0.23 với prompt
-- **Auto-Annotation**: Tự động tạo bounding boxes cho synthetic images
-  - Priority 1: GroundingDINO (SOTA, chính xác nhất)
-  - Priority 2: OWL-ViT (Lightweight, HuggingFace)
-  - Priority 3: YOLO + CLIP (Fallback)
-  - Priority 4: Pseudo-bbox (Last resort, heuristic)
-
-### 5. Experiment Management
-- **Experiment Tracking**: Lưu trữ metrics, plots, models theo experiment ID
-- **Experiment Viewer**: Xem, so sánh, export experiments
-- **Comprehensive Reports**: Training evaluation reports với recommendations
-- **Metadata**: Config, hyperparameters, timestamps cho mỗi experiment
-- **Continue Training**: Resume training từ checkpoint
-
-### 6. Video Processing với Safety Analysis
-- **Frame-by-frame Processing**: Xử lý video với stride (mặc định: 2)
-- **Object Tracking**: Track IDs cho objects qua các frames
-- **Safe Zone Monitor**: Phát hiện xâm nhập vùng an toàn 2m
-- **Annotation Rendering**: 
-  - Vẽ bounding boxes cho objects
-  - Vẽ arrows cho relationships
-  - Hiển thị cảnh báo an toàn (banner đỏ/cam)
-  - Vẽ safe zone polygon
-- **Output**: 
-  - Annotated video: `video_outputs/{video_name}_relations.avi`
-  - Summary JSON: `video_outputs/{video_name}_summary.json`
-
-### 7. Hệ thống Phân loại An toàn 3 Tầng ⭐
-- **Tầng 3: Local Rules Database** (Ưu tiên cao nhất)
-  - Kiểm tra `local_safety_rules.json`
-  - Học từ phản hồi người dùng (Human-in-the-loop)
-  - Tự động track `usage_count` cho mỗi rule
-- **Tầng 1: White/Black/Gray List**
-  - White List: Các hành động an toàn (ví dụ: "person sitting on chair")
-  - Black List: Các hành động nguy hiểm (ví dụ: "child holding knife")
-  - Gray List: Không rõ → Chuyển Tầng 2
-- **Tầng 2: LLM Semantic Reasoning**
-  - Sử dụng OpenAI/Gemini để đánh giá ngữ nghĩa
-  - Hỏi LLM: "Hành động này có nguy hiểm không?"
-  - Cache responses trong `llm_safety_cache.json` để tiết kiệm chi phí API
-  - Hỗ trợ: `gpt-3.5-turbo`, `gpt-4o`, `gpt-5.2`, `gemini-pro`, etc.
-- **Output**: Safety Level (SAFE/SUSPICIOUS/DANGEROUS) + Confidence + Explanation
-- **Tích hợp**: Tự động tích hợp với `VideoRelationPipeline`
+| Ký hiệu | Ý nghĩa | Miền |
+|---|---|---|
+| $I$ | Ảnh đầu vào | $\mathbb{R}^{H \times W \times 3}$ |
+| $\mathcal{O} = \{o_i\}_{i=1}^{N}$ | Tập đối tượng phát hiện | $o_i = (b_i, c_i, s_i)$ |
+| $b_i = (x_1, y_1, x_2, y_2)$ | Bounding box (pixel coords) | $\mathbb{R}^4$ |
+| $c_i$ | Class label | $\{1, \ldots, C\}$ |
+| $s_i$ | Confidence score | $[0, 1]$ |
+| $\mathcal{R} = \{r_k\}$ | Tập quan hệ (relationships) | $r_k = (s_k, p_k, o_k, \sigma_k)$ |
+| $(s_k, p_k, o_k)$ | Triplet: (subject, predicate, object) | |
+| $\sigma_k$ | Confidence của quan hệ | $[0, 1]$ |
+| $F \in \mathbb{R}^{C' \times H' \times W'}$ | Feature map backbone | |
+| $g \in \mathbb{R}^{C'}$ | Global context vector | |
+| $d_{\text{model}}$ | Hidden dimension (= 256) | $\mathbb{N}$ |
+| $Q(s, a; \theta)$ | Q-value function | $\mathbb{R}$ |
+| $\varepsilon$ | Exploration rate | $[0, 1]$ |
+| $\gamma$ | Discount factor (= 0.95) | $(0, 1)$ |
+| $U(r)$ | Uncertainty score | $[0, 1]$ |
+| $f(S)$ | Submodular objective | $\mathbb{R}_{\geq 0}$ |
+| $\mathfrak{S}_N$ | Permutation group of N elements | |
 
 ---
 
-## 🔧 Cài đặt
+## 2. Tổng quan Kiến trúc
 
-### Yêu cầu hệ thống
-- Python 3.10+
-- CUDA 11.8+ (khuyến nghị GPU với ≥8GB VRAM)
-- 16GB RAM
+Hệ thống gồm 2 luồng xử lý chính: **Inference Pipeline** (suy luận thời gian thực) và **Data Loop** (vòng lặp cải thiện mô hình liên tục).
 
-### Bước 1: Clone repository
-```bash
-git clone <repository-url>
-cd yolov11
+```
+╔══════════════════════════ INFERENCE PIPELINE ═══════════════════════════╗
+║ Image I ∈ ℝ^{H×W×3}                                                   ║
+║   │                                                                     ║
+║   ├──→ YOLOv11 ──→ {(bᵢ, cᵢ, sᵢ)}  ──→ CLIP verify ──→ 𝒪 (objects) ║
+║   │      └── Fire Model (parallel)                                      ║
+║   │                                                                     ║
+║   ├──→ Backbone Hook ──→ F ∈ ℝ^{C'×H'×W'} ──→ RoIAlign ──→ vᵢ        ║
+║   │                        └── GAP ──→ g ∈ ℝ^{C'} (global context)     ║
+║   │                                                                     ║
+║   └──→ RelTR(I, g) ──→ {(sₖ, pₖ, oₖ, σₖ)}                           ║
+║          │                                                              ║
+║          ├──→ Spatial Validation ──→ Semantic Validation                ║
+║          └──→ LLM Enhancement (low-conf / missing pairs)               ║
+║                │                                                        ║
+║                └──→ Safety Classifier (3-tier) ──→ Scene Graph G       ║
+╚═════════════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════ DATA LOOP (RL) ═══════════════════════════════╗
+║ DQN Agent ──→ decide_action(s) ──→ aₜ (num_variations)                ║
+║   │                                                                     ║
+║   ├──→ Active Learning ──→ Acquisition Score α(r)                      ║
+║   ├──→ Stable Diffusion ──→ Synthetic Images                           ║
+║   ├──→ Greedy Submodular ──→ Optimal Subset S*                         ║
+║   ├──→ Auto-Annotation ──→ Labeled Dataset D                           ║
+║   ├──→ Fine-tune YOLO + RelTR                                          ║
+║   └──→ Evaluate ──→ Reward rₜ ──→ Q-Network Update                    ║
+╚═════════════════════════════════════════════════════════════════════════╝
 ```
 
-### Bước 2: Tạo virtual environment
-```bash
-python -m venv .venv
+**Source files:**
 
-# Windows
-.venv\Scripts\activate
-
-# Linux/Mac
-source .venv/bin/activate
-```
-
-### Bước 3: Cài đặt dependencies cơ bản
-```bash
-pip install -r requirements.txt
-```
-
-### Bước 4: Cài đặt PyTorch với CUDA
-```bash
-# CUDA 11.8
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# CUDA 12.1
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-### Bước 5: Cài đặt Stable Diffusion
-```bash
-pip install diffusers accelerate transformers
-```
-
-### Bước 6: Cài đặt CLIP
-```bash
-pip install git+https://github.com/openai/CLIP.git
-```
-
-### Bước 7: Cài đặt Auto-Annotation (chọn 1 trong 2)
-
-**Option A: OWL-ViT (Dễ cài, khuyên dùng cho người mới)**
-```bash
-pip install transformers
-# Model sẽ tự download khi chạy lần đầu (~1.5GB)
-# Model: google/owlvit-base-patch32
-```
-
-**Option B: GroundingDINO (Chính xác nhất, SOTA)**
-```bash
-# Clone và cài đặt
-git clone https://github.com/IDEA-Research/GroundingDINO.git
-cd GroundingDINO
-pip install -e .
-cd ..
-
-# Download weights
-mkdir -p GroundingDINO/weights
-cd GroundingDINO/weights
-wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
-cd ../..
-
-# Hoặc đặt weights ở thư mục gốc
-# mkdir -p weights
-# wget -P weights https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
-```
-
-**Lưu ý**: Hệ thống sẽ tự động detect và sử dụng backend tốt nhất có sẵn theo thứ tự ưu tiên: GroundingDINO → OWL-ViT → YOLO+CLIP → Pseudo-bbox
-
-### Bước 8: Cài đặt thêm (tùy chọn)
-```bash
-# Duplicate image detection
-pip install imagehash
-
-# Sentence similarity
-pip install sentence-transformers
-
-# Environment variables cho Safety System
-pip install python-dotenv
-```
-
-### Bước 9: Cấu hình API Key cho Safety System (Tùy chọn)
-
-Nếu muốn sử dụng LLM Safety Analyzer (Tầng 2), cần cấu hình API key:
-
-**Cách 1: Tạo file `.env` (Khuyến nghị)**
-```bash
-# Tạo file .env ở thư mục gốc
-# Windows
-type nul > .env
-
-# Linux/Mac
-touch .env
-```
-
-Mở file `.env` và thêm:
-```
-OPENAI_API_KEY=your_openai_api_key_here
-# hoặc
-GEMINI_API_KEY=your_gemini_api_key_here
-```
-
-**Cách 2: Environment variables**
-```bash
-# Windows PowerShell
-$env:OPENAI_API_KEY="your-api-key-here"
-
-# Linux/Mac
-export OPENAI_API_KEY="your-api-key-here"
-```
-
-**Lưu ý**: Nếu không có API key, hệ thống vẫn hoạt động nhưng sẽ mặc định về "SUSPICIOUS" cho các hành động không biết (không hỏi LLM).
-
-### Bước 10: Download model weights
-
-**YOLO v11 weights:**
-```bash
-# Option 1: Sử dụng fine-tuned weights (nếu có)
-# Đặt file fine-tune.pt vào thư mục gốc
-
-# Option 2: Download từ Ultralytics
-# YOLO sẽ tự động download khi chạy lần đầu
-# Hoặc set environment variable:
-# export YOLO_WEIGHTS_PATH=/path/to/yolo11x.pt
-```
-
-**RelTR checkpoint:**
-```bash
-# Đặt file checkpoint.pth vào thư mục gốc
-# File này chứa pre-trained RelTR model weights
-```
-
-**Lưu ý**: 
-- Nếu không có weights, một số chức năng sẽ không hoạt động
-- YOLO có thể tự động download weights từ Ultralytics
-- RelTR checkpoint cần được download từ repository gốc hoặc train từ đầu
+| Module | File(s) | Dòng code |
+|---|---|---|
+| Object Detection | `detect_objects.py` | ~490 |
+| Relationship Inference | `boundingbox_objects.py` | ~1005 |
+| Video Pipeline | `video_relation_pipeline.py` | ~1200 |
+| RelTR Model | `models/reltr.py`, `models/transformer.py`, `models/matcher.py`, `models/backbone.py` | ~1143 |
+| RL Training | `RL/reinforcement_learning.py` | ~3665 |
+| Uncertainty | `RL/uncertainty_estimator.py` | ~570 |
+| Active Learning | `RL/active_learning.py` | ~439 |
+| Approximation | `RL/approximation_algorithm.py` | ~520 |
+| Image Generation | `RL/ai_images_generator.py` | ~500 |
+| Auto-Annotation | `RL/auto_annotator.py` | ~495 |
+| Visual Features | `RL/visual_features.py` | ~460 |
+| LLM Predictor | `RL/llm_relationship_predictor.py` | ~584 |
+| Safety System | `RL/safety_classifier.py`, `RL/llm_safety_analyzer.py`, `RL/local_rules_db.py` | ~563+ |
+| Orchestration | `RL/rl_enhancement.py` | ~563 |
 
 ---
 
-## 🚀 Sử dụng
+## 3. Object Detection – YOLOv11
 
-### Chạy ứng dụng Console
-```bash
-python app_console.py
+**File:** `detect_objects.py`
+
+### 3.1 Định nghĩa hình thức
+
+**Định nghĩa 3.1 (Object Detection Function).** Hàm phát hiện đối tượng $\mathcal{D}: \mathbb{R}^{H \times W \times 3} \rightarrow \mathcal{P}(\mathcal{B} \times \mathcal{C} \times [0,1])$ ánh xạ ảnh đầu vào sang tập hợp các phát hiện, trong đó $\mathcal{B} = \{(x_1, y_1, x_2, y_2) \in \mathbb{R}^4 : x_1 < x_2, y_1 < y_2\}$ là không gian bounding box, $\mathcal{C} = \{1, \ldots, C\}$ là tập nhãn lớp.
+
+### 3.2 Kiến trúc YOLOv11
+
+YOLOv11 (You Only Look Once v11) thuộc họ single-stage detector, xử lý toàn bộ ảnh trong một lần forward pass.
+
+**Backbone (CSPDarknet):** Trích xuất feature maps tại nhiều scale.
+
+**Neck (FPN + PAN):** Kết hợp features đa tầng:
+
+$$F_{\text{fpn}}^l = \text{Conv}(\text{Upsample}(F^{l+1}) \oplus F^l), \quad l \in \{3, 4, 5\}$$
+
+**Head:** Tại mỗi vị trí grid $(i, j)$ ở scale $l$, dự đoán:
+
+$$\hat{y}_{i,j,l} = (\hat{t}_x, \hat{t}_y, \hat{t}_w, \hat{t}_h, \hat{p}_{\text{obj}}, \hat{p}_{c_1}, \ldots, \hat{p}_{c_C})$$
+
+**Giải mã bounding box (anchor-free):**
+
+$$\begin{aligned}
+b_x &= 2\sigma(\hat{t}_x) - 0.5 + c_x \\
+b_y &= 2\sigma(\hat{t}_y) - 0.5 + c_y \\
+b_w &= (2\sigma(\hat{t}_w))^2 \cdot a_w \\
+b_h &= (2\sigma(\hat{t}_h))^2 \cdot a_h
+\end{aligned}$$
+
+trong đó $(c_x, c_y)$ là offset grid cell, $(a_w, a_h)$ là anchor dimensions, $\sigma(\cdot)$ là sigmoid function.
+
+**Objectness score cuối cùng:**
+
+$$s_{\text{final}}(i, j, l) = \sigma(\hat{p}_{\text{obj}}) \cdot \max_{c \in \mathcal{C}} \sigma(\hat{p}_c)$$
+
+### 3.3 Non-Maximum Suppression (NMS)
+
+**Định nghĩa 3.2 (IoU).** Cho hai boxes $A, B \in \mathcal{B}$:
+
+$$\text{IoU}(A, B) = \frac{|A \cap B|}{|A \cup B|} = \frac{\text{Area}(A \cap B)}{\text{Area}(A) + \text{Area}(B) - \text{Area}(A \cap B)}$$
+
+**Thuộc tính:** (i) $0 \leq \text{IoU}(A,B) \leq 1$; (ii) $\text{IoU}(A,B) = 1 \Leftrightarrow A = B$; (iii) $\text{IoU}(A,B) = \text{IoU}(B,A)$ (đối xứng).
+
+**Thuật toán 3.1 (Greedy NMS):**
+
+```
+Input:  Detections D = {(bᵢ, cᵢ, sᵢ)}, ngưỡng IoU θ_nms = 0.45
+Output: Filtered detections D'
+
+1. Sắp xếp D theo sᵢ giảm dần
+2. D' ← ∅
+3. while D ≠ ∅:
+4.   d* ← D[0] (detection với score cao nhất)
+5.   D' ← D' ∪ {d*}
+6.   D ← D \ {d*}
+7.   for each d ∈ D:
+8.     if class(d) = class(d*) AND IoU(box(d), box(d*)) > θ_nms:
+9.       D ← D \ {d}   // Suppress
+10. return D'
 ```
 
-**Menu chính:**
-1. **Chọn ảnh để xử lý** - Chọn ảnh từ file system
-2. **Chạy pipeline phát hiện vật thể và mối quan hệ** - Chạy toàn bộ pipeline: YOLO → RelTR → Relationships
-3. **Tải lại dữ liệu JSON** - Reload dữ liệu từ `converted_bboxes.json` và `relationships.json`
-4. **Chạy RL Training** ← Học tăng cường
-   - Chọn dataset: 
-     - Option 1: Sử dụng dataset hiện tại (nếu đã có)
-     - Option 2: Chọn thư mục chứa ảnh để build dataset
-     - Option 3: Bỏ qua (dùng dataset từ relationships hiện tại)
-   - Nhập số epochs để training (mặc định: 5)
-5. **Tạo dữ liệu synthetic** - Sinh ảnh từ relationships bằng Stable Diffusion
-6. **Đánh giá kết quả training** - Tạo comprehensive report về training results
-7. **Quản lý Experiments** - Xem, so sánh, export experiments
-8. **Tiếp tục RL Training từ experiment trước** - Resume training từ checkpoint
-9. **Thoát**
+**Độ phức tạp:** $O(N^2)$ với $N$ detections, có thể giảm xuống $O(N \log N)$ với R-tree spatial indexing.
 
-### Chạy ứng dụng GUI
-```bash
-python app.py
+### 3.4 Dual-Model Detection
+
+Hệ thống sử dụng 2 YOLO models song song:
+
+$$\mathcal{D}_{\text{merged}}(I) = \mathcal{D}_{\text{COCO}}(I) \cup \mathcal{D}_{\text{fire}}(I)$$
+
+**Implementation** (`detect_objects.py`, line 289-350):
+- `yolo_model`: Fine-tuned trên COCO 80 classes + custom classes
+- `fire_model`: Chuyên biệt phát hiện fire/smoke (2 classes)
+- Merge strategy: Khi fire box overlap với COCO box (IoU > threshold), ưu tiên giữ fire detection (safety-first)
+
+### 3.5 YOLO Loss Function (Training)
+
+$$\mathcal{L}_{\text{YOLO}} = \lambda_{\text{box}} \mathcal{L}_{\text{CIoU}} + \lambda_{\text{cls}} \mathcal{L}_{\text{BCE}} + \lambda_{\text{dfl}} \mathcal{L}_{\text{DFL}}$$
+
+**CIoU Loss** (Complete IoU):
+
+$$\mathcal{L}_{\text{CIoU}} = 1 - \text{IoU} + \frac{\rho^2(b, b^{gt})}{c^2} + \alpha v$$
+
+$$v = \frac{4}{\pi^2}\left(\arctan\frac{w^{gt}}{h^{gt}} - \arctan\frac{w}{h}\right)^2, \quad \alpha = \frac{v}{(1 - \text{IoU}) + v}$$
+
+trong đó $\rho(\cdot)$ là Euclidean distance giữa centers, $c$ là diagonal của smallest enclosing box.
+
+---
+
+## 4. Zero-shot Classification – CLIP
+
+**File:** `detect_objects.py` → `classify_with_clip()`
+
+### 4.1 Kiến trúc CLIP
+
+**Định nghĩa 4.1 (CLIP Dual Encoder).** CLIP gồm 2 encoder:
+- Image encoder $f_I: \mathbb{R}^{H \times W \times 3} \rightarrow \mathbb{R}^d$ (ViT-B/32, $d = 512$)
+- Text encoder $f_T: \Sigma^* \rightarrow \mathbb{R}^d$ (Transformer, $d = 512$)
+
+được huấn luyện contrastive trên 400M image-text pairs.
+
+### 4.2 Contrastive Pre-training Loss
+
+Cho batch $\{(I_i, T_i)\}_{i=1}^{N}$ cặp image-text:
+
+$$\mathcal{L}_{\text{CLIP}} = -\frac{1}{2N}\sum_{i=1}^{N}\left[\log\frac{\exp(\text{sim}(I_i, T_i)/\tau)}{\sum_{j=1}^{N}\exp(\text{sim}(I_i, T_j)/\tau)} + \log\frac{\exp(\text{sim}(I_i, T_i)/\tau)}{\sum_{j=1}^{N}\exp(\text{sim}(I_j, T_i)/\tau)}\right]$$
+
+trong đó cosine similarity:
+
+$$\text{sim}(I, T) = \frac{f_I(I)^\top f_T(T)}{\|f_I(I)\|_2 \cdot \|f_T(T)\|_2}$$
+
+và $\tau$ là learnable temperature parameter.
+
+### 4.3 Zero-shot Inference trong Pipeline
+
+**Thuật toán 4.1 (CLIP Classification):**
+
+```
+Input:  Ảnh ROI x_roi (crop từ bounding box), 
+        Tập labels L = {l₁, ..., lₖ}, 
+        Ngưỡng θ_clip = 0.65
+Output: Predicted class ĉ, confidence p̂
+
+1. Pre-compute (1 lần duy nhất):
+   tₖ ← f_T("a photo of a {lₖ}") ∀k         // Text features
+   T ← [t₁/‖t₁‖, ..., tₖ/‖tₖ‖]              // Normalized text matrix
+
+2. Per detection:
+   v ← f_I(preprocess(x_roi))                  // Image feature
+   v̂ ← v / ‖v‖                                // Normalize
+
+3. Similarity:
+   s ← v̂ᵀ T ∈ ℝᴷ                             // Cosine similarities
+
+4. Softmax:
+   p(cₖ | x_roi) = exp(sₖ / τ) / Σⱼ exp(sⱼ / τ)
+
+5. Classification:
+   ĉ ← argmax_k p(cₖ | x_roi)
+   p̂ ← max_k p(cₖ | x_roi)
+
+6. Override YOLO nếu p̂ > θ_clip VÀ ĉ ≠ c_yolo
 ```
 
-**Tính năng GUI:**
-- **Image Operations**: Select Image, Detect Objects, Reload Data
-- **Video Operations**: Select Video, Run Video Demo (với Safety Analysis), Stop Video
-- **Training & Analysis**: RL Training, Generate Synthetic Data, Evaluate Training Results
-- **Real-time Display**: Hiển thị objects và relationships trong real-time
-- **Status Bar**: Hiển thị trạng thái pipeline và cảnh báo an toàn
+**Implementation:** `detect_objects.py` line 115-175. Text features được pre-compute 1 lần (`_precompute_clip_features`) và cache.
 
-### Chạy detection đơn lẻ
-```bash
-python detect_objects.py <path_to_image>
+### 4.4 Chứng minh tính đúng đắn
+
+**Mệnh đề 4.1.** Softmax temperature scaling đảm bảo output là phân phối xác suất hợp lệ.
+
+**Chứng minh.** Cần chứng minh: (i) $p(c_k) > 0 \;\forall k$, và (ii) $\sum_k p(c_k) = 1$.
+
+(i) Vì $\exp(\cdot) > 0$ cho mọi đối số hữu hạn, nên tử số $\exp(s_k/\tau) > 0$ và mẫu số $\sum_j \exp(s_j/\tau) > 0$. Do đó $p(c_k) > 0$.
+
+(ii) $\sum_{k=1}^{K} p(c_k) = \sum_{k=1}^{K} \frac{\exp(s_k/\tau)}{\sum_j \exp(s_j/\tau)} = \frac{\sum_k \exp(s_k/\tau)}{\sum_j \exp(s_j/\tau)} = 1$. $\blacksquare$
+
+**Mệnh đề 4.2 (Cosine Similarity Bounds).** $\forall x, y \in \mathbb{R}^d \setminus \{\mathbf{0}\}: -1 \leq \text{sim}(x, y) \leq 1$.
+
+**Chứng minh.** Theo bất đẳng thức Cauchy-Schwarz: $|x^\top y| \leq \|x\|_2 \|y\|_2$. Chia cả 2 vế cho $\|x\|_2 \|y\|_2 > 0$:
+
+$$\left|\frac{x^\top y}{\|x\|_2 \|y\|_2}\right| \leq 1 \implies -1 \leq \text{sim}(x, y) \leq 1 \quad \blacksquare$$
+
+---
+
+## 5. ROI Feature Extraction – RoIAlign
+
+**File:** `detect_objects.py` → `_extract_roi_features()`
+
+### 5.1 Backbone Feature Hooking
+
+**Thuật toán 5.1 (Feature Capture):**
+
+```
+1. Hook vào SPPF layer (layer 9) của YOLO backbone:
+   hook = yolo_model.model.model[9].register_forward_hook(capture_fn)
+
+2. Forward pass → capture feature map F ∈ ℝ^{C'×H'×W'}
+   trong đó C' = 512 (SPPF output channels)
+         H' = H/32, W' = W/32 (stride 32)
+
+3. Remove hook sau khi capture
 ```
 
-**Output:**
-- `result.json`: YOLO detection results
-- `converted_bboxes.json`: Converted format cho RelTR
-- ROI features và global context vector
+### 5.2 RoIAlign (He et al., 2017)
 
-### Chạy relationship prediction
-```bash
-python boundingbox_objects.py --yolo_json converted_bboxes.json --img_path <image> --resume checkpoint.pth --device cpu
-```
+**Định nghĩa 5.1 (RoIAlign).** Cho feature map $F \in \mathbb{R}^{C' \times H' \times W'}$, bounding box $b = (x_1, y_1, x_2, y_2)$ trong ảnh gốc, output size $(k, k)$:
 
-**Output:**
-- `relationships.json`: List các relationships (subject, relation, object, confidence)
-- `output_<image_id>.jpg`: Annotated image với bounding boxes
+**Bước 1.** Scale bbox sang feature map coordinates:
 
-### Chạy video với Safety Analysis
+$$b'_x = b_x \cdot \frac{W'}{W}, \quad b'_y = b_y \cdot \frac{H'}{H}$$
+
+**Bước 2.** Chia ROI thành $k \times k$ bins. Mỗi bin $B_{i,j}$ có kích thước:
+
+$$\Delta_x = \frac{x_2' - x_1'}{k}, \quad \Delta_y = \frac{y_2' - y_1'}{k}$$
+
+**Bước 3.** Trong mỗi bin, sample 4 điểm (2×2 regular grid) bằng **bilinear interpolation**:
+
+$$F(x, y) = \sum_{(i,j) \in \mathcal{N}(x,y)} F[i, j] \cdot \max(0, 1 - |x - i|) \cdot \max(0, 1 - |y - j|)$$
+
+trong đó $\mathcal{N}(x,y)$ là 4 pixel neighbors gần nhất.
+
+**Bước 4.** Max/Average pooling trong mỗi bin:
+
+$$v_{i,j}^c = \frac{1}{|\mathcal{S}_{i,j}|}\sum_{(x,y) \in \mathcal{S}_{i,j}} F^c(x, y)$$
+
+**Output:** $v_{\text{roi}} \in \mathbb{R}^{C' \times k \times k}$, với $k = 7$ (default).
+
+### 5.3 So sánh RoIAlign vs RoIPool
+
+| Thuộc tính | RoIPool | RoIAlign |
+|---|---|---|
+| Quantization | Có (round về integer) | Không (bilinear interp.) |
+| Gradient flow | Gián đoạn tại biên | Liên tục (differentiable) |
+| Misalignment | ±1 pixel | Sub-pixel accuracy |
+| Phù hợp cho | Classification | Segmentation, precise localization |
+
+### 5.4 Global Context Vector
+
+$$g = \text{GAP}(F) = \frac{1}{H' \times W'}\sum_{h=1}^{H'}\sum_{w=1}^{W'} F[:, h, w] \in \mathbb{R}^{C'}$$
+
+Vector $g$ encode thông tin toàn cục của scene (chiếu sáng, layout tổng thể, context). Được truyền vào RelTR thông qua projection layer.
+
+---
+
+## 6. Scene Graph Generation – RelTR Transformer
+
+**Files:** `models/reltr.py`, `models/transformer.py`, `models/matcher.py`, `models/backbone.py`
+
+### 6.1 Định nghĩa hình thức
+
+**Định nghĩa 6.1 (Scene Graph).** Scene graph $G = (\mathcal{V}, \mathcal{E})$ trong đó:
+- $\mathcal{V} = \{v_i = (b_i, c_i)\}$ — nodes (entities/objects)
+- $\mathcal{E} = \{e_k = (v_s, p_k, v_o)\}$ — edges (relationships/predicates)
+
+RelTR sinh $G$ trực tiếp từ ảnh trong một forward pass (end-to-end).
+
+### 6.2 Backbone (ResNet-50 + FrozenBatchNorm2d)
+
+**Implementation:** `models/backbone.py`
 
 ```python
-from video_relation_pipeline import VideoRelationPipeline
-
-# Khởi tạo pipeline với safety classifier enabled
-pipeline = VideoRelationPipeline(
-    safety_classifier_enabled=True  # Bật hệ thống cảnh báo
-)
-
-# Xử lý video
-result = pipeline.process_video(
-    video_path="home_video.mp4",
-    output_dir="video_outputs",
-    frame_stride=2  # Xử lý mỗi 2 frames
-)
-
-# Kết quả:
-# - Video đã annotate: video_outputs/home_video_relations.avi
-# - Thống kê: video_outputs/home_video_summary.json
+class Backbone(BackboneBase):
+    """ResNet-50 with frozen BatchNorm."""
+    # Layers 1-3: frozen (không train)
+    # Layer 4: trainable
+    # Output: feature map F ∈ ℝ^{2048×H/32×W/32}
 ```
 
-**Xem thống kê an toàn**:
+**FrozenBatchNorm2d** (line 25-61): Batch statistics cố định, chỉ áp dụng affine transform:
+
+$$\hat{x} = \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} \cdot \gamma + \beta$$
+
+trong đó $\mu, \sigma^2$ là running statistics (cố định), $\gamma, \beta$ là learnable (cố định).
+
+**Joiner** (line 129-142): Kết hợp backbone với positional encoding:
+
+$$\text{Joiner}(I) = (\text{features}, \text{pos\_encoding})$$
+
+### 6.3 Input Projection
+
+$$F_{\text{proj}} = \text{Conv}_{1 \times 1}(F_{\text{backbone}}) \in \mathbb{R}^{d_{\text{model}} \times H' \times W'}$$
+
+`input_proj`: Conv2d(2048, 256, kernel_size=1) — giảm channels từ 2048 xuống 256.
+
+### 6.4 Positional Encoding (Sinusoidal 2D)
+
+Cho vị trí $(x, y)$ trên feature map:
+
+$$\text{PE}_{(x, 2i)} = \sin\left(\frac{x}{10000^{2i/d}}\right), \quad \text{PE}_{(x, 2i+1)} = \cos\left(\frac{x}{10000^{2i/d}}\right)$$
+
+$$\text{PE}_{(y, 2i)} = \sin\left(\frac{y}{10000^{2i/d}}\right), \quad \text{PE}_{(y, 2i+1)} = \cos\left(\frac{y}{10000^{2i/d}}\right)$$
+
+Concat: $\text{PE}_{2D} = [\text{PE}_x ; \text{PE}_y] \in \mathbb{R}^{d_{\text{model}}}$.
+
+**Mệnh đề 6.1.** Sinusoidal encoding giữ khoảng cách tương đối thông qua tích vô hướng: $\text{PE}_{pos}^\top \text{PE}_{pos+k}$ chỉ phụ thuộc vào $k$, không phụ thuộc $pos$.
+
+### 6.5 Transformer Encoder
+
+**Implementation:** `models/transformer.py`, line 67-148
+
+$L = 6$ encoder layers, mỗi layer gồm:
+
+**Multi-Head Self-Attention (MHSA):**
+
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V, \quad d_k = \frac{d_{\text{model}}}{n_{\text{heads}}} = \frac{256}{8} = 32$$
+
+$$\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h)W^O$$
+
+$$\text{head}_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)$$
+
+với $W_i^Q, W_i^K, W_i^V \in \mathbb{R}^{d_{\text{model}} \times d_k}$, $W^O \in \mathbb{R}^{d_{\text{model}} \times d_{\text{model}}}$.
+
+**Feed-Forward Network (FFN):**
+
+$$\text{FFN}(x) = \text{ReLU}(xW_1 + b_1)W_2 + b_2$$
+
+với $W_1 \in \mathbb{R}^{256 \times 2048}$, $W_2 \in \mathbb{R}^{2048 \times 256}$.
+
+**Full Encoder Layer (Post-Norm):**
+
+$$\begin{aligned}
+q &= k = x + \text{PE} \\
+x' &= \text{LayerNorm}(x + \text{Dropout}(\text{MHSA}(q, k, x))) \\
+\text{output} &= \text{LayerNorm}(x' + \text{Dropout}(\text{FFN}(x')))
+\end{aligned}$$
+
+**Độ phức tạp:** $O(n^2 \cdot d)$ với $n = H'W'$ tokens.
+
+### 6.6 Coupled Entity-Triplet Decoder (Đóng góp chính của RelTR)
+
+**Implementation:** `models/transformer.py`, line 191-331
+
+Đây là **kiến trúc lõi** phân biệt RelTR với các phương pháp SGG khác. Decoder xử lý đồng thời 2 loại queries:
+
+**Learnable Embeddings:**
+- `entity_embed` $\in \mathbb{R}^{N_e \times 2d}$ ($N_e = 100$): Split thành content ($\mathbb{R}^d$) + positional ($\mathbb{R}^d$)
+- `triplet_embed` $\in \mathbb{R}^{N_t \times 3d}$ ($N_t = 200$): Split thành content ($\mathbb{R}^d$) + positional ($\mathbb{R}^{2d}$)
+- `so_embed` $\in \mathbb{R}^{2 \times d}$: Subject/Object role encoding
+
+**Thuật toán 6.1 (Coupled Decoder Layer)** — chi tiết từng bước trong `TransformerDecoderLayer.forward()`:
+
+```
+Input:  entity ∈ ℝ^{Nₑ×B×d}, triplet ∈ ℝ^{Nₜ×B×2d}, memory ∈ ℝ^{HW×B×d}
+
+── ENTITY BRANCH ──
+Step 1: Entity Self-Attention
+  q = k = entity + entity_pos
+  entity ← LN(entity + Dropout(MHSA(q, k, entity)))
+
+Step 2: Entity-Memory Cross-Attention  
+  entity ← LN(entity + Dropout(CrossAttn(entity+pos, memory+pos, memory)))
+
+Step 3: Entity FFN
+  entity ← LN(entity + Dropout(FFN(entity)))
+
+── TRIPLET BRANCH ──
+Step 4: Split triplet → (sub ∈ ℝ^{Nₜ×B×d}, obj ∈ ℝ^{Nₜ×B×d})
+
+Step 5: Coupled Subject-Object Self-Attention
+  q_sub = sub + triplet_pos + so_embed[0]
+  q_obj = obj + triplet_pos + so_embed[1]
+  [sub; obj] ← LN([sub; obj] + Dropout(MHSA([q_sub; q_obj], [k_sub; k_obj], [sub; obj])))
+  // Subject và Object "giao tiếp" với nhau trong self-attention
+
+Step 6a: Subject Visual Cross-Attention (→ tạo sub_attention_maps)
+  sub, sub_maps ← CrossAttn(sub+triplet_pos, memory+pos, memory)
+  sub ← LN(sub + Dropout(sub_attn))
+
+Step 6b: Subject Entity Cross-Attention (→ "chọn" entity nào làm subject)
+  sub ← LN(sub + Dropout(CrossAttn(sub+triplet_pos, entity, entity)))
+  sub ← LN(sub + Dropout(FFN(sub)))
+
+Step 7a: Object Visual Cross-Attention (→ tạo obj_attention_maps)  
+  obj, obj_maps ← CrossAttn(obj+triplet_pos, memory+pos, memory)
+  obj ← LN(obj + Dropout(obj_attn))
+
+Step 7b: Object Entity Cross-Attention (→ "chọn" entity nào làm object)
+  obj ← LN(obj + Dropout(CrossAttn(obj+triplet_pos, entity, entity)))
+  obj ← LN(obj + Dropout(FFN(obj)))
+
+Step 8: Recombine
+  triplet ← [sub; obj] ∈ ℝ^{Nₜ×B×2d}
+
+Output: entity, triplet, sub_maps, obj_maps
+```
+
+**Ý nghĩa:** Subject/Object cross-attention với entities cho phép mỗi triplet query "chọn" entity nào làm subject và object, tạo nên cấu trúc triplet $(s, p, o)$ một cách tự nhiên.
+
+### 6.7 Subject-Object Mask và Predicate Classification
+
+**Implementation:** `models/reltr.py`, line 96-119
+
+Từ attention maps của decoder:
+
+```
+so_masks = [sub_maps; obj_maps] ∈ ℝ^{L×B×Nₜ×2×H'×W'}
+```
+
+**Mask Processing Pipeline:**
+
+$$\text{so\_masks} \xrightarrow{\text{Upsample}(28 \times 28)} \xrightarrow{\text{Conv2d}(2 \to 64)} \xrightarrow{\text{ReLU+BN+MaxPool}} \xrightarrow{\text{Conv2d}(64 \to 32)} \xrightarrow{\text{ReLU+BN}} \xrightarrow{\text{Flatten}} \xrightarrow{\text{FC}(2048 \to 512 \to 128)} m \in \mathbb{R}^{128}$$
+
+**Predicate Classification:**
+
+$$\hat{p}_{\text{rel}} = \text{MLP}_{640 \to 256 \to (R+1)}([\text{sub}_{\text{ctx}} \;;\; \text{obj}_{\text{ctx}} \;;\; m])$$
+
+trong đó:
+- $\text{sub}_{\text{ctx}} = h_{\text{sub}} + g' \in \mathbb{R}^{256}$ (subject representation + context)
+- $\text{obj}_{\text{ctx}} = h_{\text{obj}} + g' \in \mathbb{R}^{256}$ (object representation + context)
+- $m \in \mathbb{R}^{128}$ (spatial mask features)
+- $R = 51$ (Visual Genome) hoặc $R = 31$ (Open Images)
+
+### 6.8 Prediction Heads
+
+Từ decoder output ở layer cuối:
+
+| Head | Input dim | Output | Architecture |
+|---|---|---|---|
+| `entity_class_embed` | $d$ | $\mathbb{R}^{C+1}$ | Linear(256, 152) |
+| `entity_bbox_embed` | $d$ | $\mathbb{R}^4$ sigmoid | MLP(256→256→256→4) |
+| `sub_class_embed` | $d$ | $\mathbb{R}^{C+1}$ | Linear(256, 152) |
+| `sub_bbox_embed` | $d$ | $\mathbb{R}^4$ sigmoid | MLP(256→256→256→4) |
+| `obj_class_embed` | $d$ | $\mathbb{R}^{C+1}$ | Linear(256, 152) |
+| `obj_bbox_embed` | $d$ | $\mathbb{R}^4$ sigmoid | MLP(256→256→256→4) |
+| `rel_class_embed` | $2d + 128$ | $\mathbb{R}^{R+1}$ | MLP(640→256→52) |
+
+Bbox format: $(c_x, c_y, w, h)$ normalized ∈ $[0, 1]^4$.
+
+### 6.9 Hungarian Matching
+
+**Implementation:** `models/matcher.py`
+
+**Định nghĩa 6.2 (Bipartite Matching Problem).** Tìm phép gán $\hat{\sigma} \in \mathfrak{S}_N$ tối thiểu hóa tổng chi phí:
+
+$$\hat{\sigma} = \arg\min_{\sigma \in \mathfrak{S}_N} \sum_{i=1}^{N} \mathcal{L}_{\text{match}}(\hat{y}_{\sigma(i)}, y_i)$$
+
+**Entity Matching Cost** (Focal Loss-based):
+
+$$C_{\text{entity}}(i, j) = \lambda_{\text{cls}} C_{\text{focal}}(i, j) + \lambda_{\text{box}} \|b_i - b_j\|_1 + \lambda_{\text{giou}} (-\text{GIoU}(b_i, b_j))$$
+
+trong đó Focal Loss cost (theo Deformable DETR):
+
+$$C_{\text{focal}}(i, j) = \alpha(1-p_{i,c_j})^\gamma \cdot (-\log(p_{i,c_j} + \epsilon)) - (1-\alpha)(p_{i,c_j})^\gamma \cdot (-\log(1 - p_{i,c_j} + \epsilon))$$
+
+với $\alpha = 0.25$, $\gamma = 2.0$ (focal loss hyperparameters).
+
+**Triplet Matching Cost:**
+
+$$C_{\text{triplet}} = \lambda_{\text{box}}(C_{\text{sub\_bbox}} + C_{\text{obj\_bbox}}) + \lambda_{\text{cls}}(C_{\text{sub\_cls}} + C_{\text{obj\_cls}}) + 0.5 \cdot C_{\text{rel\_cls}} + \lambda_{\text{giou}}(C_{\text{sub\_giou}} + C_{\text{obj\_giou}})$$
+
+**Giải bằng** `scipy.optimize.linear_sum_assignment` — thuật toán Hungarian, $O(N^3)$.
+
+**Subject/Object Weight Strategy** (line 135-148 matcher.py):
+
+Tránh gán background cho predictions tốt: Nếu prediction match ground-truth entity (cùng class VÀ IoU ≥ 0.7), đặt weight = 0 (không back-propagate loss cho prediction đó, trừ khi nó được chọn bởi Hungarian matching).
+
+### 6.10 Loss Functions (SetCriterion)
+
+**Implementation:** `models/reltr.py`, line 191-382
+
+**Tổng loss:**
+
+$$\mathcal{L}_{\text{total}} = \sum_{l \in \{\text{labels}, \text{boxes}, \text{relations}\}} w_l \mathcal{L}_l$$
+
+Với auxiliary losses (mỗi decoder layer):
+
+$$\mathcal{L}_{\text{total}} = \sum_{d=0}^{L-1} \sum_{l} w_l \mathcal{L}_l^{(d)}$$
+
+**Classification Loss** (`loss_labels`):
+
+$$\mathcal{L}_{\text{CE}} = \frac{\sum_{i} w_i \cdot \text{CE}(p_i, y_i)}{\sum_{i} w_{\text{empty}}[y_i]}$$
+
+trong đó $w_{\text{empty}}[-1] = \text{eos\_coef}$ (thường 0.1) — giảm weight cho class "no-object" vì phần lớn queries không match.
+
+Đặc biệt: entity, subject, object losses được **gộp chung** và tính 1 lần:
+
+$$\mathcal{L}_{\text{CE}} = \text{CE}([\text{entity\_logits}; \text{sub\_logits}; \text{obj\_logits}], [\text{entity\_targets}; \text{sub\_targets}; \text{obj\_targets}])$$
+
+Subject/Object loss weight nhân 0.5.
+
+**Box Loss** (`loss_boxes`):
+
+$$\mathcal{L}_{\text{box}} = \frac{1}{N_{\text{boxes}}}\left(\|b_{\text{pred}} - b_{\text{gt}}\|_1 + \lambda_{\text{giou}}(1 - \text{GIoU}(b_{\text{pred}}, b_{\text{gt}}))\right)$$
+
+**GIoU** (Generalized IoU):
+
+$$\text{GIoU}(A, B) = \text{IoU}(A, B) - \frac{|C \setminus (A \cup B)|}{|C|}$$
+
+trong đó $C$ là smallest enclosing box. Phạm vi: $\text{GIoU} \in [-1, 1]$.
+
+**Mệnh đề 6.2.** $\text{GIoU}$ khắc phục vấn đề gradient = 0 khi $\text{IoU} = 0$.
+
+**Chứng minh.** Khi $A \cap B = \emptyset$: $\text{IoU} = 0$ và $\frac{\partial \text{IoU}}{\partial b} = 0$. Tuy nhiên, $\text{GIoU} = -\frac{|C \setminus (A \cup B)|}{|C|} < 0$, và $\frac{\partial \text{GIoU}}{\partial b} \neq 0$ vì dịch $A$ gần $B$ làm giảm $|C|$ → GIoU tăng. $\blacksquare$
+
+**Relation Loss** (`loss_relations`):
+
+$$\mathcal{L}_{\text{rel}} = \text{CE}(\hat{p}_{\text{rel}}, y_{\text{rel}})$$
+
+với weight `eos_coef` cho class "no-relation".
+
+### 6.11 Global Context Integration
+
+**Implementation:** `models/reltr.py`, line 130-157
+
+$$g' = \text{ReLU}(\text{flatten}(g) \cdot W_{\text{ctx}} + b_{\text{ctx}}) \in \mathbb{R}^{d_{\text{model}}}$$
+
+$g'$ được **cộng** vào subject/object representations trước predicate classification:
+
+$$\text{sub}_{\text{ctx}} = h_{\text{sub}} + g', \quad \text{obj}_{\text{ctx}} = h_{\text{obj}} + g'$$
+
+`context_proj` được khởi tạo zero → ban đầu không ảnh hưởng, dần học tầm quan trọng.
+
+---
+
+## 7. Spatial-Semantic Validation
+
+**File:** `boundingbox_objects.py` → `validate_and_correct_relationships()`
+
+### 7.1 Mục đích
+
+RelTR có thể dự đoán quan hệ không hợp lý (ví dụ: "sky riding person"). Module validation lọc và sửa các dự đoán sai dựa trên quy tắc heuristic.
+
+### 7.2 Spatial Validation Rules
+
+**Quy tắc dựa trên centroid và bounding box overlap:**
+
+Gọi centroid của subject/object: $c_s = (\frac{x_1^s+x_2^s}{2}, \frac{y_1^s+y_2^s}{2})$, tương tự cho $c_o$.
+
+| Rule | Predicate | Điều kiện spatial | Hành động nếu vi phạm |
+|---|---|---|---|
+| R1 | `riding` | $c_s^y < c_o^y$ (subject ở **trên** object) | Swap subject ↔ object |
+| R2 | `sitting on` | $c_s^y < c_o^y$ | Swap |
+| R3 | `standing on` | $c_s^y < c_o^y$ | Swap |
+| R4 | `above` | $c_s^y > c_o^y$ (subject ở **dưới** object) | Swap |
+| R5 | `below` | $c_s^y < c_o^y$ | Swap |
+| R6 | `under` | $c_s^y < c_o^y$ | Swap |
+| R7 | `on` | $c_s^y > c_o^y + \delta$ | Swap |
+
+### 7.3 Semantic Validation Rules
+
+**Quy tắc dựa trên ngữ nghĩa class:**
+
+| Rule | Predicate | Subject class constraint | Object class constraint |
+|---|---|---|---|
+| S1 | `wearing` | animate (person, man, ...) | wearable (hat, shirt, ...) |
+| S2 | `riding` | animate | rideable (horse, bike, ...) |
+| S3 | `eating` | animate | edible (pizza, food, ...) |
+| S4 | `driving` | animate | vehicle (car, bus, ...) |
+| S5 | `flying in` | flyable (airplane, bird) | sky, air |
+
+**Implementation** — hệ thống quy tắc kiểm tra:
+
 ```python
-import json
-
-with open("video_outputs/home_video_summary.json", "r", encoding="utf-8") as f:
-    stats = json.load(f)
-    alerts = stats["safety_alerts"]
-    print(f"Tổng cảnh báo: {alerts['total_alerts']}")
-    print(f"Nguy hiểm: {alerts['dangerous_count']}")
-    print(f"Nghi ngờ: {alerts['suspicious_count']}")
+def semantic_validate(subject_class, predicate, object_class):
+    # 1. Check subject constraint
+    if predicate in REQUIRES_ANIMATE_SUBJECT:
+        if subject_class not in ANIMATE_CLASSES:
+            return False  # Reject
+    
+    # 2. Check object constraint
+    if predicate in PREDICATE_OBJECT_MAP:
+        valid_objects = PREDICATE_OBJECT_MAP[predicate]
+        if object_class not in valid_objects:
+            return False  # Reject
+    
+    return True  # Accept
 ```
+
+### 7.4 Heuristic Fallback
+
+Khi RelTR confidence $\sigma < \theta_{\min}$ (thường 0.3) cho tất cả predicates, hệ thống tạo quan hệ heuristic dựa trên spatial analysis:
+
+$$p_{\text{heuristic}} = \begin{cases}
+\texttt{"near"} & \text{nếu } IoU(b_s, b_o) > 0.1 \\
+\texttt{"above"} & \text{nếu } c_s^y < c_o^y - \delta_y \\
+\texttt{"next to"} & \text{otherwise}
+\end{cases}$$
 
 ---
 
-## 📁 Cấu trúc dự án
+## 8. LLM Open-Vocabulary Enhancement
+
+**Files:** `RL/llm_relationship_predictor.py`, `RL/visual_features.py`
+
+### 8.1 Tổng quan
+
+Khi RelTR không thể dự đoán quan hệ (confidence thấp hoặc predicate không thuộc vocabulary), sử dụng GPT-4 Vision để suy luận open-vocabulary.
+
+### 8.2 Visual Features cho LLM
+
+**File:** `RL/visual_features.py`
+
+#### 8.2.1 Union Box Crop
+
+$$\text{UnionBox}(A, B) = (\min(x_1^A, x_1^B), \min(y_1^A, y_1^B), \max(x_2^A, x_2^B), \max(y_2^A, y_2^B))$$
+
+Crop vùng union với padding 20px, chuyển đổi BGR→RGB.
+
+#### 8.2.2 Interaction Heatmap
+
+**IoU-based method** (nhanh):
+
+$$H(x, y) = \frac{\min(M_s(x,y) + M_o(x,y), \; 2)}{2}$$
+
+$H = 1.0$ tại vùng intersection, $H = 0.5$ tại vùng chỉ thuộc 1 object, $H = 0$ ngoài.
+
+**Gaussian method** (smooth hơn):
+
+$$G_s(x,y) = \exp\left(-\frac{(x-c_s^x)^2/(w_s/2)^2 + (y-c_s^y)^2/(h_s/2)^2}{2\sigma^2}\right), \quad \sigma = 0.3$$
+
+$$H_{\text{gaussian}} = G_s \cdot G_o$$
+
+#### 8.2.3 Gaze Guided Attention Vector
+
+**Định nghĩa 8.1 (Gaze Vector).** Cho subject bbox $B_s$ và object bbox $B_o$:
+
+$$\vec{g} = \frac{c_o - c_s}{\|c_o - c_s\|_2} \in \mathbb{R}^2$$
+
+**Proximity score:**
+
+$$\text{proximity} = 1 - \frac{\|c_o - c_s\|_2}{\sqrt{H^2 + W^2}}$$
+
+**Non-contact likelihood** (cho animate subjects):
+
+$$\text{NCL} = \begin{cases}
+0.7 \cdot \text{proximity} + 0.3 \cdot \text{vertical\_align} & \text{nếu animate AND no overlap} \\
+\max(0.3 - \text{overlap\_ratio}, 0.1) & \text{nếu animate AND overlap} \\
+0.05 & \text{inanimate subject}
+\end{cases}$$
+
+**Gaze vector gửi cho LLM** (6-dimensional):
+
+$$\mathbf{v}_{\text{gaze}} = [g_x, g_y, \text{proximity}, \mathbb{1}[\text{horizontal}], \text{overlap\_ratio}, \text{NCL}]$$
+
+#### 8.2.4 Spatial Description
+
+Sinh mô tả ngôn ngữ tự nhiên dựa trên centroid comparison:
 
 ```
-yolov11/
-├── app.py                      # GUI Application (Tkinter) - Modern UI với sidebar
-├── app_console.py              # Console Application - Command-line interface
-├── detect_objects.py           # YOLO + CLIP detection pipeline
-├── boundingbox_objects.py      # RelTR relationship inference
-├── convert_yolo_to_reltr.py    # Data format conversion (YOLO → RelTR)
-├── video_relation_pipeline.py # Video processing với Safety Analysis
-│
-├── RL/                         # Reinforcement Learning module
-│   ├── reinforcement_learning.py   # DQN Agent chính (Q-Network, Experience Replay)
-│   ├── ai_images_generator.py      # Stable Diffusion + Quality Filter
-│   ├── auto_annotator.py           # GroundingDINO/OWL-ViT/YOLO+CLIP annotation
-│   ├── rl_enhancement.py           # RL integration với app (GUI/Console)
-│   ├── experiment_manager.py       # Experiment tracking và metadata
-│   ├── experiment_viewer.py         # View, compare, export experiments
-│   ├── experience_manager.py       # Replay buffer management (size=10,000)
-│   ├── model_manager.py            # Model checkpointing và loading
-│   ├── training_evaluator.py        # Evaluation metrics và comprehensive reports
-│   ├── data_augmentation.py        # Data augmentation utilities
-│   │
-│   ├── safety_classifier.py        # ⭐ Safety System: 3-tier classifier
-│   ├── llm_safety_analyzer.py      # ⭐ Safety System: LLM integration (OpenAI/Gemini)
-│   ├── local_rules_db.py           # ⭐ Safety System: Local rules DB (Human-in-the-loop)
-│   ├── safety_config.json          # ⭐ Safety System: Configuration (white/black lists)
-│   └── README_SAFETY_SYSTEM.md     # ⭐ Safety System: Documentation chi tiết
-│
-├── models/                     # Model definitions
-│   ├── reltr.py                # RelTR model (Transformer-based)
-│   ├── transformer.py          # Transformer encoder/decoder layers
-│   ├── backbone.py             # Backbone networks (ResNet/Swin)
-│   ├── matcher.py              # Hungarian matcher cho DETR
-│   ├── position_encoding.py    # Positional encoding
-│   └── yolo.py                 # YOLO model definitions
-│
-├── util/                       # Utilities for RelTR
-│   ├── box_ops.py              # Bounding box operations (IoU, conversion)
-│   └── misc.py                 # Miscellaneous utilities (nested tensors, etc.)
-│
-├── utils/                      # Utilities for YOLO
-│   ├── general.py              # General utilities
-│   ├── metrics.py              # Metrics calculation
-│   ├── plots.py                # Visualization
-│   └── ...                     # Other YOLO utilities
-│
-├── tools/                      # Visualization và analysis tools
-│   ├── reltr_rl_examples.py   # RL examples và demos
-│   └── yolo_heatmap.py         # YOLO attention heatmap visualization
-│
-├── GroundingDINO/              # GroundingDINO submodule (nếu clone)
-│   └── groundingdino/          # GroundingDINO source code
-│
-├── demo/                       # Demo images để test
-├── data/                       # Dataset configs (YAML files)
-│   ├── coco.yaml
-│   ├── coco128.yaml
-│   └── ...
-├── experiments/                # Experiment outputs
-│   └── exp_XXX/                # Mỗi experiment có thư mục riêng
-│       ├── ai_images/         # Synthetic images
-│       ├── dataset/            # Training samples
-│       ├── logs/               # Training logs
-│       ├── metrics/            # JSON metrics
-│       ├── models/             # Saved checkpoints
-│       └── plots/              # Visualization plots
-├── templates/                  # HTML templates (nếu có web interface)
-├── video_outputs/              # Video processing outputs
-│
-├── fine-tune.pt               # YOLO weights (fine-tuned)
-├── checkpoint.pth             # RelTR checkpoint (pre-trained)
-├── reltr_finetuned.pth        # Fine-tuned RelTR (sau RL training)
-├── yolo11x.pt                 # YOLO v11 weights (nếu có)
-├── requirements.txt           # Python dependencies
-├── .env                       # API keys (tạo file này, không commit)
-├── llm_safety_cache.json      # LLM cache (tự động tạo)
-├── local_safety_rules.json   # Local safety rules (tự động tạo)
-├── safe_zone_config.json     # Safe zone configuration
-├── ARCHITECTURE_EXPLANATION.md # Chi tiết kiến trúc hệ thống
-└── README.md                  # This file
+vertical_desc ∈ {"above", "below", "at same height as"}   (threshold: 10% image height)
+horizontal_desc ∈ {"to the left of", "to the right of", "aligned with"}   (threshold: 10% width)
+overlap_desc = "overlapping with" nếu IoU > 0
 ```
+
+### 8.3 LLM Prompt Construction
+
+**File:** `RL/llm_relationship_predictor.py`
+
+```
+System: "You are an expert in visual relationship detection. Analyze 
+the spatial relationship between objects in the image."
+
+User: 
+"Image: [union_crop_base64]
+Subject: {subject_class} at bbox {subject_bbox}
+Object: {object_class} at bbox {object_bbox}
+Spatial: {spatial_description}
+Gaze: direction=({gx:.2f}, {gy:.2f}), proximity={prox:.2f}
+Current prediction: {reltr_predicate} (confidence: {conf:.2f})
+
+What is the most likely relationship? Respond in JSON:
+{\"predicate\": \"...\", \"confidence\": 0.x, \"reasoning\": \"...\"}"
+```
+
+### 8.4 Confidence Assignment
+
+LLM predictions được gán confidence dựa trên nguồn:
+
+| Source | Confidence range |
+|---|---|
+| RelTR high-conf ($\sigma > 0.7$) | $\sigma$ (giữ nguyên) |
+| LLM prediction (new) | $0.5 \cdot p_{\text{LLM}}$ |
+| LLM override (vs RelTR) | $0.3 + 0.4 \cdot p_{\text{LLM}}$ |
+| Heuristic fallback | $0.2$ (fixed) |
 
 ---
 
-## ⚙️ Cấu hình
+## 9. Video Processing Pipeline
 
-### DQN Hyperparameters
-| Parameter | Giá trị | Mô tả |
-|-----------|---------|-------|
-| Learning Rate | 0.001 | AdamW optimizer cho Q-network |
-| Gamma | 0.95 | Discount factor (future reward importance) |
-| Epsilon | 0.9 → 0.01 | Exploration rate (decay=0.995, min=0.01) |
-| Batch Size | 32 | Experience replay batch size |
-| Buffer Size | 10,000 | Replay buffer capacity (max experiences) |
-| Target Update | 20 steps | Target network update interval |
-| State Dimension | 5 | State vector size |
-| Action Space | [1-10] | Số variations cần sinh cho mỗi relationship |
+**File:** `video_relation_pipeline.py`
 
-### Reward Weights (Base Components)
-| Component | Weight | Mô tả |
-|-----------|--------|-------|
-| Detection F1 | 0.25 | F1 score của detection model |
-| Relationship F1 | 0.45 | F1 score của relationship model (cao nhất) |
-| Diversity | 0.15 | Đa dạng về relation/object types |
-| Consistency | 0.10 | Độ ổn định predictions qua các epochs |
-| Improvement | 0.05 | Xu hướng cải thiện (trend analysis) |
+### 9.1 Frame Processing
 
-### Long-tail Boost Formula
+$$G_t = \text{Pipeline}(I_t), \quad t = 1, \ldots, T$$
+
+Mỗi frame $I_t$ được xử lý qua toàn bộ inference pipeline (Sections 3-8).
+
+### 9.2 Object Tracking (ByteTrack)
+
+YOLO's built-in tracker (ByteTrack variant) sử dụng **Kalman Filter** để track objects across frames.
+
+**Kalman Filter State:**
+
+$$\mathbf{x}_t = [c_x, c_y, s, r, \dot{c}_x, \dot{c}_y, \dot{s}]^\top$$
+
+trong đó $s = \sqrt{wh}$ (scale), $r = w/h$ (aspect ratio).
+
+**Prediction:** $\hat{\mathbf{x}}_{t|t-1} = \mathbf{F}\mathbf{x}_{t-1}$
+
+**Update:** $\mathbf{x}_t = \hat{\mathbf{x}}_{t|t-1} + \mathbf{K}_t(\mathbf{z}_t - \mathbf{H}\hat{\mathbf{x}}_{t|t-1})$
+
+**ByteTrack two-stage association:**
+1. **First stage:** Match high-score detections ($s > \theta_{\text{high}}$) với existing tracks bằng IoU
+2. **Second stage:** Match remaining low-score detections ($s > \theta_{\text{low}}$) với unmatched tracks
+
+### 9.3 Safety Zone Monitoring
+
+**Định nghĩa 9.1 (Safety Zone).** Vùng an toàn $Z = (x_1, y_1, x_2, y_2)$ do người dùng định nghĩa.
+
+**Kiểm tra vi phạm:**
+
+$$\text{ViolationCheck}(b, Z) = \text{IoU}(b, Z) > 0 \wedge \text{class}(b) \in \mathcal{C}_{\text{restricted}}$$
+
+**3-tier Safety Classification:**
+
+| Tier | Level | Color | Mô tả |
+|---|---|---|---|
+| 0 | SAFE | 🟢 Green | Quan hệ bình thường |
+| 1 | SUSPICIOUS | 🟡 Yellow | Cần theo dõi |
+| 2 | DANGEROUS | 🔴 Red | Cảnh báo ngay |
+
+---
+
+## 10. Safety Classification System
+
+**Files:** `RL/safety_classifier.py`, `RL/llm_safety_analyzer.py`, `RL/local_rules_db.py`
+
+### 10.1 3-Tier Architecture
+
+```
+Input: relationship (subject, predicate, object)
+           │
+   Tier 1: White/Black List Lookup ── O(1)
+           │ (nếu không match)
+   Tier 2: LLM Safety Analyzer ── O(API call)
+           │ (nếu LLM unavailable)
+   Tier 3: Local Rules Database ── O(|rules|)
+           │
+   Output: (safety_level, confidence, explanation)
+```
+
+### 10.2 Tier 1: White/Black List
+
+**Implementation:** `RL/safety_classifier.py`
+
 ```python
-# Tính tail weights từ tần suất quan hệ
-raw_weight(relation) = 1 / sqrt(frequency + 1e-3)
-tail_weight(relation) = raw_weight(relation) / Σ(raw_weights)  # Normalize
-
-# Áp dụng boost vào relationship score
-relationship_score *= (1 + tail_weight)  # Boost rare relations
-```
-
-**Ví dụ**: 
-- Quan hệ "on" (freq=100) → tail_weight ≈ 0.08
-- Quan hệ "riding" (freq=5) → tail_weight ≈ 0.36
-- Quan hệ "playing" (freq=2) → tail_weight ≈ 0.47
-
-### Quality Filter Thresholds
-| Check | Threshold | Mô tả |
-|-------|-----------|-------|
-| Min Size | 512×512 | Kích thước tối thiểu (width × height) |
-| Max Aspect | 2.2 | Tỉ lệ tối đa (max(w,h) / min(w,h)) |
-| Blur Variance | ≥ 60 | Laplacian variance (độ sắc nét) |
-| Exposure Mean | [20, 235] | Độ sáng trung bình (tránh quá tối/sáng) |
-| Exposure Clip | ≤ 0.20 | Tỷ lệ pixels bị clip (0 hoặc 255) |
-| CLIP Similarity | ≥ 0.23 | Cosine similarity với prompt (bám sát prompt) |
-| Duplicate Check | pHash | Phát hiện ảnh trùng lặp |
-
-### RelTR Training Configuration
-| Parameter | Giá trị | Mô tả |
-|-----------|---------|-------|
-| Training Epochs | 1 (default) | Số epochs train trên toàn bộ dataset mỗi episode |
-| Learning Rate | 1e-5 | AdamW optimizer cho RelTR |
-| Weight Decay | 1e-4 | L2 regularization |
-| Batch Processing | Sequential | Train từng sample, accumulate gradients |
-
-**Lưu ý**: Có thể tăng `reltr_training_epochs` (2-5) để model học tốt hơn trên dataset lớn.
-
-### Auto-Annotation Thresholds
-| Backend | Box Threshold | Text Threshold | Mô tả |
-|---------|---------------|----------------|-------|
-| **GroundingDINO** | 0.25 | 0.20 | Minimum confidence cho box detection và text matching |
-| **OWL-ViT** | 0.25 | N/A | Minimum confidence cho object detection |
-| **YOLO+CLIP** | N/A | N/A | Sử dụng confidence từ YOLO/CLIP (0.5-0.7) |
-| **Pseudo** | N/A | N/A | Fixed confidence = 0.3 (rất thấp, last resort) |
-
-### Safety System Configuration
-| Parameter | Mô tả |
-|-----------|-------|
-| **White List** | Danh sách hành động an toàn (pattern matching) |
-| **Black List** | Danh sách hành động nguy hiểm (pattern matching) |
-| **Gray Threshold** | 0.3 (default) - Ngưỡng để chuyển sang LLM analysis |
-| **LLM Provider** | "openai" hoặc "gemini" |
-| **LLM Model** | "gpt-3.5-turbo", "gpt-4o", "gemini-pro", etc. |
-| **Cache Enabled** | True (mặc định) - Cache LLM responses |
-| **Local Rules Priority** | Highest - Kiểm tra trước white/black list |
-
----
-
-## 📊 Kết quả và Metrics
-
-### Metrics theo dõi
-
-#### Detection Metrics
-- **Precision**: Tỷ lệ objects được detect đúng
-- **Recall**: Tỷ lệ objects thực tế được detect
-- **F1 Score**: Harmonic mean của Precision và Recall
-- **Bbox Loss**: Loss cho bounding box prediction
-- **GIoU Loss**: Generalized IoU loss
-
-#### Relationship Metrics
-- **Precision**: Tỷ lệ relationships được predict đúng
-- **Recall**: Tỷ lệ relationships thực tế được predict
-- **F1 Score**: Harmonic mean của Precision và Recall
-- **Relationship Loss**: Loss cho relationship prediction
-- **Long-tail Loss**: Weighted loss cho các quan hệ hiếm (weighted by tail_weights)
-- **mR@K Metrics**: Mean Recall@K (mR@10, mR@20, mR@50, mR@100)
-  - Đánh giá công bằng cho long-tail (không bị ảnh hưởng bởi head classes)
-  - Tính R@K cho từng relation type riêng, sau đó lấy trung bình
-
-#### RL Metrics
-- **Reward**: Tổng reward từ DQN (weighted sum của các components)
-- **Q-values**: Q-values cho mỗi action
-- **Epsilon**: Exploration rate hiện tại
-- **Experience Buffer Size**: Số experiences trong replay buffer
-- **Action Frequency**: Tần suất chọn mỗi action
-
-#### Quality Metrics
-- **Diversity Score**: Đa dạng synthetic data (relation/object types)
-- **Consistency Score**: Độ ổn định predictions qua các epochs
-- **Improvement Score**: Xu hướng cải thiện (trend analysis)
-
-#### Safety Metrics (Video)
-- **Total Alerts**: Tổng số cảnh báo
-- **Dangerous Count**: Số hành động nguy hiểm
-- **Suspicious Count**: Số hành động nghi ngờ
-- **Safe Count**: Số hành động an toàn
-- **Intrusion Count**: Số lần xâm nhập safe zone
-
-### Visualizations
-- **Reward vs Epoch**: Biểu đồ reward theo epochs
-- **Reward Components Breakdown**: Phân tích các thành phần của reward
-- **Action Frequency Histogram**: Histogram tần suất chọn action
-- **Q-values Heatmap**: Heatmap Q-values cho các state-action pairs
-- **Training Loss Curves**: Detection loss, Relationship loss, Long-tail loss
-- **Metrics Comparison**: So sánh metrics giữa các experiments
-
-### Experiment Outputs Structure
-```
-experiments/
-└── exp_001/
-    ├── ai_images/              # Synthetic images generated
-    │   ├── image_001.jpg
-    │   ├── image_002.jpg
-    │   └── ...
-    ├── dataset/                # Training samples (JSON format)
-    │   ├── sample_001.json
-    │   └── ...
-    ├── logs/                   # Training logs
-    │   └── training_log.txt
-    ├── metrics/                # JSON metrics files
-    │   ├── training_metrics_epoch_01.json
-    │   ├── training_metrics_epoch_02.json
-    │   └── ...
-    ├── models/                 # Saved checkpoints
-    │   ├── checkpoint_epoch_01.pth
-    │   ├── checkpoint_epoch_02.pth
-    │   └── best_model.pth
-    ├── plots/                  # Visualization plots
-    │   ├── reward_vs_epoch.png
-    │   ├── reward_components.png
-    │   ├── q_action_hist.png
-    │   └── ...
-    └── metadata.json           # Experiment config và metadata
-        {
-            "experiment_id": "exp_001",
-            "timestamp": "2024-01-01T00:00:00",
-            "config": {...},
-            "hyperparameters": {...},
-            "status": "completed"
-        }
-```
-
-### Metrics JSON Format
-```json
-{
-    "experiment_id": "exp_001",
-    "epoch": 1,
-    "detection_loss": 21.09,
-    "relationship_loss": 31.20,
-    "long_tail_loss": 42.80,
-    "reward": 0.43,
-    "detection_metrics": {
-        "precision": 0.28,
-        "recall": 0.47,
-        "f1": 0.35
-    },
-    "relationship_metrics": {
-        "precision": 0.28,
-        "recall": 0.47,
-        "f1": 0.35,
-        "mr@10": 0.1234,
-        "mr@20": 0.2345,
-        "mr@50": 0.3456,
-        "mr@100": 0.4567
-    },
-    "reward_components": {
-        "detection_f1": 0.35,
-        "relationship_f1": 0.35,
-        "diversity": 0.25,
-        "consistency": 0.15,
-        "improvement": 0.05
-    },
-    "total_ai_images": 50,
-    "dataset_size": 150
+WHITE_LIST = {
+    ("person", "walking on", "street"): SafetyLevel.SAFE,
+    ("*", "near", "*"): SafetyLevel.SAFE,  # wildcard match
+    ...
+}
+BLACK_LIST = {
+    ("child", "playing with", "knife"): SafetyLevel.DANGEROUS,
+    ("person", "near", "fire"): SafetyLevel.DANGEROUS,
+    ...
 }
 ```
 
----
+**Matching order:** (1) Exact match → (2) Wildcard `*` match → (3) Next tier.
 
-## 🛡️ Hệ thống Phân loại An toàn 3 Tầng
+### 10.3 Tier 2: LLM Safety Analyzer
 
-Hệ thống phân loại an toàn được tích hợp vào `VideoRelationPipeline` để phát hiện và cảnh báo các hành động nguy hiểm trong video, đặc biệt là trong môi trường gia đình có trẻ em.
+**File:** `RL/llm_safety_analyzer.py`
 
-### Kiến trúc 3 Tầng
-
-#### Sơ đồ luồng xử lý Safety System
+LLM prompt:
 
 ```
-Relationship từ RelTR: {subject, relation, object}
-         │
-         ▼
-┌────────────────────────────────────────────────────────┐
-│  SafetyClassifier.classify()                          │
-└────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌────────────────────────────────────────────────────────┐
-│  Tầng 3: Local Rules Database (Ưu tiên cao nhất)      │
-│  • Kiểm tra local_safety_rules.json                   │
-│  • Nếu có rule → Return level từ rule                 │
-│  • Nếu không → Tiếp tục                               │
-└────────────────────────────────────────────────────────┘
-         │
-         ├─ Có rule? → Return (SAFE/SUSPICIOUS/DANGEROUS)
-         │
-         └─ Không có rule? ▼
-┌────────────────────────────────────────────────────────┐
-│  Tầng 1: White/Black/Gray List                       │
-│  • Kiểm tra Black List → Nếu match → DANGEROUS        │
-│  • Kiểm tra White List → Nếu match → SAFE             │
-│  • Không match → Gray List → Chuyển Tầng 2            │
-└────────────────────────────────────────────────────────┘
-         │
-         ├─ Match Black? → Return DANGEROUS
-         ├─ Match White? → Return SAFE
-         │
-         └─ Không match? ▼
-┌────────────────────────────────────────────────────────┐
-│  Tầng 2: LLM Semantic Reasoning                       │
-│  • Kiểm tra cache (llm_safety_cache.json)             │
-│  • Nếu có cache → Return từ cache                     │
-│  • Nếu không → Gọi LLM API (OpenAI/Gemini)            │
-│    - Build prompt: "Hành động này nguy hiểm không?"   │
-│    - Parse response: SAFE/SUSPICIOUS/DANGEROUS        │
-│    - Lưu vào cache                                     │
-│  • Nếu LLM không hoạt động → Default SUSPICIOUS      │
-└────────────────────────────────────────────────────────┘
-         │
-         ▼
-Return: (SafetyLevel, confidence, explanation)
+"Phân tích mối quan hệ sau:
+Subject: {subject}, Relation: {relation}, Object: {object}
+Đánh giá: safe | suspicious | dangerous
+Confidence: 0.0-1.0
+Giải thích ngắn gọn."
 ```
 
-#### Tầng 1: White/Black/Gray List
-- **White List**: Các hành động an toàn (ví dụ: `person sitting on chair`)
-- **Black List**: Các hành động nguy hiểm (ví dụ: `child holding knife`)
-- **Gray List**: Các hành động không rõ ràng → Chuyển sang Tầng 2
+**Caching:** Key = `f"{subject}|{relation}|{object}"`, lưu vào file JSON.
 
-#### Tầng 2: LLM Semantic Reasoning
-- Sử dụng OpenAI/Gemini để đánh giá ngữ nghĩa
-- Hỏi LLM: "Hành động này có nguy hiểm không?"
-- Cache responses trong `llm_safety_cache.json` để tiết kiệm chi phí API
-- Hỗ trợ nhiều model: `gpt-3.5-turbo`, `gpt-4o`, `gpt-5.2`, `gemini-pro`, etc.
+**Provider support:** OpenAI (GPT-4/3.5/o1), Gemini, với auto-detection `max_completion_tokens` vs `max_tokens`.
 
-#### Tầng 3: Local Rules Database
-- Học từ phản hồi người dùng (Human-in-the-loop)
-- **Ưu tiên cao nhất** - kiểm tra trước cả white/black list
-- Lưu trong `local_safety_rules.json`
-- Tự động track `usage_count` cho mỗi rule
+### 10.4 Tier 3: Local Rules Database
 
-### Sử dụng
-
-```python
-from video_relation_pipeline import VideoRelationPipeline
-
-# Bật safety classifier
-pipeline = VideoRelationPipeline(
-    safety_classifier_enabled=True
-)
-
-# Xử lý video
-result = pipeline.process_video("video.mp4")
-```
-
-### Cấu hình
-
-File `RL/safety_config.json` chứa:
-- `white_list`: Danh sách hành động an toàn
-- `black_list`: Danh sách hành động nguy hiểm
-- `llm_enabled`: Bật/tắt LLM
-- `llm_provider`: "openai" hoặc "gemini"
-- `llm_model`: Model name (ví dụ: "gpt-3.5-turbo")
-
-### Thêm quy tắc cục bộ
-
-```python
-from RL.local_rules_db import LocalRulesDatabase
-from RL.llm_safety_analyzer import SafetyLevel
-
-db = LocalRulesDatabase()
-db.add_rule(
-    subject="child",
-    relation="playing with",
-    object_name="toy",
-    level=SafetyLevel.SAFE,
-    source="user_feedback"
-)
-```
-
-### Xem tài liệu chi tiết
-
-Xem file [`RL/README_SAFETY_SYSTEM.md`](RL/README_SAFETY_SYSTEM.md) để biết thêm chi tiết về:
-- Cách hoạt động của từng tầng
-- Cấu hình chi tiết
-- Ví dụ sử dụng
-- Luồng xử lý
+Context-specific rules (giao thông, công nghiệp, giáo dục, ...).
 
 ---
 
-## 🔬 Chi tiết kỹ thuật
+## 11. Deep Q-Network (DQN) Agent
 
-### State Vector (5 chiều)
-```python
-state = [
-    detection_f1,      # F1 score detection (normalized)
-    relationship_f1,   # F1 score relationship (normalized)
-    reward,            # Current reward (tanh normalized)
-    dataset_norm,      # Dataset size / 50 (normalized)
-    epsilon            # Current exploration rate
-]
-```
+**File:** `RL/reinforcement_learning.py`
 
-### Q-Network Architecture
-```
-Input(5) → Linear(64) → ReLU → Linear(64) → ReLU → Linear(10)
-```
+### 11.1 Formalization
 
-### Auto-Annotation Priority và Chi tiết Implementation
+**Định nghĩa 11.1 (MDP).** Bài toán được mô hình hóa như Markov Decision Process $(\mathcal{S}, \mathcal{A}, P, R, \gamma)$:
+- $\mathcal{S}$: Tập trạng thái (state vector)
+- $\mathcal{A} = \{0, 1, 2, 3, 4\}$: Tập hành động (mỗi action → số variations khác nhau)
+- $P$: Transition probability (stochastic do data generation)
+- $R: \mathcal{S} \times \mathcal{A} \rightarrow \mathbb{R}$: Reward function
+- $\gamma = 0.95$: Discount factor
 
-**File chính**: `RL/auto_annotator.py`
+### 11.2 State Representation
 
-**Vấn đề**: Stable Diffusion chỉ trả về pixels, không có bounding boxes. Cần tự động tạo annotations cho synthetic images.
+$$\mathbf{s}_t = [\underbrace{F_1^{\text{det}}, \ldots, F_K^{\text{det}}}_{\text{Detection features}}, \underbrace{N_{\text{rel}}, F_1^{\text{rel}}, \ldots}_{\text{Relationship features}}, \underbrace{r_{t-1}, \varepsilon_t, t/T}_{\text{Training state}}, \underbrace{U_{\text{mean}}, U_{\text{max}}}_{\text{Uncertainty}}] \in \mathbb{R}^{D_s}$$
 
-**Giải pháp**: Sử dụng Open-Vocabulary Detectors với priority order, tự động fallback nếu backend trước fail.
+**Components chi tiết:**
 
-#### 1. GroundingDINO (Ưu tiên cao nhất - SOTA)
-**Function**: `_annotate_groundingdino()` trong `RL/auto_annotator.py`
+| Component | Source | Dimension |
+|---|---|---|
+| Avg detection confidence | $\frac{1}{N}\sum s_i$ | 1 |
+| Detection count (normalized) | $N / 100$ | 1 |
+| Avg relationship confidence | $\frac{1}{|\mathcal{R}|}\sum \sigma_k$ | 1 |
+| Relationship count (normalized) | $|\mathcal{R}| / 200$ | 1 |
+| Relationship type distribution | histogram over types | $R$ |
+| Previous reward | $r_{t-1}$ | 1 |
+| Epsilon | $\varepsilon_t$ | 1 |
+| Episode progress | $t/T$ | 1 |
+| Mean uncertainty | $\bar{U}$ | 1 |
+| Max uncertainty | $U_{\max}$ | 1 |
 
-**Cách hoạt động**:
-```python
-# 1. Load image và convert sang tensor
-image_source, image_tensor = load_image(image_path)
-
-# 2. Tạo text prompt từ relationship triplet
-# Input: relationship = {"subject": "dog", "relation": "riding", "object": "surfboard"}
-# Output: text_prompt = "dog . surfboard"  # Format: "subject . object"
-
-# 3. Predict với GroundingDINO
-boxes, logits, phrases = predict(
-    model=groundingdino_model,
-    image=image_tensor,
-    caption=text_prompt,
-    box_threshold=0.25,   # Minimum confidence for boxes
-    text_threshold=0.20,  # Minimum confidence for text matching
-    device="cuda"
-)
-
-# 4. Convert normalized coords [cx, cy, w, h] → absolute [x1, y1, x2, y2]
-cx, cy, bw, bh = box.tolist()
-x1 = int((cx - bw / 2) * width)
-y1 = int((cy - bh / 2) * height)
-x2 = int((cx + bw / 2) * width)
-y2 = int((cy + bh / 2) * height)
-
-# 5. Clamp to image bounds
-x1 = max(0, min(x1, width - 1))
-y1 = max(0, min(y1, height - 1))
-x2 = max(x1 + 1, min(x2, width))
-y2 = max(y1 + 1, min(y2, height))
-```
-
-**Ưu điểm**:
-- ✅ Open-vocabulary: Detect bất kỳ object nào từ text prompt
-- ✅ Chính xác cao (State-of-the-Art)
-- ✅ Hỗ trợ nhiều objects trong một prompt
-- ✅ Model: SwinT-OGC (Swin Transformer backbone)
-
-**Yêu cầu cài đặt**:
-```bash
-git clone https://github.com/IDEA-Research/GroundingDINO.git
-cd GroundingDINO
-pip install -e .
-# Download weights
-wget -P weights https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
-```
-
-**Auto-detect paths** (tự động tìm trong code):
-- Config: `GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py`
-- Weights: `weights/groundingdino_swint_ogc.pth` hoặc `~/.cache/groundingdino/`
-
-#### 2. OWL-ViT (Fallback 1 - Lightweight)
-**Function**: `_annotate_owlvit()` trong `RL/auto_annotator.py`
-
-**Cách hoạt động**:
-```python
-# 1. Load model từ HuggingFace (tự động download lần đầu)
-processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
-model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-model.to(device).eval()
-
-# 2. Prepare inputs với text prompts
-# Format: "a photo of a {object}" cho mỗi prompt
-texts = [["a photo of a dog", "a photo of a surfboard"]]
-inputs = processor(text=texts, images=image, return_tensors="pt")
-inputs = {k: v.to(device) for k, v in inputs.items()}
-
-# 3. Predict
-with torch.no_grad():
-    outputs = model(**inputs)
-
-# 4. Post-process (có sẵn trong processor)
-target_sizes = torch.tensor([[height, width]], device=device)
-results = processor.post_process_object_detection(
-    outputs, threshold=0.25, target_sizes=target_sizes
-)[0]
-
-# 5. Extract boxes (đã là [x1, y1, x2, y2] format)
-for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
-    x1, y1, x2, y2 = box.tolist()
-    class_name = text_prompts[label.item()]  # Map label index to prompt
-```
-
-**Ưu điểm**:
-- ✅ Dễ cài: Chỉ cần `pip install transformers`
-- ✅ Tự động download model (~1.5GB) từ HuggingFace
-- ✅ Lightweight hơn GroundingDINO
-- ✅ Không cần config files
-
-**Nhược điểm**:
-- ⚠️ Độ chính xác thấp hơn GroundingDINO
-- ⚠️ Cần format text: "a photo of a {object}"
-
-#### 3. YOLO + CLIP (Fallback 2 - Limited Vocabulary)
-**Function**: `_annotate_yolo_clip()` trong `RL/auto_annotator.py`
-
-**Cách hoạt động**:
-```python
-# 1. YOLO detect objects (sử dụng pipeline có sẵn)
-detected_objects, yolo_labels, original_image, feature_map, global_context = \
-    detection_pipeline.detect_objects(image_path)
-
-# 2. CLIP classify với open vocabulary
-classified_results = detection_pipeline.classify_with_clip(
-    detected_objects, yolo_labels
-)
-# Output: [(label, bbox), ...] ví dụ: [("dog", [x1, y1, x2, y2]), ...]
-
-# 3. Fuzzy match với text prompts
-for label, bbox in classified_results:
-    label_lower = label.strip().lower()
-    matched = any(
-        prompt.lower() in label_lower or label_lower in prompt.lower()
-        for prompt in text_prompts  # ["dog", "surfboard"]
-    )
-    confidence = 0.7 if matched else 0.5
-```
-
-**Ưu điểm**:
-- ✅ Sử dụng pipeline có sẵn (`detect_objects.py`)
-- ✅ Không cần cài thêm dependencies
-- ✅ CLIP hỗ trợ open vocabulary (một phần)
-
-**Nhược điểm**:
-- ⚠️ Limited vocabulary (chỉ detect classes YOLO biết)
-- ⚠️ Fuzzy matching có thể không chính xác
-- ⚠️ Confidence thấp hơn (0.5-0.7)
-
-#### 4. Pseudo-bbox (Last Resort - Heuristic, Low Quality)
-**Function**: `_create_pseudo_annotations()` trong `RL/auto_annotator.py`
-
-**Cách hoạt động**:
-```python
-# Heuristics dựa trên relation type
-subject = relationship.get('subject', 'unknown')
-relation = relationship.get('relation', 'unknown')
-obj = relationship.get('object', 'unknown')
-
-if relation in ['on', 'above', 'over', 'riding']:
-    # Subject trên, Object dưới
-    subject_bbox = [width*0.3, height*0.1, width*0.7, height*0.45]
-    object_bbox = [width*0.2, height*0.5, width*0.8, height*0.9]
-    
-elif relation in ['under', 'below']:
-    # Subject dưới, Object trên
-    subject_bbox = [width*0.2, height*0.5, width*0.8, height*0.9]
-    object_bbox = [width*0.3, height*0.1, width*0.7, height*0.45]
-    
-elif relation in ['holding', 'carrying', 'using']:
-    # Subject lớn, Object nhỏ gần subject
-    subject_bbox = [width*0.2, height*0.1, width*0.7, height*0.9]
-    object_bbox = [width*0.5, height*0.3, width*0.8, height*0.6]
-    
-else:
-    # Default: Subject trái, Object phải
-    subject_bbox = [width*0.05, height*0.2, width*0.45, height*0.8]
-    object_bbox = [width*0.55, height*0.2, width*0.95, height*0.8]
-
-# Confidence cố định = 0.3 (rất thấp)
-objects = [
-    {'class': subject, 'bbox': subject_bbox, 'confidence': 0.3, 'source': 'pseudo'},
-    {'class': obj, 'bbox': object_bbox, 'confidence': 0.3, 'source': 'pseudo'}
-]
-```
-
-**Lưu ý**:
-- ⚠️ **WARNING**: Chất lượng rất thấp (confidence = 0.3)
-- ⚠️ Chỉ dùng khi tất cả detectors đều fail
-- ⚠️ Bbox được tạo từ heuristics, không phải từ ảnh thực tế
-- ⚠️ Có thể không chính xác với layout phức tạp
-
-### Code Flow trong `_ingest_synthetic_samples()`
-
-**File**: `RL/reinforcement_learning.py` - dòng 1007-1034
-
-```python
-# Trong hàm _ingest_synthetic_samples()
-for synthetic_data in synthetic_samples:
-    original_relationship = data.get('original_relationship')
-    # {"subject": "dog", "relation": "riding", "object": "surfboard"}
-    
-    # 1. Gọi AutoAnnotator (singleton pattern)
-    annotator = get_annotator()  # Tự động chọn backend tốt nhất
-    
-    # 2. Annotate từ relationship
-    annotation_result = annotator.annotate_from_relationship(
-        image_path, original_relationship
-    )
-    
-    # 3. annotation_result structure:
-    # {
-    #   'image_path': 'experiments/exp_001/ai_images/image_001.jpg',
-    #   'width': 512, 'height': 512,
-    #   'objects': [
-    #     {
-    #       'class': 'dog',
-    #       'bbox': [100, 150, 300, 400],  # [x1, y1, x2, y2]
-    #       'confidence': 0.85,
-    #       'source': 'groundingdino'  # hoặc 'owlvit', 'yolo_clip', 'pseudo'
-    #     },
-    #     {
-    #       'class': 'surfboard',
-    #       'bbox': [200, 300, 450, 500],
-    #       'confidence': 0.78,
-    #       'source': 'groundingdino'
-    #     }
-    #   ],
-    #   'annotation_backend': 'groundingdino',
-    #   'num_detected': 2
-    # }
-    
-    # 4. Sử dụng objects để build RelTR training targets
-    sample = {
-        'image_path': annotation_result['image_path'],
-        'objects': annotation_result['objects'],
-        'relationships': [...],  # Được tạo ở bước tiếp theo
-        'annotation_backend': annotation_result['annotation_backend']
-    }
-```
-
-### Relationship Generation (Tạo Relationships từ Objects)
-
-**Vấn đề**: Sau khi auto-annotation tạo được objects với bbox, cần tạo relationships (subject-relation-object triplets) để train RelTR.
-
-**Giải pháp**: Hệ thống sử dụng **3 phương pháp theo thứ tự ưu tiên**, tự động fallback nếu phương pháp trước fail.
-
-**File**: `RL/reinforcement_learning.py` - `_ingest_synthetic_samples()` (dòng 1040-1071)
-
-#### Flow tổng quan:
+### 11.3 Q-Network Architecture
 
 ```
-Synthetic Image + Objects (từ Auto-Annotation)
-         │
-         ▼
-┌────────────────────────────────────────┐
-│ Method 1: Build from Original          │
-│ Match objects với original_relationship│
-└────────────────────────────────────────┘
-         │
-         ├─ Success? → Use relationships
-         │
-         └─ Fail? ▼
-┌────────────────────────────────────────┐
-│ Method 2: RelTR Inference              │
-│ Dùng RelTR model để predict            │
-└────────────────────────────────────────┘
-         │
-         ├─ Success? → Use relationships
-         │
-         └─ Fail? ▼
-┌────────────────────────────────────────┐
-│ Method 3: Fallback                    │
-│ Tạo trực tiếp từ original_relationship │
-└────────────────────────────────────────┘
+Q-Network: ℝ^{Ds} → ℝ^{|A|}
+
+Input(Ds) → Linear(Ds, 128) → ReLU → Dropout(0.1)
+          → Linear(128, 64) → ReLU → Dropout(0.1)
+          → Linear(64, |A|) → Output ∈ ℝ^5
 ```
 
-#### Method 1: Build from Original (Ưu tiên cao nhất)
+**Target network:** $\theta^- \leftarrow \theta$ (hard copy) mỗi $C = 10$ steps.
 
-**Function**: `_build_relationship_from_original()` - dòng 753-774
+### 11.4 Action Selection (ε-greedy)
 
-**Cách hoạt động**:
-```python
-def _build_relationship_from_original(objects, original_relationship):
-    # Input:
-    # - objects: [{'class': 'dog', 'bbox': [...]}, {'class': 'surfboard', 'bbox': [...]}]
-    # - original_relationship: {'subject': 'dog', 'relation': 'riding', 'object': 'surfboard'}
-    
-    # 1. Tìm index của subject và object trong objects list
-    subject_idx = _find_object_index(objects, original_relationship.get('subject', ''))
-    object_idx = _find_object_index(objects, original_relationship.get('object', ''))
-    
-    # 2. Nếu tìm thấy cả 2, tạo relationship
-    if subject_idx is not None and object_idx is not None:
-        return [{
-            'subject': objects[subject_idx].get('class'),  # 'dog'
-            'relation': original_relationship.get('relation'),  # 'riding'
-            'object': objects[object_idx].get('class'),  # 'surfboard'
-            'confidence': 1.0,  # High confidence vì match với original
-            'source': 'original'
-        }]
-    return []  # Fail nếu không match được
+$$a_t = \begin{cases}
+\text{random action} \sim \text{Uniform}(\mathcal{A}) & \text{với xác suất } \varepsilon_t \\
+\arg\max_a Q(\mathbf{s}_t, a; \theta) & \text{với xác suất } 1 - \varepsilon_t
+\end{cases}$$
+
+**Epsilon decay:**
+
+$$\varepsilon_{t+1} = \max(\varepsilon_{\min}, \varepsilon_t \cdot \varepsilon_{\text{decay}})$$
+
+Với $\varepsilon_0 = 1.0$, $\varepsilon_{\min} = 0.01$, $\varepsilon_{\text{decay}} = 0.995$.
+
+### 11.5 Experience Replay
+
+**Buffer:** Circular buffer $\mathcal{D}$ với capacity $N_{\text{buf}} = 10000$.
+
+$$\mathcal{D} = \{(\mathbf{s}_t, a_t, r_t, \mathbf{s}_{t+1}, \text{done}_t)\}$$
+
+**Sampling:** Random mini-batch $\mathcal{B} \sim \text{Uniform}(\mathcal{D})$, $|\mathcal{B}| = 32$.
+
+### 11.6 Q-Learning Update
+
+**Bellman optimality equation:**
+
+$$Q^*(s, a) = \mathbb{E}\left[r + \gamma \max_{a'} Q^*(s', a')\right]$$
+
+**Loss function (MSE):**
+
+$$\mathcal{L}(\theta) = \mathbb{E}_{(s,a,r,s',d) \sim \mathcal{B}}\left[\left(r + \gamma(1-d)\max_{a'} Q(s', a'; \theta^-) - Q(s, a; \theta)\right)^2\right]$$
+
+**Thuật toán 11.1 (DQN Training Step):**
+
+```
+1. Sample mini-batch B = {(sᵢ, aᵢ, rᵢ, s'ᵢ, dᵢ)} from buffer D
+2. Compute targets: yᵢ = rᵢ + γ(1-dᵢ) max_a' Q(s'ᵢ, a'; θ⁻)
+3. Compute predictions: ŷᵢ = Q(sᵢ, aᵢ; θ)
+4. Loss: L = (1/|B|) Σᵢ (yᵢ - ŷᵢ)²
+5. Gradient step: θ ← θ - α∇_θ L
+6. Periodically: θ⁻ ← θ  (target update)
 ```
 
-**Object Matching Logic** (`_find_object_index()` - dòng 729-751):
+### 11.7 Chứng minh hội tụ
 
-Hệ thống sử dụng **3-level fuzzy matching** để tìm object:
+**Định lý 11.1 (Watkins & Dayan, 1992).** Q-Learning hội tụ đến $Q^*$ nếu:
 
-```python
-def _find_object_index(objects, class_name):
-    normalized = _normalize_label(class_name)  # Lowercase, strip
-    
-    # Level 1: Exact match
-    for idx, obj in enumerate(objects):
-        if _normalize_label(obj.get('class')) == normalized:
-            return idx  # ✅ Found
-    
-    # Level 2: Synonym matching
-    synonyms = _get_label_synonyms(class_name)
-    # Ví dụ: 'person' → ['man', 'woman', 'people', 'human', 'boy', 'girl', ...]
-    for idx, obj in enumerate(objects):
-        if _normalize_label(obj.get('class')) in synonyms:
-            return idx  # ✅ Found
-    
-    # Level 3: Partial matching (substring)
-    for idx, obj in enumerate(objects):
-        obj_label = _normalize_label(obj.get('class'))
-        if normalized in obj_label or obj_label in normalized:
-            return idx  # ✅ Found (ví dụ: 'dog' in 'doggy')
-    
-    return None  # ❌ Not found
-```
+1. $\forall (s, a): \sum_t \alpha_t(s,a) = \infty$ (mọi cặp state-action được thăm vô hạn lần)
+2. $\forall (s, a): \sum_t \alpha_t^2(s,a) < \infty$ (learning rate giảm đủ nhanh)
+3. $0 \leq \gamma < 1$ (discount factor)
 
-**Synonym Dictionary** (`_LABEL_SYNONYMS` - dòng 698-710):
-```python
-_LABEL_SYNONYMS = {
-    'person': ['man', 'woman', 'people', 'human', 'boy', 'girl', 'child', 'adult'],
-    'vehicle': ['car', 'truck', 'bus', 'motorcycle', 'bike', 'bicycle'],
-    'animal': ['dog', 'cat', 'horse', 'bird', 'cow', 'sheep'],
-    # ... và nhiều synonyms khác
-}
-```
+**Chứng minh (sketch).** Xem Q-Learning update rule như stochastic approximation algorithm. Gọi $\Delta_t = Q_t(s,a) - Q^*(s,a)$:
 
-**Ưu điểm**:
-- ✅ Chính xác cao (match với original relationship)
-- ✅ Confidence = 1.0 (tin cậy nhất)
-- ✅ Nhanh (không cần chạy model)
+$$\Delta_{t+1} = (1 - \alpha_t)\Delta_t + \alpha_t[r + \gamma\max_{a'} Q_t(s',a') - Q^*(s,a)]$$
 
-**Nhược điểm**:
-- ⚠️ Chỉ hoạt động nếu objects được detect match với original
-- ⚠️ Nếu auto-annotation fail hoặc detect sai class → không tạo được relationship
+Do contraction mapping: $\|\gamma\max_{a'} Q(s', a') - \gamma\max_{a'} Q^*(s', a')\| \leq \gamma\|Q - Q^*\|_\infty$, và $\gamma < 1$, toán tử Bellman backup là $\gamma$-contraction. Kết hợp điều kiện Robbins-Monro, $\Delta_t \rightarrow 0$ w.p. 1. $\blacksquare$
 
-#### Method 2: RelTR Inference (Fallback 1)
-
-**Function**: `_run_reltr_inference()` → `_decode_relationships()` - dòng 911-1287
-
-**Cách hoạt động**:
-```python
-def _run_reltr_inference(image_tensor, objects, global_context, image_size):
-    # 1. Load RelTR model
-    model, _ = _ensure_relationship_model()
-    
-    # 2. Prepare inputs
-    samples = nested_tensor_from_tensor_list([image_tensor])
-    context_tensor = _prepare_global_context_tensor(global_context)
-    
-    # 3. Run inference
-    model.eval()
-    with torch.no_grad():
-        if context_tensor is not None:
-            outputs = model(samples, global_context=context_tensor)
-        else:
-            outputs = model(samples)
-    
-    # 4. Decode relationships từ outputs
-    return _decode_relationships(outputs, objects, image_size)
-```
-
-**Relationship Decoding** (`_decode_relationships()` - dòng 1180-1287):
-
-RelTR decode relationships theo **2 strategies**:
-
-**Strategy 1: Geometric Matching (Ưu tiên)** - dòng 1211-1258
-
-```python
-# Sử dụng sub_boxes và obj_boxes từ RelTR outputs
-if use_geometric:  # Nếu có sub_boxes và obj_boxes
-    sub_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(sub_boxes) * scale
-    obj_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(obj_boxes) * scale
-    
-    for idx in range(rel_scores.shape[0]):
-        # 1. Lấy relationship prediction
-        rel_vector = rel_scores[idx]
-        rel_conf, rel_idx = rel_vector.max(dim=0)
-        relation_name = RELATION_CLASSES[rel_idx]  # 'riding', 'on', ...
-        
-        # 2. Match predicted boxes với detected objects bằng IoU
-        subj_iou_vals = box_ops.box_iou(sub_boxes_xyxy[idx], object_boxes)[0]
-        obj_iou_vals = box_ops.box_iou(obj_boxes_xyxy[idx], object_boxes)[0]
-        
-        subj_iou, subj_idx = subj_iou_vals.max(dim=0)
-        obj_iou, obj_idx = obj_iou_vals.max(dim=0)
-        
-        # 3. Filter: IoU phải >= 0.05
-        if subj_iou >= 0.05 and obj_iou >= 0.05:
-            confidence = rel_conf * max(subj_iou, 0.05) * max(obj_iou, 0.05)
-            relationships.append({
-                'subject': objects[subj_idx].get('class'),
-                'relation': relation_name,
-                'object': objects[obj_idx].get('class'),
-                'confidence': confidence,
-                'source': 'model'
-            })
-```
-
-**Strategy 2: Pair-wise Fallback** - dòng 1262-1287
-
-```python
-# Nếu không có geometric boxes, tạo tất cả pairs
-keep = rel_scores.max(-1).values > 0.4  # Filter confidence > 0.4
-filtered = rel_scores[keep] if keep.any() else rel_scores
-
-pair_cursor = 0
-for i in range(total_objects):
-    for j in range(i + 1, total_objects):  # Tất cả pairs
-        vector = filtered[pair_cursor % num_queries]
-        rel_idx = int(vector.argmax().item())
-        confidence = float(vector.max().item())
-        relation_name = RELATION_CLASSES[rel_idx]
-        
-        relationships.append({
-            'subject': objects[i].get('class'),
-            'relation': relation_name,
-            'object': objects[j].get('class'),
-            'confidence': confidence,
-            'source': 'model_fallback'
-        })
-        pair_cursor += 1
-```
-
-**Ưu điểm**:
-- ✅ Tự động predict relationships từ ảnh
-- ✅ Không cần original_relationship
-- ✅ Có thể tạo nhiều relationships (không chỉ 1)
-
-**Nhược điểm**:
-- ⚠️ Phụ thuộc vào chất lượng RelTR model
-- ⚠️ Có thể predict sai nếu model chưa được train tốt
-- ⚠️ Chậm hơn Method 1 (cần chạy inference)
-
-#### Method 3: Fallback (Last Resort)
-
-**Code**: dòng 1060-1071
-
-**Cách hoạt động**:
-```python
-# Nếu cả 2 methods trên đều fail
-if not relationships and original_relationship:
-    fallback_relationship = {
-        'subject': original_relationship.get('subject', 'unknown'),
-        'relation': original_relationship.get('relation', 'unknown'),
-        'object': original_relationship.get('object', 'unknown'),
-        'confidence': 0.5,  # Low confidence
-        'source': 'fallback'
-    }
-    relationships = [fallback_relationship]
-```
-
-**Lưu ý**:
-- ⚠️ **WARNING**: Chất lượng thấp (confidence = 0.5)
-- ⚠️ Chỉ dùng khi không thể match objects hoặc RelTR inference fail
-- ⚠️ Relationship này có thể không chính xác với objects thực tế trong ảnh
-
-### Ví dụ Flow hoàn chỉnh
-
-```python
-# Input: Synthetic image từ Stable Diffusion
-original_relationship = {
-    'subject': 'dog',
-    'relation': 'riding',
-    'object': 'surfboard'
-}
-
-# Step 1: Auto-Annotation
-annotation_result = annotator.annotate_from_relationship(image_path, original_relationship)
-# Output: objects = [
-#   {'class': 'dog', 'bbox': [100, 150, 300, 400], 'confidence': 0.85},
-#   {'class': 'surfboard', 'bbox': [200, 300, 450, 500], 'confidence': 0.78}
-# ]
-
-# Step 2: Relationship Generation
-# Method 1: Build from Original
-relationships = _build_relationship_from_original(objects, original_relationship)
-# ✅ Success! Output: [{
-#   'subject': 'dog',
-#   'relation': 'riding',
-#   'object': 'surfboard',
-#   'confidence': 1.0,
-#   'source': 'original'
-# }]
-
-# Nếu Method 1 fail (ví dụ: detect sai class 'puppy' thay vì 'dog'):
-# Method 2: RelTR Inference
-relationships = _run_reltr_inference(image_tensor, objects, ...)
-# Output: [{
-#   'subject': 'dog',  # hoặc 'puppy' nếu detect sai
-#   'relation': 'riding',  # RelTR predict
-#   'object': 'surfboard',
-#   'confidence': 0.75,  # Confidence từ model
-#   'source': 'model'
-# }]
-
-# Nếu cả 2 methods đều fail:
-# Method 3: Fallback
-relationships = [{
-    'subject': 'dog',
-    'relation': 'riding',
-    'object': 'surfboard',
-    'confidence': 0.5,
-    'source': 'fallback'
-}]
-```
-
-### So sánh 3 Methods
-
-| Method | Confidence | Accuracy | Speed | Khi nào dùng |
-|--------|-----------|----------|-------|--------------|
-| **Build from Original** | 1.0 | Cao nhất | Nhanh nhất | Objects match với original |
-| **RelTR Inference** | 0.4-0.9 | Trung bình-Cao | Chậm | Objects không match, cần predict |
-| **Fallback** | 0.5 | Thấp | Instant | Tất cả methods khác fail |
-
-### Best Practices
-
-1. **Ưu tiên Method 1**: Đảm bảo auto-annotation chính xác để objects match với original
-2. **Cải thiện RelTR**: Train RelTR tốt để Method 2 chính xác hơn
-3. **Avoid Fallback**: Fallback chỉ nên dùng khi không còn lựa chọn
-4. **Monitor source field**: Track `source` để biết relationship được tạo bằng method nào
-
-### Backend Selection Logic
-
-**File**: `RL/auto_annotator.py` - `_initialize_backend()`
-
-```python
-def _initialize_backend(self, config, checkpoint):
-    # 1. Try GroundingDINO first
-    if GROUNDINGDINO_AVAILABLE:
-        try:
-            # Auto-detect paths
-            if config is None:
-                candidates = [
-                    "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py",
-                    "groundingdino/config/GroundingDINO_SwinT_OGC.py",
-                    "~/.cache/groundingdino/GroundingDINO_SwinT_OGC.py"
-                ]
-                # Tìm file đầu tiên tồn tại
-            
-            model = load_model(config, checkpoint, device)
-            return "groundingdino"  # ✅ Success
-        except Exception as e:
-            print(f"GroundingDINO failed: {e}")
-    
-    # 2. Try OWL-ViT
-    if OWLVIT_AVAILABLE:
-        try:
-            processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
-            model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-            return "owlvit"  # ✅ Success
-        except Exception as e:
-            print(f"OWL-ViT failed: {e}")
-    
-    # 3. Fallback to YOLO+CLIP
-    if YOLO_CLIP_AVAILABLE:
-        return "yolo_clip"  # ✅ Always available (uses existing pipeline)
-    
-    # 4. No backend available
-    return "none"  # ❌ Will use pseudo-bbox only
-```
-
-### Cấu hình Thresholds
-
-| Backend | Box Threshold | Text Threshold | Mô tả |
-|---------|---------------|----------------|-------|
-| **GroundingDINO** | 0.25 | 0.20 | Minimum confidence cho box detection và text matching |
-| **OWL-ViT** | 0.25 | N/A | Minimum confidence cho object detection |
-| **YOLO+CLIP** | N/A | N/A | Sử dụng confidence từ YOLO/CLIP (0.5-0.7) |
-| **Pseudo** | N/A | N/A | Fixed confidence = 0.3 (rất thấp) |
-
-**Có thể điều chỉnh**:
-```python
-annotator = AutoAnnotator(
-    box_threshold=0.3,   # Tăng để strict hơn
-    text_threshold=0.25  # Tăng để match text chính xác hơn
-)
-```
-
-### Tối ưu hóa và Best Practices
-
-1. **Singleton Pattern**: 
-   - `get_annotator()` trả về instance duy nhất
-   - Model chỉ load 1 lần, tái sử dụng cho tất cả images
-   - Tiết kiệm memory và thời gian
-
-2. **Lazy Loading**: 
-   - Model chỉ được load khi cần thiết (lần đầu gọi `annotate()`)
-   - Không load tất cả backends cùng lúc
-
-3. **Auto-detect Paths**: 
-   - Tự động tìm config và weights files
-   - Hỗ trợ nhiều vị trí phổ biến
-
-4. **Error Handling**: 
-   - Graceful fallback nếu một backend fail
-   - Log lỗi nhưng không crash toàn bộ pipeline
-
-5. **Performance Tips**:
-   - GroundingDINO: Chính xác nhất nhưng chậm nhất
-   - OWL-ViT: Cân bằng tốt giữa speed và accuracy
-   - YOLO+CLIP: Nhanh nhất nhưng ít chính xác
-   - Pseudo: Instant nhưng chất lượng thấp
-
-### RelTR Training Configuration
-| Parameter | Giá trị | Mô tả |
-|-----------|---------|-------|
-| Training Epochs | 1 (default) | Số epochs train trên toàn bộ dataset mỗi episode |
-| Learning Rate | 1e-5 | AdamW optimizer cho RelTR |
-| Weight Decay | 1e-4 | L2 regularization |
-| Batch Processing | Sequential | Train từng sample, accumulate gradients |
-
-**Lưu ý**: Có thể tăng `reltr_training_epochs` (2-5) để model học tốt hơn trên dataset lớn.
+**Lưu ý:** Trong thực tế với function approximation (neural network), hội tụ không được đảm bảo lý thuyết, nhưng experience replay + target network + ε-greedy giúp ổn định (Mnih et al., 2015).
 
 ---
 
-## 🆕 Cập nhật và cải tiến
+## 12. Adaptive Reward Function
 
-### Version mới nhất - Các tính năng đã thêm
+**File:** `RL/reinforcement_learning.py` → `calculate_reward()`
 
-#### 1. **Long-tail Loss Metric** ✅
-- **Mô tả**: Metric mới để theo dõi hiệu suất trên các quan hệ hiếm (long-tail)
-- **Cách tính**: Relationship loss được trọng số hóa bởi `tail_weights` cho các quan hệ hiếm
-- **Lợi ích**: Đánh giá chính xác hơn về hiệu suất model trên long-tail distribution
-- **Vị trí**: Được lưu trong `relationship_metrics` JSON với key `long_tail_loss`
+### 12.1 Tổng quan
 
-```json
-{
-  "relationship_loss": 31.20,
-  "long_tail_loss": 42.80,  // ← Metric mới
-  "relationship_metrics": {
-    "precision": 0.28,
-    "recall": 0.47,
-    "f1": 0.35
-  }
-}
-```
+Hàm phần thưởng được chuẩn hóa qua **sigmoid** để tránh bùng nổ giá trị và đưa reward vào khoảng $(0, 1)$:
 
-##### Chi tiết Implementation: Các hàm tính Long-tail Loss
+$$R = \sigma\big(k \cdot (R_{\text{raw}} - 0.5)\big) = \frac{1}{1 + e^{-k(R_{\text{raw}} - 0.5)}}$$
 
-**File**: `RL/reinforcement_learning.py`
+trong đó $k$ là **scaling factor** (phụ thuộc độ ổn định gần đây của reward). Điểm thô:
 
-Hệ thống tính long-tail loss qua **3 bước chính**:
+$$R_{\text{raw}} = W_{\text{det}} S_{\text{det}} + W_{\text{rel}} S_{\text{rel}} + W_{\text{div}} S_{\text{div}} + W_{\text{cons}} S_{\text{cons}} + W_{\text{imp}} S_{\text{imp}} + W_{\text{unc}} S_{\text{unc}}$$
 
-###### Bước 1: Tính Tail Weights (`_recompute_tail_weights()`)
+Các thành phần $S_{\text{det}}, S_{\text{rel}}, S_{\text{div}}, S_{\text{cons}}, S_{\text{imp}}$ được định nghĩa dưới đây theo báo cáo; $S_{\text{unc}}$ là điểm giảm uncertainty (MC Dropout). Trọng số $W_*$ là **trọng số thích nghi** (adaptive weights).
 
-**Function**: `_recompute_tail_weights()` - dòng 159-180
+**Ký hiệu chung:**
+- $n$: số mẫu đánh giá (num_samples)
+- $\alpha$: hằng số điều chỉnh (mặc định 0.5), dùng trong $C_n$ và $S_{\text{pos}}$
+- $P, R$: Precision và Recall tương ứng (detection hoặc relationship)
+- $\text{F1}$: F1-score ($2PR/(P+R)$ hoặc từ metrics)
 
-**Mục đích**: Tính trọng số cho từng loại quan hệ dựa trên tần suất xuất hiện trong dataset. Quan hệ càng hiếm → trọng số càng cao.
+---
 
-**Cách hoạt động**:
-```python
-def _recompute_tail_weights(self) -> None:
-    """Tính trọng số cho các quan hệ hiếm (long-tail) dựa trên tần suất."""
-    if not self.dataset_samples:
-        self.tail_weights = {}
-        return
-    
-    # 1. Đếm tần suất của từng quan hệ trong dataset
-    freq: Dict[str, int] = {}
-    for sample in self.dataset_samples:
-        for rel in sample.get('relationships', []) or []:
-            rel_name = self._normalize_label(rel.get('relation', ''))
-            if not rel_name:
-                continue
-            freq[rel_name] = freq.get(rel_name, 0) + 1
-    
-    # Ví dụ: freq = {
-    #   'on': 100,      # Quan hệ phổ biến (head)
-    #   'has': 80,
-    #   'riding': 5,    # Quan hệ hiếm (tail)
-    #   'playing': 3
-    # }
-    
-    if not freq:
-        self.tail_weights = {}
-        return
-    
-    # 2. Tính raw weights: 1/sqrt(freq) để ưu tiên lớp hiếm
-    # Quan hệ hiếm (freq nhỏ) → weight lớn
-    # Quan hệ phổ biến (freq lớn) → weight nhỏ
-    raw_weights = {k: 1.0 / math.sqrt(v + 1e-3) for k, v in freq.items()}
-    # Ví dụ: raw_weights = {
-    #   'on': 1/sqrt(100) = 0.1,
-    #   'has': 1/sqrt(80) = 0.112,
-    #   'riding': 1/sqrt(5) = 0.447,   # ← Cao hơn
-    #   'playing': 1/sqrt(3) = 0.577   # ← Cao nhất
-    # }
-    
-    # 3. Normalize để tổng = 1.0
-    total = sum(raw_weights.values()) or 1.0
-    self.tail_weights = {k: v / total for k, v in raw_weights.items()}
-    # Ví dụ: tail_weights = {
-    #   'on': 0.08,      # Trọng số thấp
-    #   'has': 0.09,
-    #   'riding': 0.36,  # Trọng số cao (quan hệ hiếm)
-    #   'playing': 0.47  # Trọng số cao nhất
-    # }
-```
+### 12.2 Điểm phát hiện vật thể — $S_{\text{det}}$
 
-**Công thức**:
-```
-raw_weight(relation) = 1 / sqrt(frequency + ε)
-tail_weight(relation) = raw_weight(relation) / Σ(raw_weights)
-```
 
-**Ví dụ tính toán**:
-```
-Dataset có:
-- "on": 100 lần → raw = 1/√100 = 0.1
-- "has": 50 lần → raw = 1/√50 = 0.141
-- "riding": 5 lần → raw = 1/√5 = 0.447
-- "playing": 2 lần → raw = 1/√2 = 0.707
+$$S_{\text{det}} = F1_{\text{det}} \cdot C_n \cdot B_{PR}$$
 
-Tổng raw = 1.395
-Normalize:
-- "on": 0.1/1.395 = 0.072
-- "has": 0.141/1.395 = 0.101
-- "riding": 0.447/1.395 = 0.320  ← Cao hơn
-- "playing": 0.707/1.395 = 0.507 ← Cao nhất
-```
+- **Hệ số tin cậy mẫu** $C_n$ (giảm tác động khi $n$ ít — cold-start):
 
-**Khi nào được gọi**:
-- Sau khi `_ingest_synthetic_samples()` (dòng 1088)
-- Sau khi `build_dataset_from_directory()` (dòng 1137)
-- Mỗi khi dataset thay đổi
+$$C_n = \tanh\big(\alpha \cdot \ln(n + 1)\big)$$
 
-###### Bước 2: Tính Sample Tail Weight (`_get_sample_tail_weight()`)
+- **Hệ số cân bằng Precision–Recall** $B_{PR}$ (trừng phạt lệch P/R):
 
-**Function**: `_get_sample_tail_weight()` - dòng 2164-2195
+$$B_{PR} = 1 - |P - R|, \quad B_{PR} \in [0, 1]$$
 
-**Mục đích**: Tính trọng số trung bình cho một training sample dựa trên các quan hệ trong sample đó.
+**Implementation:** `_calculate_detection_score(detection_metrics)` — lấy `f1`, `precision`, `recall`, `num_samples` từ `detection_metrics`.
 
-**Cách hoạt động**:
-```python
-def _get_sample_tail_weight(self, target: Dict[str, Any]) -> float:
-    """Tính tail weight cho một training sample."""
-    if not self.tail_weights:
-        return 0.0
-    
-    # Collect all relationship names từ dataset và tính average tail weight
-    tail_weights_in_dataset = []
-    for sample in self.dataset_samples:
-        for rel in sample.get('relationships', []):
-            rel_name = self._normalize_label(rel.get('relation', ''))
-            if rel_name in self.tail_weights:
-                tail_weights_in_dataset.append(self.tail_weights[rel_name])
-    
-    if not tail_weights_in_dataset:
-        return 0.0
-    
-    # Return average tail weight
-    # Đây là proxy measure: nếu dataset có nhiều quan hệ hiếm,
-    # thì average weight sẽ cao
-    return sum(tail_weights_in_dataset) / len(tail_weights_in_dataset)
-```
+---
 
-**Ví dụ**:
-```python
-# Giả sử tail_weights = {
-#   'on': 0.08,
-#   'riding': 0.36,
-#   'playing': 0.47
-# }
+### 12.3 Điểm quan hệ — $S_{\text{rel}}$
 
-# Dataset có:
-# - Sample 1: relationships = [{'relation': 'on'}, {'relation': 'on'}]
-# - Sample 2: relationships = [{'relation': 'riding'}]
-# - Sample 3: relationships = [{'relation': 'playing'}]
 
-# tail_weights_in_dataset = [0.08, 0.08, 0.36, 0.47]
-# Average = (0.08 + 0.08 + 0.36 + 0.47) / 4 = 0.2475
-```
+$$S_{\text{rel}} = \big(F1_{\text{rel}} \cdot C_n \cdot B_{PR}\big) \times (1 + W_{\text{tail}})$$
 
-**Lưu ý**: Hàm này sử dụng average weight của toàn bộ dataset làm proxy, vì không thể trực tiếp map từ RelTR target (chứa indices) sang relationship names.
+$C_n$ và $B_{PR}$ giống mục 12.2 (dùng metrics của relationship). **Trọng số đuôi dài** $W_{\text{tail}}$:
 
-###### Bước 3: Tính Long-tail Loss trong Training (`train_relationship_model()`)
+- Trọng số thô theo nghịch đảo tần suất (49):
 
-**Function**: `train_relationship_model()` - dòng 2054-2162
+$$W_{\text{raw}}(r) = \frac{1}{\sqrt{\text{freq}(r) + \epsilon}}, \quad \epsilon = 10^{-3}$$
 
-**Mục đích**: Tính long-tail loss bằng cách trọng số hóa relationship loss theo tail weights.
+- Chuẩn hóa trên toàn bộ từ vựng quan hệ $R$ (48):
 
-**Cách hoạt động**:
-```python
-def train_relationship_model(self, synthetic_data, num_epochs: int = 1):
-    """Train RelTR và tính long-tail loss."""
-    # ... setup model, optimizer ...
-    
-    for epoch in range(num_epochs):
-        total_loss = 0.0
-        total_tail_loss = 0.0  # ← Tích lũy long-tail loss
-        tail_weighted_count = 0  # ← Đếm số samples có tail weight
-        
-        for i, (image_tensor, target, global_context) in enumerate(shuffled_samples):
-            # 1. Forward pass và tính loss thông thường
-            outputs = model(samples, global_context=context_tensor)
-            loss_dict = criterion(outputs, targets)
-            loss = sum(loss_dict[k] * weight_dict.get(k, 1.0) 
-                      for k in loss_dict.keys() if k in weight_dict)
-            
-            loss.backward()
-            sample_loss = float(loss.item())
-            total_loss += sample_loss
-            
-            # 2. Tính long-tail loss: nhân loss với tail_weight
-            tail_weight = self._get_sample_tail_weight(target)
-            if tail_weight > 0:
-                total_tail_loss += sample_loss * tail_weight  # ← Weighted loss
-                tail_weighted_count += 1
-        
-        # 3. Tính average losses
-        epoch_avg_loss = total_loss / len(shuffled_samples)
-        epoch_tail_loss = total_tail_loss / max(tail_weighted_count, 1)
-        # ↑ Chia cho số samples có tail weight, không phải tổng số samples
-        
-        # ... lưu losses ...
-    
-    # 4. Return average across all epochs
-    average_loss = sum(all_epoch_losses) / len(all_epoch_losses)
-    long_tail_loss = sum(all_epoch_tail_losses) / len(all_epoch_tail_losses)
-    
-    return average_loss, long_tail_loss
-```
+$$W_{\text{tail}}(r) = \frac{W_{\text{raw}}(r)}{\sum_{i=1}^{R} W_{\text{raw}}(i)}$$
 
-**Công thức**:
-```
-For each training sample i:
-  sample_loss_i = RelTR_loss(sample_i)
-  tail_weight_i = _get_sample_tail_weight(sample_i)
-  
-  if tail_weight_i > 0:
-    tail_loss_i = sample_loss_i * tail_weight_i
-    total_tail_loss += tail_loss_i
-    tail_weighted_count += 1
+Hệ thống duy trì từ điển `tail_weights` (đã chuẩn hóa). Khi đánh giá theo từng relation thì dùng $W_{\text{tail}}(r)$ tương ứng; khi đánh giá gộp thì dùng trung bình $W_{\text{tail}}$ trên các relation có trong batch.
 
-long_tail_loss = total_tail_loss / tail_weighted_count
-```
+**Implementation:** `_calculate_relationship_score(relationship_metrics)` — F1, P, R, n từ `relationship_metrics`; $W_{\text{tail}}$ từ `self.tail_weights` (tính bằng `_recompute_tail_weights()`).
 
-**Ví dụ tính toán**:
-```python
-# Giả sử có 3 samples:
-# Sample 1: loss = 30.0, tail_weight = 0.08 (quan hệ "on" - phổ biến)
-# Sample 2: loss = 35.0, tail_weight = 0.36 (quan hệ "riding" - hiếm)
-# Sample 3: loss = 40.0, tail_weight = 0.47 (quan hệ "playing" - rất hiếm)
+---
 
-# Tính long-tail loss:
-total_tail_loss = (30.0 * 0.08) + (35.0 * 0.36) + (40.0 * 0.47)
-                 = 2.4 + 12.6 + 18.8
-                 = 33.8
+### 12.4 Điểm đa dạng — $S_{\text{div}}$
 
-tail_weighted_count = 3
-long_tail_loss = 33.8 / 3 = 11.27
 
-# So sánh với relationship_loss thông thường:
-relationship_loss = (30.0 + 35.0 + 40.0) / 3 = 35.0
+$$S_{\text{div}} = 0.4\, D_{\text{type}} + 0.4\, D_{\text{class}} + 0.2\, S_{\text{spatial}}$$
 
-# → long_tail_loss (11.27) < relationship_loss (35.0) 
-# vì đã được normalize bởi tail_weights
-```
+- **$D_{\text{type}}$:** Tỷ lệ số **loại quan hệ** xuất hiện trên tổng số loại khả dụng (ví dụ chuẩn hóa với mẫu 10).
+- **$D_{\text{class}}$:** Tỷ lệ số **lớp vật thể** (subject/object) xuất hiện trên tổng lớp khả dụng (ví dụ 15).
 
-**Lưu ý quan trọng**:
-- Long-tail loss **không phải** là loss riêng biệt, mà là **weighted version** của relationship loss
-- Chỉ tính cho các samples có `tail_weight > 0`
-- Được chia cho số samples có tail weight, không phải tổng số samples
-- Giá trị có thể nhỏ hơn relationship_loss vì đã được normalize
+**Điểm đa dạng không gian** $S_{\text{spatial}}$:
 
-### Flow hoàn chỉnh
+$$S_{\text{spatial}} = 0.4\, S_{\text{pos}} + 0.3\, S_{\text{size}} + 0.3\, S_{\text{coverage}}$$
+
+- **$S_{\text{pos}}$ (52):** Đa dạng vị trí — khuyến khích centroid bbox thay đổi:
+
+$$S_{\text{pos}} = \tanh(\alpha \cdot \text{Var}_{\text{pos}})$$
+
+với $\text{Var}_{\text{pos}}$ là tổng phương sai tọa độ tâm (sau khi chuẩn hóa theo kích thước ảnh).
+
+- **$S_{\text{size}}$ (53):** Hệ số biến thiên (Coefficient of Variation) diện tích bbox:
+
+$$S_{\text{size}} = \frac{\sigma_{\text{size}}}{\mu_{\text{size}}}$$
+
+(clip về đoạn hợp lý, ví dụ $[0, 2]$).
+
+- **$S_{\text{coverage}}$ (54):** Entropy vị trí — khuyến khích vật thể rải đều trên lưới ảnh (grid 4×4):
+
+$$S_{\text{coverage}} = -\sum_i p_i \log(p_i + \epsilon)$$
+
+$p_i$ là tỷ lệ bbox rơi vào ô $i$; entropy được chuẩn hóa theo entropy cực đại.
+
+**Implementation:** `_calculate_diversity_score(synthetic_data)` và các helper `_calculate_spatial_diversity`, `_calculate_position_diversity`, `_calculate_size_diversity`, `_calculate_coverage_diversity`.
+
+---
+
+### 12.5 Điểm nhất quán — $S_{\text{cons}}$
+
+
+$$S_{\text{cons}} = 0.7\, S_{\text{std}} + 0.3\, S_{\text{trend}}$$
+
+- **$S_{\text{std}}$ (56):** Nghịch đảo độ lệch chuẩn F1 (ổn định qua các mẫu):
+
+$$S_{\text{std}} = \frac{1}{1 + \sigma_{F1}}$$
+
+- **$S_{\text{trend}}$ (57):** Hệ số góc hồi quy tuyến tính của chuỗi F1 (theo thời gian / theo mẫu). Slope được map vào $[0, 1]$ bằng hàm tanh để slope dương (cải thiện) cho điểm cao hơn.
+
+**Implementation:** `_calculate_consistency_score(f1_scores, precomputed_std)` và `_calculate_trend_score(scores)`.
+
+---
+
+### 12.6 Điểm cải thiện — $S_{\text{imp}}$
+
+
+$$S_{\text{imp}} = 0.6 \cdot \tanh(F1_{\text{current}} - F1_{\text{base}}) + 0.4 \cdot S_{\text{trend}}$$
+
+- **$F1_{\text{current}}$:** F1 (hoặc proxy: trung bình relationship score) gần đây.
+- **$F1_{\text{base}}$:** Baseline (ngưỡng mong muốn), lấy từ `baseline_performance['relationship']` hoặc `overall`.
+- **$S_{\text{trend}}$:** Cùng định nghĩa xu hướng như trong $S_{\text{cons}}$ (chuỗi relationship scores gần đây).
+
+Trong code, $\tanh(F1_{\text{current}} - F1_{\text{base}})$ được map về $[0,1]$ dạng $0.5 + 0.5\tanh(\cdot)$ rồi nhân 0.6.
+
+**Implementation:** `_calculate_improvement_score()` — dùng `performance_history['relationship_scores']` và `baseline_performance`.
+
+---
+
+### 12.7 Điểm giảm uncertainty — $S_{\text{unc}}$
+
+Thành phần bổ sung (không nằm trong báo cáo 4.2.2): đo **mức giảm uncertainty** của mô hình RelTR sau khi bổ sung dữ liệu, dựa trên **MC Dropout** (Section 13). Cách tính $S_{\text{unc}}$ gồm ba bước sau.
+
+#### Bước 1: Ước lượng uncertainty theo từng mẫu
+
+Với tập mẫu đánh giá (ví dụ `evaluation_samples`, tối đa 10 mẫu), gọi:
+
+$$\text{batch\_unc} = \text{estimate\_batch}(\text{samples}; \text{transform\_fn}, \text{max\_samples}=10)$$
+
+Với mỗi mẫu, **estimate_relationship_uncertainty** chạy $N$ lần forward (MC Dropout, $N=10$ mặc định), thu được nhiều bộ dự đoán quan hệ. Từ đó tính:
+
+- **Predictive Entropy** $\mathcal{H}[\bar{p}]$ (tổng uncertainty)
+- **Mutual Information (BALD)** $\mathcal{I}[y; \omega]$ (epistemic uncertainty)
+- **Variation Ratio** VR (tỷ lệ dự đoán thay đổi giữa các lần forward)
+- **Mean confidence** $\bar{c}$ của các prediction
+
+**Combined uncertainty score** (mỗi mẫu) ∈ $[0, 1]$ — càng cao càng không chắc chắn:
+
+$$U_{\text{sample}} = 0.30\,\mathcal{H} + 0.30\,\mathcal{I} + 0.20\,\text{VR} + 0.20\,(1 - \bar{c})$$
+
+Kết quả batch: `current_uncertainties = { sample_id: U_sample }` (trong code dùng `uncertainty_score` từ mỗi phần tử của `batch_unc`).
+
+#### Bước 2: Mức giảm uncertainty so với epoch trước
+
+Module **UncertaintyEstimator** lưu cache `_previous_uncertainties` (uncertainty của lần đo trước). Hàm **compute_uncertainty_reduction** so sánh với bộ uncertainty hiện tại:
+
+$$\text{reduction}_k = \frac{U_{\text{prev},k} - U_{\text{current},k}}{U_{\text{prev},k}} \quad \text{(chỉ với } U_{\text{prev},k} > 0\text{)}$$
+
+$$\rho = \frac{1}{|\mathcal{K}|}\sum_{k \in \mathcal{K}} \text{reduction}_k, \quad \rho \in [-1, 1]$$
+
+- $\rho > 0$: uncertainty giảm trung bình (tốt)
+- $\rho < 0$: uncertainty tăng (xấu)
+- $\rho = 0$: không đổi hoặc lần đầu (chưa có cache)
+
+Sau khi tính xong, cache được cập nhật: `_previous_uncertainties ← current_uncertainties` cho epoch tiếp theo.
+
+#### Bước 3: Map sang $S_{\text{unc}} \in [0, 1]$
+
+Trong **calculate_reward**, giá trị $\rho \in [-1, 1]$ được đưa về khoảng $[0, 1]$ để dùng làm thành phần reward:
+
+$$S_{\text{unc}} = 0.5 + 0.5\,\rho, \quad \text{clip về } [0, 1]$$
+
+- $S_{\text{unc}} = 0.5$: không thay đổi uncertainty (trung tính) hoặc lỗi/không có estimator
+- $S_{\text{unc}} = 1$: giảm mạnh uncertainty
+- $S_{\text{unc}} = 0$: uncertainty tăng mạnh (bị clip)
+
+**Implementation:** `RL/uncertainty_estimator.py` — `estimate_batch`, `compute_uncertainty_reduction`, `_compute_combined_score`; `reinforcement_learning.py` — trong `calculate_reward` gọi `estimate_batch` → `compute_uncertainty_reduction` → map bằng `0.5 + 0.5 * reduction`. Khi không có `uncertainty_estimator` hoặc ngoại lệ: $S_{\text{unc}} = 0.5$.
+
+**Trọng số $W_{\text{unc}}$** tham gia công thức trọng số thích nghi (mục 12.8): trọng số cơ bản $W_{\text{unc}}^0 = 0.10$, sau đó điều chỉnh theo độ lệch so với baseline và chuẩn hóa cùng 5 thành phần còn lại (tổng 6 trọng số bằng 1).
+
+---
+
+### 12.8 Trọng số thích nghi (Adaptive Weights)
+
+Trọng số $W_k$ cho thành phần $k$ được cập nhật theo độ lệch so với baseline:
+
+$$W_k = \frac{W_k^0 + \alpha\, (b_k - S_k)}{\sum_j \big(W_j^0 + \alpha\, (b_j - S_j)\big)}$$
+
+- $W_k^0$: trọng số khởi tạo (detection 0.25, relationship 0.45, diversity 0.15, consistency 0.10, improvement 0.05, **uncertainty_reduction 0.10**).
+- $S_k$: điểm hiện tại của thành phần $k$ (gồm cả $S_{\text{unc}}$).
+- $b_k$: baseline của thành phần $k$ (baseline cho uncertainty_reduction cũng được cập nhật theo lịch sử).
+- $\alpha$: hệ số điều chỉnh độ nhạy (ví dụ 0.2).
+
+Thành phần nào **điểm thấp hơn baseline** ($S_k < b_k$) thì nhận trọng số cao hơn, giúp tập trung cải thiện các mục tiêu còn yếu. **Implementation:** `_calculate_dynamic_weights(..., improvement_score=..., uncertainty_reduction_score=...)` tính cả 6 trọng số trong một lần và chuẩn hóa tổng bằng 1; trọng số $S_{\text{unc}}$ cũng tham gia thích nghi, không còn cố định 10%.
+
+---
+
+### 12.9 Tóm tắt công thức và luồng tính toán
+
+| Thành phần | Công thức chính | Input chính |
+|---|---|---|
+| $S_{\text{det}}$ | $F1_{\text{det}} \cdot C_n \cdot B_{PR}$ | detection_metrics (f1, P, R, n) |
+| $S_{\text{rel}}$ | $(F1_{\text{rel}} \cdot C_n \cdot B_{PR})(1 + W_{\text{tail}})$ | relationship_metrics + tail_weights |
+| $S_{\text{div}}$ | $0.4 D_{\text{type}} + 0.4 D_{\text{class}} + 0.2 S_{\text{spatial}}$ | synthetic_data (relations, classes, bbox) |
+| $S_{\text{cons}}$ | $0.7/(1+\sigma_{F1}) + 0.3\, S_{\text{trend}}$ | per-sample F1, $\sigma_{F1}$ |
+| $S_{\text{imp}}$ | $0.6\tanh(F1_{\text{curr}}-F1_{\text{base}}) + 0.4 S_{\text{trend}}$ | relationship_scores, baseline |
+| $S_{\text{unc}}$ | $0.5 + 0.5\,\rho$, $\rho = \text{mean}_k\big((U_{\text{prev},k}-U_{\text{curr},k})/U_{\text{prev},k}\big)$ | estimate_batch → compute_uncertainty_reduction, cache $U_{\text{prev}}$ |
+
+
+## 13. MC Dropout Uncertainty Estimation
+
+**File:** `RL/uncertainty_estimator.py`
+
+### 13.1 Nền tảng lý thuyết
+
+**Định lý 13.1 (Gal & Ghahramani, 2016).** Một mạng neural với dropout trước mỗi weight layer tương đương xấp xỉ variational inference trong deep Gaussian process.
+
+**Chứng minh (sketch).** Xem weight matrices $\{W_l\}$ là biến ngẫu nhiên. Dropout tạo phân phối biến phân:
+
+$$q(\mathbf{W}_l) = \prod_{i} q(w_{l,i}), \quad q(w_{l,i}) = p \cdot \delta(w_{l,i}) + (1-p) \cdot \delta(w_{l,i} - m_{l,i})$$
+
+trong đó $m_{l,i}$ là learned weights, $p$ là dropout rate. Khi tối ưu:
+
+$$\min_{q} \text{KL}(q(\mathbf{W}) \| p(\mathbf{W}|\mathcal{D}))$$
+
+Tương đương cross-entropy loss + L2 regularization. $\blacksquare$
+
+### 13.2 MC Dropout Inference
+
+**Thuật toán 13.1 (MC Dropout Uncertainty):**
 
 ```
-1. Dataset được build/ingest
-   ↓
-2. _recompute_tail_weights() được gọi
-   ↓
-3. tail_weights được tính: {relation: weight}
-   ↓
-4. train_relationship_model() được gọi
-   ↓
-5. For each training sample:
-   a. Tính sample_loss (RelTR loss)
-   b. Tính tail_weight = _get_sample_tail_weight(sample)
-   c. Nếu tail_weight > 0:
-      total_tail_loss += sample_loss * tail_weight
-   ↓
-6. long_tail_loss = total_tail_loss / tail_weighted_count
-   ↓
-7. Return (relationship_loss, long_tail_loss)
+Input:  Model f_θ, input x, T = 30 forward passes, dropout rate p
+Output: Uncertainty scores
+
+1. Enable dropout ở test time
+2. for t = 1, ..., T:
+3.   ŷₜ = f_θ(x)  // với random dropout mask khác nhau
+4.   pₜ = softmax(ŷₜ) ∈ ℝ^K
+5. Compute:
+   p̄ = (1/T) Σₜ pₜ                      // mean prediction
+   H_pred = -Σₖ p̄ₖ log(p̄ₖ)              // predictive entropy
+   H_exp = -(1/T) Σₜ Σₖ pₜₖ log(pₜₖ)    // expected entropy
+   MI = H_pred - H_exp                    // mutual information (BALD)
+   VR = 1 - max_k (1/T)|{t: argmax pₜ = k}|  // variation ratio
 ```
 
-### Sử dụng Long-tail Loss
+### 13.3 Uncertainty Metrics
 
-**Trong training metrics**:
-```python
-results = rl_system.train_episode(...)
-# results['long_tail_loss'] = 42.80
+**Định nghĩa 13.2 (Predictive Entropy).**
+
+$$\mathcal{H}[\mathbf{y}|\mathbf{x}, \mathcal{D}] = -\sum_{k=1}^{K} \bar{p}_k \log \bar{p}_k, \quad \bar{p}_k = \frac{1}{T}\sum_{t=1}^{T} p_{t,k}$$
+
+Đo tổng uncertainty (aleatoric + epistemic).
+
+**Định nghĩa 13.3 (BALD — Bayesian Active Learning by Disagreement).**
+
+$$\mathcal{I}[\mathbf{y}; \boldsymbol{\omega}|\mathbf{x}, \mathcal{D}] = \mathcal{H}[\mathbf{y}|\mathbf{x}, \mathcal{D}] - \mathbb{E}_{q(\boldsymbol{\omega})}[\mathcal{H}[\mathbf{y}|\mathbf{x}, \boldsymbol{\omega}]]$$
+
+$$= \underbrace{-\sum_k \bar{p}_k \log \bar{p}_k}_{\text{predictive entropy}} + \underbrace{\frac{1}{T}\sum_{t=1}^{T}\sum_k p_{t,k}\log p_{t,k}}_{\text{expected entropy}}$$
+
+Đo **epistemic uncertainty** only — uncertainty giảm được bằng thêm data.
+
+**Mệnh đề 13.1.** BALD ≥ 0, và BALD = 0 khi và chỉ khi tất cả MC samples cho cùng prediction.
+
+**Chứng minh.** BALD = $\mathcal{H}[\bar{p}] - \frac{1}{T}\sum_t \mathcal{H}[p_t]$. Theo Jensen's inequality: $\mathcal{H}[\frac{1}{T}\sum p_t] \geq \frac{1}{T}\sum \mathcal{H}[p_t]$ (entropy là concave). Dấu bằng khi $p_t = \bar{p} \;\forall t$. $\blacksquare$
+
+**Định nghĩa 13.4 (Variation Ratio).**
+
+$$\text{VR} = 1 - \frac{|\{t : \arg\max_k p_{t,k} = \hat{c}\}|}{T}, \quad \hat{c} = \text{mode}\{\arg\max_k p_{t,k}\}_{t=1}^{T}$$
+
+VR = 0: tất cả MC passes đồng ý; VR → 1: MC passes không nhất quán.
+
+### 13.4 Combined Uncertainty Score
+
+$$U_{\text{combined}} = \alpha_1 \cdot \hat{\mathcal{H}} + \alpha_2 \cdot \hat{\mathcal{I}} + \alpha_3 \cdot \text{VR}$$
+
+với $\alpha_1 = 0.4, \alpha_2 = 0.4, \alpha_3 = 0.2$. Hats ($\hat{\cdot}$) denote normalized values ∈ [0, 1].
+
+---
+
+## 14. Active Learning Acquisition
+
+**File:** `RL/active_learning.py`
+
+### 14.1 Acquisition Function
+
+**Định nghĩa 14.1.** Acquisition score cho relationship $r_k$:
+
+$$\alpha(r_k) = \underbrace{U(r_k)}_{\text{Uncertainty}} + \lambda_1 \underbrace{\Delta_{\text{perf}}(r_k)}_{\text{Performance Gap}} + \lambda_2 \underbrace{\tau(r_k)}_{\text{Tail Weight}}$$
+
+**Uncertainty $U(r_k)$:** MC Dropout combined score (Section 13.4).
+
+**Performance Gap:**
+
+$$\Delta_{\text{perf}}(r_k) = \max(0, \text{target\_F1} - \text{current\_F1}(p_k))$$
+
+**Tail Weight** (khuyến khích rare predicates):
+
+$$\tau(r_k) = 1 - \frac{\text{count}(p_k)}{\max_{p'} \text{count}(p') + \epsilon}$$
+
+Predicates hiếm ($\tau \to 1$) được ưu tiên sinh thêm data.
+
+### 14.2 Budget Allocation
+
+$$n_k = \text{round}\left(N_{\text{budget}} \cdot \frac{\alpha(r_k)}{\sum_{k'} \alpha(r_{k'})}\right)$$
+
+$n_k$ = số ảnh synthetic cần sinh cho relationship $r_k$. Total budget $N_{\text{budget}}$ do DQN action quyết định.
+
+### 14.3 Generation Plan
+
+**Thuật toán 14.1 (Active Learning Plan):**
+
 ```
+Input:  Relationships R, uncertainty U, performance metrics M, budget N
+Output: Generation plan P = {(rₖ, nₖ)}
 
-**Trong JSON metrics**:
-```json
-{
-  "relationship_loss": 31.20,
-  "long_tail_loss": 42.80,
-  "relationship_metrics": {
-    "precision": 0.28,
-    "recall": 0.47,
-    "f1": 0.35
-  }
-}
-```
-
-**Ý nghĩa**:
-- `long_tail_loss` cao → Model đang gặp khó khăn với quan hệ hiếm
-- `long_tail_loss` giảm → Model đang học tốt hơn trên long-tail
-- So sánh với `relationship_loss` để đánh giá sự chênh lệch giữa head và tail classes
-
-#### 2. **Multiple Epochs Training** ✅
-- **Mô tả**: Hỗ trợ training nhiều epochs trên toàn bộ dataset tích lũy
-- **Cấu hình**: `self.reltr_training_epochs` (mặc định: 1, có thể tăng lên 3-5)
-- **Tính năng**:
-  - Shuffle samples giữa các epochs (trừ epoch đầu)
-  - Tối ưu logging cho dataset lớn
-  - Tính average loss across epochs
-- **Cách sử dụng**:
-  ```python
-  # Trong code
-  rl_agent.reltr_training_epochs = 3  # Train 3 epochs mỗi episode
-  ```
-
-#### 3. **Dataset Input cho RL Training** ✅
-- **Mô tả**: Cho phép chọn/nhập dataset từ thư mục ảnh khi chạy RL training
-- **Console App (`app_console.py`)**:
-  ```
-  📂 CHỌN DATASET ĐỂ TRAINING:
-  1. Sử dụng dataset hiện tại (nếu đã có)
-  2. Chọn thư mục chứa ảnh để build dataset
-  3. Bỏ qua (sẽ dùng dataset từ relationships hiện tại)
-  ```
-- **GUI App (`app.py`)**:
-  - Dialog chọn thư mục ảnh
-  - Tự động build dataset từ thư mục được chọn
-- **Lợi ích**: Linh hoạt hơn trong việc quản lý và sử dụng dataset
-
-#### 4. **mR@K Metrics (Mean Recall@K)** ✅
-- **Mô tả**: Metric đánh giá công bằng cho long-tail relationships
-- **Cách tính**:
-  1. Tính R@K cho từng loại quan hệ riêng lẻ
-  2. Lấy trung bình của tất cả các R@K đó
-- **Giá trị K**: mR@10, mR@20, mR@50, mR@100
-- **Lợi ích**:
-  - Đánh giá công bằng hơn so với R@K thông thường
-  - Không bị ảnh hưởng bởi các quan hệ phổ biến (head classes)
-  - Tiêu chuẩn trong Scene Graph Generation research
-- **Vị trí**: Được lưu trong `relationship_metrics` JSON
-
-```json
-{
-  "relationship_metrics": {
-    "precision": 0.28,
-    "recall": 0.47,
-    "f1": 0.35,
-    "mr@10": 0.1234,   // ← Metrics mới
-    "mr@20": 0.2345,
-    "mr@50": 0.3456,
-    "mr@100": 0.4567
-  }
-}
-```
-
-### So sánh mR@K vs R@K
-
-| Metric | Cách tính | Ưu điểm | Nhược điểm |
-|--------|-----------|---------|------------|
-| **R@K** | Recall tổng thể trên tất cả predictions | Đơn giản, dễ hiểu | Bị ảnh hưởng bởi head classes |
-| **mR@K** | Mean của R@K cho từng relation type | Công bằng cho long-tail | Phức tạp hơn |
-
-**Ví dụ**:
-- Quan hệ "on": 100 samples, R@10 = 0.8
-- Quan hệ "riding": 5 samples, R@10 = 0.2
-- **R@10** = (80 + 1) / 105 = 0.77 (bị ảnh hưởng bởi "on")
-- **mR@10** = (0.8 + 0.2) / 2 = 0.5 (công bằng hơn)
-
-### Cấu trúc Metrics JSON mới
-
-```json
-{
-  "experiment_id": "exp_001",
-  "epoch": 1,
-  "detection_loss": 21.09,
-  "relationship_loss": 31.20,
-  "long_tail_loss": 42.80,  // ← Mới
-  "reward": 0.43,
-  "detection_metrics": {
-    "precision": 0.28,
-    "recall": 0.47,
-    "f1": 0.35
-  },
-  "relationship_metrics": {
-    "precision": 0.28,
-    "recall": 0.47,
-    "f1": 0.35,
-    "mr@10": 0.1234,   // ← Mới
-    "mr@20": 0.2345,   // ← Mới
-    "mr@50": 0.3456,   // ← Mới
-    "mr@100": 0.4567   // ← Mới
-  }
-}
-```
-
-### Hướng dẫn sử dụng các tính năng mới
-
-#### Sử dụng Multiple Epochs Training
-```python
-# Trong RL/reinforcement_learning.py hoặc sau khi khởi tạo
-rl_agent = RelationshipReinforcementLearning(...)
-rl_agent.reltr_training_epochs = 3  # Train 3 epochs mỗi episode
-```
-
-#### Chọn Dataset khi Training
-```bash
-# Console App
-python app_console.py
-# Chọn 4. Chạy RL Training
-# Chọn 2 để chọn thư mục ảnh
-# Nhập: D:/path/to/images
-
-# GUI App
-python app.py
-# Click "RL Training"
-# Chọn Yes → Browse thư mục ảnh
-```
-
-#### Xem mR@K Metrics
-```python
-# Metrics được tự động lưu trong JSON
-# experiments/exp_XXX/metrics/training_metrics_epoch_XX.json
-
-import json
-with open('experiments/exp_001/metrics/training_metrics_epoch_01.json') as f:
-    data = json.load(f)
-    print(f"mR@10: {data['relationship_metrics']['mr@10']:.4f}")
-    print(f"mR@20: {data['relationship_metrics']['mr@20']:.4f}")
-    print(f"mR@50: {data['relationship_metrics']['mr@50']:.4f}")
-    print(f"mR@100: {data['relationship_metrics']['mr@100']:.4f}")
-```
-
-#### 5. **Hệ thống Phân loại An toàn 3 Tầng** ✅
-- **Mô tả**: Hệ thống phát hiện và cảnh báo các hành động nguy hiểm trong video
-- **Tích hợp**: Tự động tích hợp với `VideoRelationPipeline`
-- **3 Tầng**:
-  1. White/Black/Gray List - Phân loại nhanh
-  2. LLM Semantic Reasoning - Đánh giá ngữ nghĩa (OpenAI/Gemini)
-  3. Local Rules Database - Học từ người dùng
-- **Tính năng**:
-  - Cache LLM responses để tiết kiệm chi phí
-  - Hiển thị cảnh báo trực quan trên video (banner đỏ/cam)
-  - Thống kê an toàn trong JSON output
-  - Hỗ trợ thêm quy tắc cục bộ từ phản hồi người dùng
-- **Cấu hình**: File `RL/safety_config.json`
-- **Tài liệu**: Xem [`RL/README_SAFETY_SYSTEM.md`](RL/README_SAFETY_SYSTEM.md)
-
-**Ví dụ sử dụng**:
-```python
-from video_relation_pipeline import VideoRelationPipeline
-
-pipeline = VideoRelationPipeline(safety_classifier_enabled=True)
-result = pipeline.process_video("video.mp4")
-
-# Xem thống kê an toàn
-import json
-with open(result["summary"], "r") as f:
-    stats = json.load(f)
-    print(f"Cảnh báo: {stats['safety_alerts']['total_alerts']}")
+1. for each r ∈ R:
+2.   α(r) = U(r) + λ₁·Δ_perf(r) + λ₂·τ(r)
+3. Sort R by α(r) descending
+4. Top-K ← R[:K]  (focus on most informative)
+5. for each r ∈ Top-K:
+6.   nₖ = round(N · α(r) / Σα)
+7.   nₖ = clip(nₖ, 1, max_per_rel)
+8. return P
 ```
 
 ---
 
-## 📝 License
+## 15. Greedy Submodular Maximization
 
-[MIT License](LICENSE)
+**File:** `RL/approximation_algorithm.py`
+
+### 15.1 Submodular Function
+
+**Định nghĩa 15.1 (Submodularity).** Hàm $f: 2^\Omega \rightarrow \mathbb{R}$ là submodular nếu $\forall A \subseteq B \subseteq \Omega$ và $\forall x \in \Omega \setminus B$:
+
+$$f(A \cup \{x\}) - f(A) \geq f(B \cup \{x\}) - f(B)$$
+
+(Diminishing returns property.)
+
+### 15.2 Objective Function
+
+$$f(S) = \underbrace{\lambda_{\text{div}} \sum_{c \in \mathcal{C}} \log(1 + |S \cap S_c|)}_{\text{Diversity (submodular)}} + \underbrace{\lambda_{\text{qual}} \sum_{x \in S} q(x)}_{\text{Quality (modular)}} + \underbrace{\lambda_{\text{rep}} \cdot \text{Coverage}(S, \Omega)}_{\text{Representativeness}}$$
+
+**Diversity term:** Log-count per class — concave → submodular.
+
+**Quality term:** $q(x) = $ quality score of sample $x$ (image quality, annotation quality).
+
+**Representativeness:** Coverage of original data distribution.
+
+**Mệnh đề 15.1.** $f(S)$ là submodular.
+
+**Chứng minh.** (i) Log-count: $g(S) = \log(1 + |S \cap S_c|)$ là concave function of $|S \cap S_c|$, hence submodular. Sum of submodular functions is submodular. (ii) Quality: linear → modular → submodular. (iii) Sum preserves submodularity. $\blacksquare$
+
+### 15.3 Greedy Algorithm
+
+**Thuật toán 15.1 (Greedy Submodular Maximization):**
+
+```
+Input:  Ground set Ω = {x₁, ..., xₘ}, budget k, submodular function f
+Output: Selected subset S* ⊆ Ω, |S*| ≤ k
+
+1. S* ← ∅
+2. for i = 1, ..., k:
+3.   x* ← argmax_{x ∈ Ω\S*} [f(S* ∪ {x}) - f(S*)]   // marginal gain
+4.   if f(S* ∪ {x*}) - f(S*) ≤ 0:
+5.     break  // no improvement possible
+6.   S* ← S* ∪ {x*}
+7. return S*
+```
+
+**Độ phức tạp:** $O(k \cdot |\Omega| \cdot T_f)$ với $T_f$ = cost tính $f$.
+
+### 15.4 Approximation Guarantee
+
+**Định lý 15.1 (Nemhauser, Wolsey & Fisher, 1978).** Cho $f$ monotone submodular, normalized ($f(\emptyset) = 0$), thuật toán greedy đạt:
+
+$$f(S_{\text{greedy}}) \geq \left(1 - \frac{1}{e}\right) \cdot f(S^*) \approx 0.632 \cdot f(S^*)$$
+
+trong đó $S^* = \arg\max_{|S| \leq k} f(S)$ là nghiệm tối ưu.
+
+**Chứng minh.** Gọi $S^* = \{o_1^*, \ldots, o_k^*\}$ và $S_i$ là tập sau $i$ bước greedy.
+
+**Bước 1.** Do submodularity, tại bước $i$:
+
+$$f(S^*) - f(S_i) \leq \sum_{j=1}^{k} [f(S_i \cup \{o_j^*\}) - f(S_i)] \leq k \cdot [f(S_{i+1}) - f(S_i)]$$
+
+bất đẳng thức cuối do greedy chọn element có marginal gain lớn nhất.
+
+**Bước 2.** Gọi $\delta_i = f(S^*) - f(S_i)$. Từ bước 1:
+
+$$\delta_{i+1} \leq \delta_i - \frac{\delta_i}{k} = \delta_i\left(1 - \frac{1}{k}\right)$$
+
+**Bước 3.** Bằng induction:
+
+$$\delta_k \leq \delta_0 \left(1 - \frac{1}{k}\right)^k \leq f(S^*) \cdot \frac{1}{e}$$
+
+Do đó: $f(S_k) = f(S^*) - \delta_k \geq f(S^*)(1 - 1/e)$. $\blacksquare$
 
 ---
 
-## 👥 Tác giả
+## 16. Synthetic Data Generation & Auto-Annotation
 
-- Dự án đồ án tốt nghiệp
-- Hệ thống Scene Graph Generation với Reinforcement Learning
+### 16.1 Stable Diffusion Image Generation
+
+**File:** `RL/ai_images_generator.py`
+
+**Prompt Templates** cho mỗi relationship type:
+
+$$\text{prompt}(s, p, o) = \text{Template}(p) + \text{", "} + s + \text{" "} + p + \text{" "} + o$$
+
+Ví dụ: `Template("riding") = "A realistic photo of"` → `"A realistic photo of person riding horse"`.
+
+**Biến thể prompt** (tăng diversity):
+- Style variations: "photorealistic", "natural lighting", "outdoor scene"
+- Negative prompt: "blurry, low quality, deformed, cartoon"
+- Guidance scale: $\omega \in [7.5, 12.0]$
+
+**Quality Filtering:**
+
+$$\text{Accept}(I) = \text{sharpness}(I) > \theta_s \wedge \text{brightness} \in [\theta_l, \theta_h] \wedge \neg\text{IsDuplicate}(I)$$
+
+**Duplicate Detection** sử dụng perceptual hashing (imagehash):
+
+$$\text{IsDuplicate}(I) = \min_{J \in \mathcal{D}_{\text{existing}}} \text{HammingDist}(\text{pHash}(I), \text{pHash}(J)) < \theta_{\text{dup}}$$
+
+### 16.2 Auto-Annotation Pipeline
+
+**File:** `RL/auto_annotator.py`
+
+**Định nghĩa 16.1.** Auto-Annotation function $\mathcal{A}: \text{Image} \times \text{TextPrompts} \rightarrow \{(\text{bbox}, \text{class}, \text{confidence})\}^*$
+
+**Backend Priority Chain:**
+
+```
+GroundingDINO (box_threshold=0.25, text_threshold=0.20)
+    ↓ fallback
+OWL-ViT (score_threshold=0.15)
+    ↓ fallback
+YOLO + CLIP (detect → classify)
+    ↓ fallback
+Pseudo-Annotation (heuristic bboxes)
+```
+
+**Pseudo-Annotation** (last resort, low quality):
+
+| Relationship Type | Subject Region | Object Region |
+|---|---|---|
+| `riding`, `sitting on` | Top 30-70% | Bottom 50-90% |
+| `holding`, `using` | Left 20-55% | Right 45-80% |
+| `near`, `next to` | Left 10-45% | Right 55-90% |
+
+### 16.3 Data Augmentation
+
+**File:** `RL/data_augmentation.py`
+
+Albumentations pipeline tạo biến thể:
+
+$$I' = T_{\text{aug}}(I), \quad T_{\text{aug}} = T_1 \circ T_2 \circ \ldots \circ T_7$$
+
+| $T_i$ | Tham số | $P(T_i)$ |
+|---|---|---|
+| RandomBrightnessContrast | $\Delta_b = \pm 0.2$ | 0.5 |
+| HueSaturationValue | $\Delta_h = \pm 20°$ | 0.5 |
+| RandomRotate90 | $\{90°, 180°, 270°\}$ | 0.3 |
+| HorizontalFlip | — | 0.5 |
+| RandomScale | $\pm 20\%$ | 0.5 |
+| GaussNoise | $\sigma^2 \in [10, 50]$ | 0.3 |
+| Blur | kernel $\leq 3$ | 0.3 |
 
 ---
 
-## 🙏 Acknowledgments
+## 17. Tổng kết End-to-End Pipeline
 
-- [YOLO](https://github.com/ultralytics/ultralytics) - Object Detection
-- [CLIP](https://github.com/openai/CLIP) - Vision-Language Model
-- [RelTR](https://github.com/yrcong/RelTR) - Scene Graph Generation
-- [Stable Diffusion](https://github.com/CompVis/stable-diffusion) - Image Generation
-- [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO) - Open-Vocabulary Detection
-- [OpenAI](https://openai.com/) - GPT Models cho Safety Analysis
-- [Google Gemini](https://gemini.google.com/) - Gemini Models cho Safety Analysis
+### 17.1 Inference Pipeline (1 frame)
+
+```
+I ∈ ℝ^{H×W×3}
+  │
+  ├─ YOLOv11(I) → 𝒪_coco = {(bᵢ, cᵢ, sᵢ)}     [Section 3]
+  ├─ FireModel(I) → 𝒪_fire                         [Section 3.4]
+  ├─ Merge(𝒪_coco, 𝒪_fire) → 𝒪_merged
+  │
+  ├─ CLIP(crop(I, bᵢ)) → override cᵢ if needed     [Section 4]
+  │
+  ├─ Hook(YOLO.layer9) → F ∈ ℝ^{512×H/32×W/32}    [Section 5.1]
+  ├─ GAP(F) → g ∈ ℝ^{512}                           [Section 5.4]
+  ├─ RoIAlign(F, bᵢ) → vᵢ ∈ ℝ^{512×7×7}           [Section 5.2]
+  │
+  ├─ RelTR(I, g) → ℛ_raw = {(sₖ, pₖ, oₖ, σₖ)}    [Section 6]
+  │    └─ Backbone → Encoder(×6) → Decoder(×6) → Heads
+  │
+  ├─ SpatialValidation(ℛ_raw) → ℛ_valid             [Section 7.2]
+  ├─ SemanticValidation(ℛ_valid) → ℛ_filtered        [Section 7.3]
+  │
+  ├─ LLM_Enhance(ℛ_filtered, low-conf pairs)         [Section 8]
+  │    └─ VisualFeatures → Prompt → GPT-4V → Parse
+  │
+  └─ SafetyClassify(ℛ_enhanced) → Scene Graph G      [Section 10]
+       └─ Tier1(WB list) → Tier2(LLM) → Tier3(Rules)
+
+Output: G = (𝒪, ℛ, Safety Labels)
+```
+
+### 17.2 Training Loop (Data Loop)
+
+```
+for epoch = 1, ..., E:
+  │
+  ├─ DQN.decide_action(sₜ) → aₜ, plan               [Section 11]
+  │    └─ Active Learning → Acquisition Scores          [Section 14]
+  │
+  ├─ Generate AI Images (Stable Diffusion)             [Section 16.1]
+  │    └─ Per-relationship variations (from plan)
+  │
+  ├─ Auto-Annotate(images) → labeled dataset           [Section 16.2]
+  │    └─ GroundingDINO/OWL-ViT/YOLO+CLIP
+  │
+  ├─ Greedy Submodular Select(dataset, k)              [Section 15]
+  │    └─ Maximize f(S) = diversity + quality + repr.
+  │
+  ├─ Fine-tune YOLO + RelTR on selected data
+  │
+  ├─ Evaluate → Detection F1, Relationship F1, mR@K
+  │
+  ├─ Calculate Reward R(sₜ, aₜ) (6 components)        [Section 12]
+  │    └─ MC Dropout Uncertainty                        [Section 13]
+  │
+  └─ DQN Update: Q(s,a;θ) ← Bellman backup            [Section 11.6]
+```
+
+### 17.3 Evaluation Metrics
+
+| Metric | Công thức | Mô tả |
+|---|---|---|
+| Precision@K | $\frac{\text{TP}@K}{\text{TP}@K + \text{FP}@K}$ | Tỷ lệ dự đoán đúng trong top-K |
+| Recall@K | $\frac{\text{TP}@K}{|\text{GT}|}$ | Tỷ lệ GT được phát hiện trong top-K |
+| mR@K | $\frac{1}{|\mathcal{P}|}\sum_{p}\text{R}@K(p)$ | Mean recall qua tất cả predicates |
+| Detection F1 | $2pr/(p+r)$ | Harmonic mean P, R cho detection |
+| Relationship F1 | $2pr/(p+r)$ | Harmonic mean P, R cho relationships |
+
+### 17.4 Hyperparameters tổng hợp
+
+| Parameter | Giá trị | Nguồn |
+|---|---|---|
+| $d_{\text{model}}$ (RelTR) | 256 | `transformer.py` |
+| $n_{\text{heads}}$ | 8 | `transformer.py` |
+| $d_{\text{ff}}$ | 2048 | `transformer.py` |
+| $L_{\text{enc}}, L_{\text{dec}}$ | 6, 6 | `transformer.py` |
+| $N_{\text{entity}}$ | 100 | `reltr.py` |
+| $N_{\text{triplet}}$ | 200 | `reltr.py` |
+| $\gamma$ (DQN discount) | 0.95 | `reinforcement_learning.py` |
+| $\varepsilon_0, \varepsilon_{\min}, \varepsilon_{\text{decay}}$ | 1.0, 0.01, 0.995 | `reinforcement_learning.py` |
+| Batch size (DQN) | 32 | `reinforcement_learning.py` |
+| Buffer capacity | 10,000 | `reinforcement_learning.py` |
+| Target update freq | 10 steps | `reinforcement_learning.py` |
+| MC Dropout passes $T$ | 30 | `uncertainty_estimator.py` |
+| CLIP threshold | 0.65 | `detect_objects.py` |
+| NMS IoU threshold | 0.45 | `detect_objects.py` |
+| GroundingDINO box threshold | 0.25 | `auto_annotator.py` |
+
+---
+
+## Tài liệu Tham khảo
+
+1. **RelTR:** Y. Cong et al., "RelTR: Relation Transformer for Scene Graph Generation," *ACM Multimedia*, 2022.
+2. **DETR:** N. Carion et al., "End-to-End Object Detection with Transformers," *ECCV*, 2020.
+3. **YOLOv11:** G. Jocher et al., "Ultralytics YOLO," 2024. https://github.com/ultralytics/ultralytics
+4. **CLIP:** A. Radford et al., "Learning Transferable Visual Models From Natural Language Supervision," *ICML*, 2021.
+5. **RoIAlign:** K. He et al., "Mask R-CNN," *ICCV*, 2017.
+6. **GIoU:** H. Rezatofighi et al., "Generalized Intersection over Union," *CVPR*, 2019.
+7. **Hungarian Algorithm:** H. W. Kuhn, "The Hungarian Method for the Assignment Problem," *Naval Research Logistics*, 1955.
+8. **DQN:** V. Mnih et al., "Human-level control through deep reinforcement learning," *Nature*, 2015.
+9. **Q-Learning Convergence:** C. J. C. H. Watkins and P. Dayan, "Q-Learning," *Machine Learning*, 1992.
+10. **MC Dropout:** Y. Gal and Z. Ghahramani, "Dropout as a Bayesian Approximation: Representing Model Uncertainty in Deep Learning," *ICML*, 2016.
+11. **BALD:** N. Houlsby et al., "Bayesian Active Learning for Classification and Preference Learning," *arXiv*, 2011.
+12. **Submodular Maximization:** G. L. Nemhauser, L. A. Wolsey, and M. L. Fisher, "An analysis of approximations for maximizing submodular set functions," *Mathematical Programming*, 1978.
+13. **Stable Diffusion:** R. Rombach et al., "High-Resolution Image Synthesis with Latent Diffusion Models," *CVPR*, 2022.
+14. **ByteTrack:** Y. Zhang et al., "ByteTrack: Multi-Object Tracking by Associating Every Detection Box," *ECCV*, 2022.
+15. **GroundingDINO:** S. Liu et al., "Grounding DINO: Marrying DINO with Grounded Pre-Training," *arXiv*, 2023.
+16. **Focal Loss:** T.-Y. Lin et al., "Focal Loss for Dense Object Detection," *ICCV*, 2017.
 

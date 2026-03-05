@@ -97,6 +97,7 @@ class RelationshipReinforcementLearning:
             'relationship_scores': deque(maxlen=50),
             'diversity_scores': deque(maxlen=50),
             'consistency_scores': deque(maxlen=50),
+            'uncertainty_reduction_scores': deque(maxlen=50),
             'improvement_trend': deque(maxlen=20),  # Last 20 improvement scores
             'weight_history': deque(maxlen=20),  # Track weight changes
         }
@@ -105,11 +106,15 @@ class RelationshipReinforcementLearning:
         
         # Adaptive scoring parameters
         self.scaling_factor = 1.0
+        # α (alpha) dùng trong công thức C_n và S_pos theo báo cáo 4.2.2
+        self.reward_alpha = 0.5
         self.baseline_performance = {
             'detection': 0.3,
             'relationship': 0.7,
             'diversity': 0.3,
             'consistency': 0.5,
+            'improvement': 0.5,
+            'uncertainty_reduction': 0.5,
         }
 
         # Deep Q-Network agent configuration
@@ -1930,14 +1935,17 @@ class RelationshipReinforcementLearning:
                 f"Relationship: {reward_components.get('relationship_score', 0.0):.3f}, "
                 f"Diversity: {reward_components.get('diversity_score', 0.0):.3f}, "
                 f"Consistency: {reward_components.get('consistency_score', 0.0):.3f}, "
-                f"Improvement: {reward_components.get('improvement_score', 0.0):.3f}"
+                f"Improvement: {reward_components.get('improvement_score', 0.0):.3f}, "
+                f"Uncertainty: {reward_components.get('uncertainty_reduction_score', 0.0):.3f}"
             )
             dynamic_weights = reward_components.get('dynamic_weights', {})
             if dynamic_weights:
                 print(f"     Dynamic weights -> Detection: {dynamic_weights.get('detection', 0.0):.3f}, "
                       f"Relationship: {dynamic_weights.get('relationship', 0.0):.3f}, "
                       f"Diversity: {dynamic_weights.get('diversity', 0.0):.3f}, "
-                      f"Consistency: {dynamic_weights.get('consistency', 0.0):.3f}")
+                      f"Consistency: {dynamic_weights.get('consistency', 0.0):.3f}, "
+                      f"Improvement: {dynamic_weights.get('improvement', 0.0):.3f}, "
+                      f"Uncertainty: {dynamic_weights.get('uncertainty_reduction', 0.0):.3f}")
             else:
                 print("     ⚠️  No dynamic weights found!")
         else:
@@ -2074,20 +2082,16 @@ class RelationshipReinforcementLearning:
         print(f"    🔍 Debug - Improvement score: {improvement_score:.4f}")
         print(f"    🔍 Debug - Uncertainty reduction score: {uncertainty_reduction_score:.4f}")
         
-        # 3. Tính trọng số động dựa trên hiệu suất hiện tại
+        # 3. Tính trọng số động (gồm cả S_unc) theo công thức thích nghi
         dynamic_weights = self._calculate_dynamic_weights(
-            detection_score, relationship_score, diversity_score, consistency_score
+            detection_score,
+            relationship_score,
+            diversity_score,
+            consistency_score,
+            improvement_score=improvement_score,
+            uncertainty_reduction_score=uncertainty_reduction_score,
         )
-        # Add weight for uncertainty component
-        uncertainty_weight = 0.10
-        # Re-normalize existing weights to make room for uncertainty_weight
-        existing_total = sum(dynamic_weights.values())
-        if existing_total > 0:
-            scale_factor = (1.0 - uncertainty_weight) / existing_total
-            for k in dynamic_weights:
-                dynamic_weights[k] *= scale_factor
-        dynamic_weights['uncertainty_reduction'] = uncertainty_weight
-        
+
         # 4. Tính điểm tổng hợp với trọng số thích ứng
         total_reward = (
             dynamic_weights['detection'] * detection_score +
@@ -2124,6 +2128,8 @@ class RelationshipReinforcementLearning:
             relationship_score,
             diversity_score,
             consistency_score,
+            improvement_score=improvement_score,
+            uncertainty_reduction_score=uncertainty_reduction_score,
         )
         
         return total_reward
@@ -2345,85 +2351,78 @@ class RelationshipReinforcementLearning:
     
     def _calculate_detection_score(self, detection_metrics: Dict[str, float]) -> float:
         """
-        Tính điểm detection dựa trên các chỉ số khách quan.
-        Sử dụng F1-score làm chỉ số chính với điều chỉnh cho precision và recall.
+        S_det = F1_det * C_n * B_PR
+        C_n = tanh(α * ln(n+1))  — hệ số tin cậy mẫu
+        B_PR = 1 - |P - R|      — hệ số cân bằng Precision-Recall
         """
         f1 = detection_metrics.get('f1', 0.0)
         precision = detection_metrics.get('precision', 0.0)
         recall = detection_metrics.get('recall', 0.0)
-        num_samples = detection_metrics.get('num_samples', 0)
-        
-        # Điểm cơ bản từ F1-score
-        base_score = f1
-        
-        # Điều chỉnh dựa trên số lượng mẫu (confidence adjustment)
-        sample_confidence = min(num_samples / 10.0, 1.0)  # Normalize to [0,1]
-        
-        # Điều chỉnh dựa trên sự cân bằng giữa precision và recall
-        balance_factor = 1.0 - abs(precision - recall) / max(precision + recall, 1e-6)
-        
-        # Tính điểm cuối cùng với các điều chỉnh
-        final_score = base_score * sample_confidence * balance_factor
-        
-        return max(0.0, min(final_score, 1.0))
+        n = detection_metrics.get('num_samples', 0)
+
+        # C_n: hệ số tin cậy mẫu, giảm tác động khi n ít (cold-start)
+        alpha = getattr(self, 'reward_alpha', 0.5)
+        c_n = math.tanh(alpha * math.log(n + 1)) if n >= 0 else 0.0
+
+        # B_PR: hệ số cân bằng, trừng phạt lệch P-R
+        b_pr = 1.0 - abs(precision - recall)
+        b_pr = max(0.0, min(b_pr, 1.0))
+
+        s_det = f1 * c_n * b_pr
+        return max(0.0, min(s_det, 1.0))
     
     def _calculate_relationship_score(self, relationship_metrics: Dict[str, Any]) -> float:
         """
-        Tính điểm relationship dựa trên các chỉ số khách quan.
-        Bao gồm F1-score, độ lệch chuẩn và số lượng mẫu được đánh giá.
+        S_rel = (F1_rel * C_n * B_PR) × (1 + W_tail)
+        W_tail từ trọng số nghịch đảo tần suất: W_raw(r) = 1/sqrt(freq(r)+ε), chuẩn hóa (tail_weights).
         """
         f1 = relationship_metrics.get('f1', 0.0)
-        f1_std = relationship_metrics.get('f1_std', 0.0)
         precision = relationship_metrics.get('precision', 0.0)
         recall = relationship_metrics.get('recall', 0.0)
-        num_samples = relationship_metrics.get('num_samples', 0)
-        
-        # Điểm cơ bản từ F1-score
-        base_score = f1
-        
-        # Điều chỉnh dựa trên độ ổn định (stability adjustment)
-        # Độ lệch chuẩn thấp = điểm cao hơn
-        stability_factor = max(0.0, 1.0 - f1_std)
-        
-        # Điều chỉnh dựa trên số lượng mẫu
-        sample_confidence = min(num_samples / 20.0, 1.0)
-        
-        # Điều chỉnh dựa trên sự cân bằng precision-recall
-        balance_factor = 1.0 - abs(precision - recall) / max(precision + recall, 1e-6)
-        
-        # Điều chỉnh long-tail: ưu tiên quan hệ hiếm bằng trọng số tail_weights
-        tail_factor = 1.0
-        if self.tail_weights:
-            rel_name = self._normalize_label(
-                relationship_metrics.get('relation_name', '') or relationship_metrics.get('relation', '')
-            )
-            if rel_name:
-                tail_factor += self.tail_weights.get(rel_name, 0.0)
+        n = relationship_metrics.get('num_samples', 0)
 
-        # Tính điểm cuối cùng
-        final_score = base_score * stability_factor * sample_confidence * balance_factor * tail_factor
-        final_score = min(final_score, 1.0)
-        
-        return max(0.0, min(final_score, 1.0))
+        # C_n: hệ số tin cậy mẫu 
+        alpha = getattr(self, 'reward_alpha', 0.5)
+        c_n = math.tanh(alpha * math.log(n + 1)) if n >= 0 else 0.0
+
+        # B_PR: hệ số cân bằng 
+        b_pr = 1.0 - abs(precision - recall)
+        b_pr = max(0.0, min(b_pr, 1.0))
+
+        # (1 + W_tail): Long-tail boost , W_tail từ tail_weights (đã chuẩn hóa từ 1/sqrt(freq+ε))
+        w_tail = 0.0
+        rel_name = self._normalize_label(
+            relationship_metrics.get('relation_name', '') or relationship_metrics.get('relation', '')
+        )
+        if rel_name and self.tail_weights:
+            w_tail = self.tail_weights.get(rel_name, 0.0)
+        # Nếu không có relation cụ thể, dùng trung bình tail weight trên dataset (đánh giá aggregate)
+        if not rel_name and self.tail_weights:
+            w_tail = sum(self.tail_weights.values()) / len(self.tail_weights) if self.tail_weights else 0.0
+
+        s_rel = (f1 * c_n * b_pr) * (1.0 + w_tail)
+        return max(0.0, min(s_rel, 1.0))
     
     def _calculate_diversity_score(self, synthetic_data: List[Dict[str, Any]]) -> float:
         """
-        Tính điểm đa dạng dựa trên các thuộc tính khác nhau của dữ liệu synthetic.
-        Bao gồm đa dạng về relationship types, object classes và spatial distribution.
+        S_div = 0.4*D_type + 0.4*D_class + 0.2*S_spatial
+        D_type, D_class: tỷ lệ số loại quan hệ/lớp vật thể xuất hiện trên tổng số loại khả dụng.
+        S_spatial = 0.4*S_pos + 0.3*S_size + 0.3*S_coverage
+        S_pos = tanh(α*Var_pos), S_size = σ_size/μ_size (CV), S_coverage = entropy vị trí.
         """
         if not synthetic_data:
             return 0.0
-        
-        # 1. Đa dạng về relationship types
+
+        # D_type: tỷ lệ loại quan hệ xuất hiện / tổng loại khả dụng (dùng 10 làm mẫu nếu không có vocab)
         unique_relations = set()
         for data in synthetic_data:
             if 'original_relationship' in data:
                 rel = data['original_relationship']
                 unique_relations.add(rel.get('relation', ''))
-        
-        relation_diversity = min(len(unique_relations) / 10.0, 1.0)
-        
-        # 2. Đa dạng về object classes
+        num_relation_types = 10  # có thể lấy từ vocab nếu có
+        d_type = min(len(unique_relations) / max(num_relation_types, 1), 1.0)
+
+        # D_class: tỷ lệ lớp vật thể xuất hiện / tổng lớp khả dụng
         unique_subjects = set()
         unique_objects = set()
         for data in synthetic_data:
@@ -2431,20 +2430,13 @@ class RelationshipReinforcementLearning:
                 rel = data['original_relationship']
                 unique_subjects.add(rel.get('subject', ''))
                 unique_objects.add(rel.get('object', ''))
-        
-        class_diversity = min(len(unique_subjects | unique_objects) / 15.0, 1.0)
-        
-        # 3. Đa dạng về spatial distribution (nếu có thông tin bbox)
-        spatial_diversity = self._calculate_spatial_diversity(synthetic_data)
-        
-        # Tính điểm tổng hợp với trọng số
-        final_score = (
-            0.4 * relation_diversity +
-            0.4 * class_diversity +
-            0.2 * spatial_diversity
-        )
-        
-        return max(0.0, min(final_score, 1.0))
+        num_class_types = 15
+        d_class = min(len(unique_subjects | unique_objects) / max(num_class_types, 1), 1.0)
+
+        s_spatial = self._calculate_spatial_diversity(synthetic_data)
+
+        s_div = 0.4 * d_type + 0.4 * d_class + 0.2 * s_spatial
+        return max(0.0, min(s_div, 1.0))
     
     def _calculate_spatial_diversity(self, synthetic_data: List[Dict[str, Any]]) -> float:
         """
@@ -2502,188 +2494,119 @@ class RelationshipReinforcementLearning:
     
     def _calculate_position_diversity(self, bboxes: List[List[float]], image_sizes: List[Tuple[int, int]]) -> float:
         """
-        Tính đa dạng vị trí dựa trên phân bố của center points.
-        Sử dụng thuật toán Spatial Clustering Analysis.
+        S_pos theo báo cáo (52): S_pos = tanh(α * Var_pos).
+        Khuyến khích vị trí vật thể thay đổi.
         """
         if not bboxes or not image_sizes:
             return 0.0
-        
-        # Normalize bboxes về [0,1] dựa trên kích thước ảnh trung bình
+
         avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
         avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
-        
+
         normalized_centers = []
         for bbox in bboxes:
             x1, y1, x2, y2 = bbox
             center_x = (x1 + x2) / 2.0 / avg_width
             center_y = (y1 + y2) / 2.0 / avg_height
             normalized_centers.append([center_x, center_y])
-        
-        # Tính độ phân tán của center points
+
         if len(normalized_centers) < 2:
             return 0.0
-        
-        # Tính variance của x và y coordinates
-        x_coords = [center[0] for center in normalized_centers]
-        y_coords = [center[1] for center in normalized_centers]
-        
+
+        x_coords = [c[0] for c in normalized_centers]
+        y_coords = [c[1] for c in normalized_centers]
         x_mean = sum(x_coords) / len(x_coords)
         y_mean = sum(y_coords) / len(y_coords)
-        
-        x_variance = sum((x - x_mean) ** 2 for x in x_coords) / len(x_coords)
-        y_variance = sum((y - y_mean) ** 2 for y in y_coords) / len(y_coords)
-        
-        # Tính độ phân tán tổng hợp
-        total_variance = x_variance + y_variance
-        
-        # Normalize về [0,1] - variance cao = đa dạng cao
-        # Sử dụng tanh để smooth và giới hạn trong [0,1]
-        position_diversity = math.tanh(total_variance * 4)  # Scale factor 4
-        
-        return position_diversity
+        var_pos = (
+            sum((x - x_mean) ** 2 for x in x_coords) / len(x_coords) +
+            sum((y - y_mean) ** 2 for y in y_coords) / len(y_coords)
+        )
+        alpha = getattr(self, 'reward_alpha', 0.5)
+        s_pos = math.tanh(alpha * var_pos)
+        return s_pos
     
     def _calculate_size_diversity(self, bboxes: List[List[float]]) -> float:
         """
-        Tính đa dạng kích thước dựa trên area và aspect ratio của bounding boxes.
-        Sử dụng thuật toán Size Distribution Analysis.
+        S_size theo báo cáo (53): S_size = σ_size/μ_size (Coefficient of Variation).
         """
         if not bboxes:
             return 0.0
-        
+
         areas = []
-        aspect_ratios = []
-        
         for bbox in bboxes:
             x1, y1, x2, y2 = bbox
-            width = x2 - x1
-            height = y2 - y1
-            
-            # Tính area
-            area = width * height
-            areas.append(area)
-            
-            # Tính aspect ratio
-            if height > 0:
-                aspect_ratio = width / height
-                aspect_ratios.append(aspect_ratio)
-        
-        if not areas or not aspect_ratios:
+            areas.append((x2 - x1) * (y2 - y1))
+
+        if not areas:
             return 0.0
-        
-        # Tính coefficient of variation cho area
-        area_mean = sum(areas) / len(areas)
-        area_std = math.sqrt(sum((area - area_mean) ** 2 for area in areas) / len(areas))
-        area_cv = area_std / area_mean if area_mean > 0 else 0
-        
-        # Tính coefficient of variation cho aspect ratio
-        ar_mean = sum(aspect_ratios) / len(aspect_ratios)
-        ar_std = math.sqrt(sum((ar - ar_mean) ** 2 for ar in aspect_ratios) / len(aspect_ratios))
-        ar_cv = ar_std / ar_mean if ar_mean > 0 else 0
-        
-        # Kết hợp area và aspect ratio diversity
-        size_diversity = 0.6 * min(area_cv, 2.0) / 2.0 + 0.4 * min(ar_cv, 3.0) / 3.0
-        
-        return max(0.0, min(size_diversity, 1.0))
+        mu_size = sum(areas) / len(areas)
+        var_size = sum((a - mu_size) ** 2 for a in areas) / len(areas)
+        sigma_size = math.sqrt(var_size)
+        s_size = (sigma_size / mu_size) if mu_size > 0 else 0.0
+        return max(0.0, min(s_size, 2.0))  # clip CV hợp lý
     
     def _calculate_coverage_diversity(self, bboxes: List[List[float]], image_sizes: List[Tuple[int, int]]) -> float:
         """
-        Tính đa dạng độ phủ dựa trên việc phân chia ảnh thành grid và đếm coverage.
-        Sử dụng thuật toán Grid-Based Coverage Analysis.
+        S_coverage theo báo cáo (54): Entropy vị trí -Σ p_i log(p_i), khuyến khích vật thể rải đều trên lưới ảnh.
         """
         if not bboxes or not image_sizes:
             return 0.0
-        
-        # Sử dụng kích thước ảnh trung bình để tính grid
+
         avg_width = sum(size[0] for size in image_sizes) / len(image_sizes)
         avg_height = sum(size[1] for size in image_sizes) / len(image_sizes)
-        
-        # Chia ảnh thành grid 4x4 = 16 cells
         grid_size = 4
         cell_width = avg_width / grid_size
         cell_height = avg_height / grid_size
-        
-        # Đếm số cells được cover bởi ít nhất một bbox
-        covered_cells = set()
-        
-        for bbox in bboxes:
-            x1, y1, x2, y2 = bbox
-            
-            # Tìm các cells mà bbox này cover
-            start_col = max(0, int(x1 // cell_width))
-            end_col = min(grid_size - 1, int(x2 // cell_width))
-            start_row = max(0, int(y1 // cell_height))
-            end_row = min(grid_size - 1, int(y2 // cell_height))
-            
-            for row in range(start_row, end_row + 1):
-                for col in range(start_col, end_col + 1):
-                    covered_cells.add((row, col))
-        
-        # Tính coverage ratio
-        total_cells = grid_size * grid_size
-        coverage_ratio = len(covered_cells) / total_cells
-        
-        # Tính distribution balance - các cells được cover đều hay không
-        if len(covered_cells) < 2:
-            return coverage_ratio
-        
-        # Tính entropy của distribution
-        cell_counts = {}
+
+        cell_counts: Dict[Tuple[int, int], int] = {}
         for bbox in bboxes:
             x1, y1, x2, y2 = bbox
             start_col = max(0, int(x1 // cell_width))
             end_col = min(grid_size - 1, int(x2 // cell_width))
             start_row = max(0, int(y1 // cell_height))
             end_row = min(grid_size - 1, int(y2 // cell_height))
-            
             for row in range(start_row, end_row + 1):
                 for col in range(start_col, end_col + 1):
                     cell = (row, col)
                     cell_counts[cell] = cell_counts.get(cell, 0) + 1
-        
-        # Tính entropy
-        total_bboxes = len(bboxes)
+
+        total = sum(cell_counts.values()) or 1
         entropy = 0.0
         for count in cell_counts.values():
             if count > 0:
-                p = count / total_bboxes
-                entropy -= p * math.log2(p)
-        
-        # Normalize entropy (max entropy = log2(total_cells))
-        max_entropy = math.log2(total_cells)
-        normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
-        
-        # Kết hợp coverage ratio và distribution entropy
-        coverage_diversity = 0.7 * coverage_ratio + 0.3 * normalized_entropy
-        
-        return max(0.0, min(coverage_diversity, 1.0))
+                p = count / total
+                entropy -= p * math.log(p + 1e-10)
+        max_entropy = math.log(grid_size * grid_size + 1e-10)
+        normalized = entropy / max_entropy if max_entropy > 0 else 0
+        return max(0.0, min(normalized, 1.0))
     
     def _calculate_consistency_score(self, f1_scores: List[float], precomputed_std: Optional[float] = None) -> float:
         """
-        Tính điểm consistency dựa trên độ ổn định của các predictions.
-        Sử dụng độ lệch chuẩn và trend analysis.
+        S_cons theo báo cáo 4.2.2 (55)(56)(57):
+        S_cons = 0.7*S_std + 0.3*S_trend
+        S_std = 1/(1+σ_F1) — nghịch đảo độ lệch chuẩn F1
+        S_trend — hệ số góc hồi quy tuyến tính của chuỗi F1 (57)
         """
         if not f1_scores and (precomputed_std is None or precomputed_std == 0.0):
             return 0.0
-        
+
         if precomputed_std is not None:
-            std = float(precomputed_std)
+            sigma_f1 = float(precomputed_std)
         else:
             if not f1_scores:
                 return 0.0
             mean_score = sum(f1_scores) / len(f1_scores)
-            variance = sum((score - mean_score) ** 2 for score in f1_scores) / len(f1_scores)
-            std = math.sqrt(variance)
-        
-        # Điểm consistency dựa trên độ lệch chuẩn (thấp = tốt)
-        consistency_from_std = max(0.0, 1.0 - min(std, 1.0))
-        
-        # Điểm consistency dựa trên trend (xu hướng cải thiện)
-        trend_score = self._calculate_trend_score(f1_scores)
-        
-        # Kết hợp hai chỉ số
-        final_score = 0.7 * consistency_from_std + 0.3 * trend_score
-        
-        return max(0.0, min(final_score, 1.0))
+            variance = sum((s - mean_score) ** 2 for s in f1_scores) / len(f1_scores)
+            sigma_f1 = math.sqrt(variance)
+
+        # S_std (56): nghịch đảo độ lệch chuẩn
+        s_std = 1.0 / (1.0 + sigma_f1)
+
+        # S_trend (57): slope chuỗi F1, map về [0,1]
+        s_trend = self._calculate_trend_score(f1_scores)
+
+        s_cons = 0.7 * s_std + 0.3 * s_trend
+        return max(0.0, min(s_cons, 1.0))
     
     def _calculate_trend_score(self, scores: List[float]) -> float:
         """Tính điểm dựa trên xu hướng cải thiện của scores."""
@@ -2710,63 +2633,72 @@ class RelationshipReinforcementLearning:
     
     def _calculate_improvement_score(self) -> float:
         """
-        Tính điểm cải thiện dựa trên lịch sử performance.
-        So sánh với baseline và xu hướng gần đây.
+        S_imp = 0.6*tanh(F1_current - F1_base) + 0.4*S_trend
+        Khuyến khích sự tăng trưởng so với baseline.
         """
         if len(self.performance_history['rewards']) < 3:
-            return 0.5  # Neutral score for insufficient history
-        
-        recent_rewards = list(self.performance_history['rewards'])[-10:]  # Last 10 rewards
-        baseline_reward = self.baseline_performance.get('overall', 0.5)
-        
-        # So sánh với baseline
-        current_avg = sum(recent_rewards) / len(recent_rewards)
-        baseline_improvement = (current_avg - baseline_reward) / max(baseline_reward, 1e-6)
-        
-        # Xu hướng cải thiện gần đây
-        trend_improvement = self._calculate_trend_score(recent_rewards)
-        
-        # Kết hợp hai chỉ số
-        final_score = 0.6 * (0.5 + 0.5 * math.tanh(baseline_improvement)) + 0.4 * trend_improvement
-        
-        return max(0.0, min(final_score, 1.0))
+            return 0.5
+
+        # F1_current: dùng trung bình relationship_scores gần đây (proxy cho F1)
+        rel_scores = list(self.performance_history['relationship_scores'])[-10:]
+        if not rel_scores:
+            return 0.5
+        f1_current = sum(rel_scores) / len(rel_scores)
+        f1_base = self.baseline_performance.get('relationship', self.baseline_performance.get('overall', 0.5))
+
+        # S_trend: xu hướng chuỗi F1 (relationship_scores)
+        s_trend = self._calculate_trend_score(rel_scores)
+
+        s_imp = 0.6 * (0.5 + 0.5 * math.tanh(f1_current - f1_base)) + 0.4 * s_trend
+        return max(0.0, min(s_imp, 1.0))
     
-    def _calculate_dynamic_weights(self, detection_score: float, relationship_score: float, 
-                                  diversity_score: float, consistency_score: float) -> Dict[str, float]:
+    def _calculate_dynamic_weights(self, detection_score: float, relationship_score: float,
+                                  diversity_score: float, consistency_score: float,
+                                  improvement_score: float = 0.5,
+                                  uncertainty_reduction_score: float = 0.5) -> Dict[str, float]:
         """
-        Tính trọng số động dựa trên hiệu suất hiện tại và lịch sử.
-        Trọng số sẽ thích ứng để tập trung vào các thành phần cần cải thiện.
+        Tính trọng số động dựa trên hiệu suất hiện tại và lịch sử (công thức 59 báo cáo).
+        Bao gồm cả S_unc: trọng số uncertainty_reduction cũng tham gia thích nghi.
         """
-        # Trọng số cơ bản
+        # Trọng số cơ bản (gồm cả uncertainty_reduction)
         base_weights = {
             'detection': 0.25,
             'relationship': 0.45,
             'diversity': 0.15,
             'consistency': 0.10,
             'improvement': 0.05,
+            'uncertainty_reduction': 0.10,
         }
-        
-        # Tính độ lệch so với baseline
-        detection_deviation = abs(detection_score - self.baseline_performance['detection'])
-        relationship_deviation = abs(relationship_score - self.baseline_performance['relationship'])
-        diversity_deviation = abs(diversity_score - self.baseline_performance['diversity'])
-        consistency_deviation = abs(consistency_score - self.baseline_performance['consistency'])
-        
-        # Điều chỉnh trọng số dựa trên độ lệch (thành phần nào kém sẽ có trọng số cao hơn)
-        adjustment_factor = 0.2  # Mức độ điều chỉnh
-        
+
+        baseline = self.baseline_performance
+        b_det = baseline.get('detection', 0.3)
+        b_rel = baseline.get('relationship', 0.7)
+        b_div = baseline.get('diversity', 0.3)
+        b_cons = baseline.get('consistency', 0.5)
+        b_imp = baseline.get('improvement', 0.5)
+        b_unc = baseline.get('uncertainty_reduction', 0.5)
+
+        # Độ lệch so với baseline (thành phần nào kém → trọng số cao hơn)
+        adjustment_factor = 0.2
+        detection_deviation = abs(detection_score - b_det)
+        relationship_deviation = abs(relationship_score - b_rel)
+        diversity_deviation = abs(diversity_score - b_div)
+        consistency_deviation = abs(consistency_score - b_cons)
+        improvement_deviation = abs(improvement_score - b_imp)
+        uncertainty_deviation = abs(uncertainty_reduction_score - b_unc)
+
         adjusted_weights = {
             'detection': base_weights['detection'] + adjustment_factor * detection_deviation,
             'relationship': base_weights['relationship'] + adjustment_factor * relationship_deviation,
             'diversity': base_weights['diversity'] + adjustment_factor * diversity_deviation,
             'consistency': base_weights['consistency'] + adjustment_factor * consistency_deviation,
-            'improvement': base_weights['improvement'],
+            'improvement': base_weights['improvement'] + adjustment_factor * improvement_deviation,
+            'uncertainty_reduction': base_weights['uncertainty_reduction'] + adjustment_factor * uncertainty_deviation,
         }
-        
-        # Normalize để tổng = 1.0
+
+        # Chuẩn hóa tổng = 1.0
         total_weight = sum(adjusted_weights.values())
         normalized_weights = {k: v / total_weight for k, v in adjusted_weights.items()}
-        
         return normalized_weights
     
     def _apply_reward_scaling(self, raw_reward: float) -> float:
@@ -2800,6 +2732,8 @@ class RelationshipReinforcementLearning:
         relationship_score: float,
         diversity_score: float,
         consistency_score: float,
+        improvement_score: Optional[float] = None,
+        uncertainty_reduction_score: Optional[float] = None,
     ) -> None:
         """Cập nhật lịch sử performance để học từ kinh nghiệm và cập nhật baseline động."""
         # Lưu history phần thưởng và trọng số
@@ -2811,6 +2745,8 @@ class RelationshipReinforcementLearning:
         self.performance_history['relationship_scores'].append(relationship_score)
         self.performance_history['diversity_scores'].append(diversity_score)
         self.performance_history['consistency_scores'].append(consistency_score)
+        if uncertainty_reduction_score is not None:
+            self.performance_history['uncertainty_reduction_scores'].append(uncertainty_reduction_score)
 
         # Cập nhật baseline tổng thể dựa trên trung bình gần đây
         if len(self.performance_history['rewards']) >= 10:
@@ -2856,6 +2792,18 @@ class RelationshipReinforcementLearning:
         if cons_avg is not None:
             prev = self.baseline_performance.get('consistency', cons_avg)
             self.baseline_performance['consistency'] = alpha * cons_avg + (1 - alpha) * prev
+
+        # Improvement (từ relationship_scores/reward trend, không có deque riêng — dùng improvement_trend nếu có)
+        if improvement_score is not None:
+            prev_imp = self.baseline_performance.get('improvement', 0.5)
+            self.baseline_performance['improvement'] = alpha * improvement_score + (1 - alpha) * prev_imp
+
+        # Uncertainty reduction
+        if uncertainty_reduction_score is not None:
+            unc_avg = recent_avg(self.performance_history['uncertainty_reduction_scores'])
+            if unc_avg is not None:
+                prev_unc = self.baseline_performance.get('uncertainty_reduction', unc_avg)
+                self.baseline_performance['uncertainty_reduction'] = alpha * unc_avg + (1 - alpha) * prev_unc
 
         # Cập nhật scaling factor theo phân phối phần thưởng gần đây
         self.scaling_factor = self._get_current_scaling_factor()
@@ -3399,10 +3347,15 @@ class RelationshipReinforcementLearning:
         print("\n5️⃣ TEST IMPROVEMENT SCORING:")
         improvement_score = self._calculate_improvement_score()
         print(f"   Improvement score: {improvement_score:.4f}")
+
+        uncertainty_reduction_score = 0.5  # Test không gọi uncertainty estimator
+        print(f"   Uncertainty reduction score (test): {uncertainty_reduction_score:.4f}")
         
-        print("\n6️⃣ TEST DYNAMIC WEIGHTS:")
+        print("\n6️⃣ TEST DYNAMIC WEIGHTS (gồm S_unc):")
         dynamic_weights = self._calculate_dynamic_weights(
-            detection_score, relationship_score, diversity_score, consistency_score
+            detection_score, relationship_score, diversity_score, consistency_score,
+            improvement_score=improvement_score,
+            uncertainty_reduction_score=uncertainty_reduction_score,
         )
         print(f"   Dynamic weights: {dynamic_weights}")
         
@@ -3412,7 +3365,8 @@ class RelationshipReinforcementLearning:
             dynamic_weights['relationship'] * relationship_score +
             dynamic_weights['diversity'] * diversity_score +
             dynamic_weights['consistency'] * consistency_score +
-            dynamic_weights['improvement'] * improvement_score
+            dynamic_weights['improvement'] * improvement_score +
+            dynamic_weights['uncertainty_reduction'] * uncertainty_reduction_score
         )
         scaled_reward = self._apply_reward_scaling(total_reward)
         print(f"   Raw reward: {total_reward:.4f}")
@@ -3500,7 +3454,7 @@ class RelationshipReinforcementLearning:
         }
         
         return analysis
-    
+       
     def print_scoring_breakdown(self) -> None:
         """In ra phân tích chi tiết về cách tính điểm."""
         analysis = self.get_scoring_analysis()
