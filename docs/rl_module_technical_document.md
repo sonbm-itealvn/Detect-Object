@@ -76,36 +76,36 @@ graph TB
 
 | File | Dòng | Chức năng |
 |------|------|-----------|
-| `reinforcement_learning.py` | 3619 | Lõi DQN agent, reward system, training loop, evaluation |
-| `rl_enhancement.py` | 563 | Bộ điều phối, quản lý vòng lặp epoch |
+| `reinforcement_learning.py` | ~3680 | Lõi DQN agent, reward system, training loop, evaluation |
+| `rl_enhancement.py` | ~563 | Bộ điều phối, quản lý vòng lặp epoch |
 | `active_learning.py` | ~440 | Chấm điểm quan hệ, tạo generation plan |
 | `uncertainty_estimator.py` | ~570 | MC Dropout, ước lượng bất định |
-| `approximation_algorithm.py` | 520 | Greedy Submodular Maximization |
-| `ai_images_generator.py` | 500 | Sinh ảnh Stable Diffusion, quality filter |
-| `auto_annotator.py` | 495 | Gán nhãn tự động (GroundingDINO/OWL-ViT/YOLO+CLIP) |
-| `experience_manager.py` | 222 | Quản lý Replay Buffer có lưu trữ |
-| `model_manager.py` | 235 | Quản lý checkpoint mô hình |
-| `experiment_manager.py` | 541 | Quản lý thí nghiệm, biểu đồ |
+| `approximation_algorithm.py` | ~520 | Greedy Submodular Maximization |
+| `ai_images_generator.py` | ~500 | Sinh ảnh Stable Diffusion, quality filter |
+| `auto_annotator.py` | ~495 | Gán nhãn tự động (GroundingDINO/OWL-ViT/YOLO+CLIP) |
+| `experience_manager.py` | ~222 | Quản lý Replay Buffer có lưu trữ |
+| `model_manager.py` | ~235 | Quản lý checkpoint mô hình |
+| `experiment_manager.py` | ~541 | Quản lý thí nghiệm, biểu đồ |
 
 ---
 
 ## 2. Thành phần Lõi: RelationshipReinforcementLearning
 
-Lớp `RelationshipReinforcementLearning` (file `reinforcement_learning.py`, 3619 dòng) là trung tâm của toàn bộ hệ thống RL, chịu trách nhiệm cho DQN agent, hệ thống phần thưởng, huấn luyện mô hình, và đánh giá.
+Lớp `RelationshipReinforcementLearning` (file `reinforcement_learning.py`, ~3680 dòng) là trung tâm của toàn bộ hệ thống RL, chịu trách nhiệm cho DQN agent, hệ thống phần thưởng, huấn luyện mô hình, và đánh giá.
 
 ### 2.1. Deep Q-Network (DQN) Agent
 
 #### Cấu trúc Q-Network
 
-Q-network là một mạng feedforward 3 lớp:
+Q-network là một mạng feedforward 3 lớp với **input 9 chiều** (khớp code `_build_q_network`):
 
 ```
-Input (5 chiều) → Linear(5, 64) → ReLU → Linear(64, 64) → ReLU → Linear(64, 10) → Output
+Input (9 chiều) → Linear(9, 64) → ReLU → Linear(64, 64) → ReLU → Linear(64, 10) → Output
 ```
 
 Mạng ước lượng giá trị Q cho mỗi hành động:
 
-$$Q(s, a; \theta) : \mathbb{R}^5 \rightarrow \mathbb{R}^{10}$$
+$$Q(s, a; \theta) : \mathbb{R}^9 \rightarrow \mathbb{R}^{10}$$
 
 Gồm hai mạng:
 - **Q-network** (`q_network`): Mạng chính để chọn hành động
@@ -113,9 +113,9 @@ Gồm hai mạng:
 
 #### Cập nhật Q-Network
 
-Hàm mất mát Huber (Smooth L1) được sử dụng:
+Hàm mất mát MSE được sử dụng:
 
-$$\mathcal{L}(\theta) = \frac{1}{|B|} \sum_{(s,a,r,s',d) \in B} \text{SmoothL1}\big(Q(s,a;\theta),\; y\big)$$
+$$\mathcal{L}(\theta) = \frac{1}{|B|} \sum_{(s,a,r,s',d) \in B} \left(Q(s,a;\theta) - y\right)^2$$
 
 trong đó target value:
 
@@ -131,17 +131,21 @@ Optimizer: **AdamW** với learning rate $\eta = 10^{-3}$.
 
 ### 2.2. Biểu diễn Trạng thái (State Representation)
 
-Vector trạng thái $s \in \mathbb{R}^5$ gồm 5 thành phần:
+Vector trạng thái $s \in \mathbb{R}^9$ gồm **9 thành phần** (khớp code `_build_state_vector`):
 
-$$s = \big[F1_{\text{det}},\; F1_{\text{rel}},\; \tanh(r),\; \tanh\big(\tfrac{|D|}{50}\big),\; \tanh(\varepsilon)\big]$$
+$$s = \big[F1_{\text{det}},\; \tfrac{N_{\text{det}}}{100},\; F1_{\text{rel}},\; \tfrac{|\mathcal{R}|}{200},\; \tanh(r),\; \tanh(\varepsilon),\; \tfrac{t}{T},\; \bar{U},\; U_{\max}\big]$$
 
 | Chỉ số | Thành phần | Mô tả | Miền |
 |--------|-----------|-------|------|
-| 0 | $F1_{\text{det}}$ | F1-score đánh giá detection | [0, 1] |
-| 1 | $F1_{\text{rel}}$ | F1-score đánh giá relationship | [0, 1] |
-| 2 | $\tanh(r)$ | Phần thưởng gần nhất (chuẩn hóa) | [-1, 1] |
-| 3 | $\tanh(|D|/50)$ | Kích thước dataset (chuẩn hóa) | [0, 1] |
-| 4 | $\tanh(\varepsilon)$ | Tỷ lệ khám phá hiện tại | [0, 1] |
+| 0 | $F1_{\text{det}}$ | F1-score detection; proxy: $\max(0, 1-\tanh(\ell_{\text{det}}/5))$ | [0, 1] |
+| 1 | $N_{\text{det}}/100$ | Số lượng phát hiện (TP+FP), chuẩn hóa, clip ≤ 1 | [0, 1] |
+| 2 | $F1_{\text{rel}}$ | F1-score relationship; proxy từ loss | [0, 1] |
+| 3 | $|\mathcal{R}|/200$ | Số lượng quan hệ GT (TP+FN), chuẩn hóa, clip ≤ 1 | [0, 1] |
+| 4 | $\tanh(r)$ | Phần thưởng bước trước (chuẩn hóa) | [-1, 1] |
+| 5 | $\tanh(\varepsilon)$ | Tỷ lệ khám phá hiện tại | [0, 1] |
+| 6 | $t/T$ | Tiến độ epoch (current / total, clip ≤ 1) | [0, 1] |
+| 7 | $\bar{U}$ | Độ bất định trung bình (MC Dropout), mặc định 0.5 | [0, 1] |
+| 8 | $U_{\max}$ | Độ bất định tối đa (MC Dropout), mặc định 0.5 | [0, 1] |
 
 > **Fallback**: Khi chưa có F1 thật (epoch đầu), hệ thống dùng pseudo-F1 từ loss: $\hat{F1} = \max\big(0,\; 1 - \tanh(\ell/5)\big)$.
 
@@ -165,11 +169,11 @@ với $\varepsilon_0 = 0.9$, $\delta = 0.995$, $\varepsilon_{\min} = 0.01$.
 
 Phần thưởng tổng hợp $R$ được tính từ **6 thành phần** kết hợp với **trọng số động**:
 
-$$R_{\text{raw}} = \sum_{i=1}^{6} w_i \cdot S_i = w_{\text{det}} S_{\text{det}} + w_{\text{rel}} S_{\text{rel}} + w_{\text{div}} S_{\text{div}} + w_{\text{cons}} S_{\text{cons}} + w_{\text{imp}} S_{\text{imp}} + w_{\text{unc}} S_{\text{unc}}$$
+$$R_{\text{raw}} = \sum_{i=1}^{6} W_i \cdot S_i = W_{\text{det}} S_{\text{det}} + W_{\text{rel}} S_{\text{rel}} + W_{\text{div}} S_{\text{div}} + W_{\text{cons}} S_{\text{cons}} + W_{\text{imp}} S_{\text{imp}} + W_{\text{unc}} S_{\text{unc}}$$
 
 $$R = \sigma\big(k \cdot (R_{\text{raw}} - 0.5)\big) = \frac{1}{1 + e^{-k(R_{\text{raw}} - 0.5)}}$$
 
-trong đó $k$ là scaling factor thích ứng.
+trong đó $k$ là scaling factor thích ứng (xem Mục 2.5.8).
 
 ---
 
@@ -178,13 +182,13 @@ trong đó $k$ là scaling factor thích ứng.
 $$S_{\text{det}} = F1_{\text{det}} \cdot C_n \cdot B_{PR}$$
 
 - **Hệ số tin cậy mẫu**: $C_n = \tanh(\alpha \cdot \ln(n + 1))$, với $\alpha = 0.5$, $n$ = số mẫu đánh giá
-- **Hệ số cân bằng P-R**: $B_{PR} = 1 - |P - R|$
+- **Hệ số cân bằng P-R**: $B_{PR} = 2\sqrt{P\cdot R}/(P+R)$ (GM/AM), $\in (0,1]$
 
 #### 2.5.2. Điểm Phát hiện Quan hệ ($S_{\text{rel}}$)
 
-$$S_{\text{rel}} = \big(F1_{\text{rel}} \cdot C_n \cdot B_{PR}\big) \times (1 + W_{\text{tail}})$$
+$$S_{\text{rel}} = F1_{\text{rel}} \cdot C_n \cdot B_{PR} + \beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}, \quad \text{clip } [0,1]$$
 
-trong đó $W_{\text{tail}}$ là trọng số long-tail trung bình từ `tail_weights` (xem Mục 2.6).
+trong đó $\beta = 0.5$, $W_{\text{tail}}$ là trọng số long-tail trung bình từ `tail_weights` (xem Mục 2.6). Thành phần $\beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}$ là "thưởng thêm" cho quan hệ hiếm, bị chặn bởi $\beta \cdot F1_{\text{rel}} \leq \beta$.
 
 #### 2.5.3. Điểm Đa dạng ($S_{\text{div}}$)
 
@@ -203,33 +207,48 @@ $$S_{\text{spatial}} = 0.4 \cdot S_{\text{pos}} + 0.3 \cdot S_{\text{size}} + 0.
 
 #### 2.5.4. Điểm Nhất quán ($S_{\text{cons}}$)
 
-$$S_{\text{cons}} = 0.7 \cdot S_{\text{std}} + 0.3 \cdot S_{\text{trend}}$$
+$$S_{\text{cons}} = 0.7 \cdot S_{\text{std}} + 0.3 \cdot S_{\text{trend}}^{\text{cons}}$$
 
 - **Nghịch đảo độ lệch chuẩn**: $S_{\text{std}} = \frac{1}{1 + \sigma_{F1}}$
-- **Xu hướng cải thiện**: $S_{\text{trend}} = 0.5 + 0.5 \cdot \tanh(10 \cdot \beta)$, với $\beta$ là hệ số hồi quy tuyến tính của chuỗi F1:
+- **Xu hướng dài hạn** ($S_{\text{trend}}^{\text{cons}}$): Hệ số góc hồi quy tuyến tính của chuỗi F1 **20 epoch gần nhất** (tách nguồn với $S_{\text{imp}}$ để giảm đa cộng tuyến):
 
-$$\beta = \frac{\sum_{i=1}^{n} (i - \bar{i})(F1_i - \overline{F1})}{\sum_{i=1}^{n} (i - \bar{i})^2}$$
+$$S_{\text{trend}}^{\text{cons}} = \text{LinearSlope}\big(F1_{t-20:t}\big) \mapsto [0,1]$$
 
 #### 2.5.5. Điểm Cải thiện ($S_{\text{imp}}$)
 
-$$S_{\text{imp}} = 0.6 \cdot \Big(0.5 + 0.5 \cdot \tanh(F1_{\text{current}} - F1_{\text{base}})\Big) + 0.4 \cdot S_{\text{trend}}$$
+$$S_{\text{imp}} = 0.6 \cdot \Big(0.5 + 0.5 \cdot \tanh(F1_{\text{current}} - F1_{\text{base}})\Big) + 0.4 \cdot S_{\text{trend}}^{\text{imp}}$$
 
-So sánh hiệu suất hiện tại với đường cơ sở (baseline) cập nhật bằng EWMA.
+- **$F1_{\text{current}}$**: Trung bình relationship score **5 epoch gần nhất** (ngắn hạn)
+- **$F1_{\text{base}}$**: Baseline từ `baseline_performance['relationship']`
+- **$S_{\text{trend}}^{\text{imp}}$**: Hệ số góc hồi quy **5 epoch gần nhất** (tách nguồn với $S_{\text{cons}}$):
+
+$$S_{\text{trend}}^{\text{imp}} = \text{LinearSlope}\big(F1_{t-5:t}\big) \mapsto [0,1]$$
 
 #### 2.5.6. Điểm Giảm Bất định ($S_{\text{unc}}$)
 
-$$S_{\text{unc}} = \max\big(0,\; \min\big(1,\; 0.5 + 0.5 \cdot \Delta U\big)\big)$$
+Sử dụng **tanh** để đảm bảo $S_{\text{unc}} \in (0, 1)$ tự nhiên, không cần clip cứng (khớp code `calculate_reward` và README §12.7):
 
-trong đó $\Delta U$ là mức giảm uncertainty trung bình so với epoch trước (xem Mục 3.3).
+$$S_{\text{unc}} = 0.5 + 0.5 \cdot \tanh(\lambda \cdot \rho)$$
+
+trong đó:
+- $\lambda = 2$ (hệ số scale, cấu hình `unc_rho_lambda`)
+- $\rho$ là mức giảm uncertainty trung bình (relative) so với epoch trước (xem Mục 3.3):
+
+$$\rho = \frac{1}{|\mathcal{K}|}\sum_{k \in \mathcal{K}} \frac{U_{\text{prev},k} - U_{\text{current},k}}{U_{\text{prev},k}}$$
+
+Tính chất:
+- $S_{\text{unc}} \to 0.5$: $\rho \approx 0$ (trung tính) hoặc lỗi/không có estimator
+- $S_{\text{unc}} \to 1$: $\rho \gg 0$ (giảm mạnh uncertainty)
+- $S_{\text{unc}} \to 0$: $\rho \ll 0$ (tăng mạnh uncertainty), chặn mượt bởi tanh
 
 ---
 
-#### 2.5.7. Trọng số Động (Dynamic Weights)
+#### 2.5.7. Trọng số Động (Dynamic Weights) — Công thức Softmax
 
-Trọng số cơ bản:
+Trọng số cơ bản (prior):
 
-| Thành phần | $w_{\text{base}}$ |
-|------------|--------------------|
+| Thành phần | $W_k^0$ |
+|------------|---------|
 | Detection | 0.25 |
 | Relationship | 0.45 |
 | Diversity | 0.15 |
@@ -237,31 +256,36 @@ Trọng số cơ bản:
 | Improvement | 0.05 |
 | Uncertainty Reduction | 0.10 |
 
-Trọng số được điều chỉnh dựa trên **độ lệch so với baseline**:
+Trọng số được điều chỉnh dựa trên **softmax kết hợp prior** để đảm bảo $W_k > 0$ luôn và $\sum_k W_k = 1$ (khớp code `_calculate_dynamic_weights` và README §12.8):
 
-$$w'_i = w_{\text{base},i} + \lambda \cdot |S_i - b_i|$$
+$$W_k = \frac{W_k^0 \cdot \exp\!\big(\alpha\,(b_k - S_k)\big)}{\sum_j W_j^0 \cdot \exp\!\big(\alpha\,(b_j - S_j)\big)}$$
 
-rồi chuẩn hóa:
+với $\alpha = 0.2$ (hệ số điều chỉnh) và $b_k$ là baseline cho thành phần $k$.
 
-$$w_i = \frac{w'_i}{\sum_j w'_j}$$
-
-với $\lambda = 0.2$ (hệ số điều chỉnh) và $b_i$ là baseline cho thành phần $i$.
+**Tính chất:**
+- $\exp(\alpha(b_k - S_k))$ lớn khi $S_k < b_k$ (thành phần yếu) → $W_k$ cao hơn
+- Prior $W_k^0$ vẫn tham gia nên phân bố ban đầu được tôn trọng
+- Trong code: trừ $\max_k \alpha(b_k - S_k)$ trước khi `exp` để ổn định số học
 
 **Cập nhật Baseline** (EWMA):
 
-$$b_i^{(t+1)} = \alpha_{\text{ewma}} \cdot \bar{S}_i^{\text{recent}} + (1 - \alpha_{\text{ewma}}) \cdot b_i^{(t)}$$
+$$b_k^{(t+1)} = \alpha_{\text{ewma}} \cdot \bar{S}_k^{\text{recent}} + (1 - \alpha_{\text{ewma}}) \cdot b_k^{(t)}$$
 
-với $\alpha_{\text{ewma}} = 0.3$ và $\bar{S}_i^{\text{recent}}$ là trung bình 10 giá trị gần nhất.
+với $\alpha_{\text{ewma}} = 0.3$ và $\bar{S}_k^{\text{recent}}$ là trung bình 10 giá trị gần nhất.
 
 #### 2.5.8. Hàm Scaling
 
 $$R = \sigma\big(k \cdot (R_{\text{raw}} - 0.5)\big)$$
 
-Scaling factor $k$ thích ứng theo phương sai phần thưởng gần đây:
+Scaling factor $k$ thích ứng theo độ lệch chuẩn phần thưởng thô gần đây (khớp code `_get_current_scaling_factor` và README §12.1):
 
-$$k = 1.0 + \big(1.0 - \min(\text{Var}(r_{\text{recent}}), 1.0)\big)$$
+$$k = k_{\min} + (k_{\max} - k_{\min}) \cdot \frac{1}{1 + \sigma_{\text{recent}}}$$
 
-Khi performance ổn định (variance thấp), $k$ tăng → sigmoid sharp hơn → phân biệt rõ reward tốt/xấu.
+với:
+- $k_{\min} = 3$, $k_{\max} = 10$ (cấu hình `reward_sigmoid_k_min`, `reward_sigmoid_k_max`)
+- $\sigma_{\text{recent}}$: Độ lệch chuẩn của $R_{\text{raw}}$ trên $M$ bước gần nhất ($M = 10$, cấu hình `reward_sigmoid_M`)
+- Khi performance **ổn định** ($\sigma_{\text{recent}} \to 0$): $k \to k_{\max}$ → sigmoid dốc hơn → phân biệt rõ reward tốt/xấu
+- Khi performance **bất ổn** ($\sigma_{\text{recent}}$ lớn): $k$ nhỏ → sigmoid mềm hơn → ổn định huấn luyện
 
 ### 2.6. Xử lý Long-tail (Tail Weights)
 
@@ -334,7 +358,7 @@ $$\text{TP} = |G_{\text{norm}} \cap P_{\text{norm}}|, \quad \text{FP} = |P_{\tex
 
 ## 3. Ước lượng Bất định: UncertaintyEstimator
 
-File `uncertainty_estimator.py` triển khai phương pháp **MC Dropout** (Gal & Ghahramani, 2016) để ước lượng bất định nhận thức (epistemic uncertainty) mà không cần ensemble nhiều mô hình.
+File `uncertainty_estimator.py` (~570 dòng) triển khai phương pháp **MC Dropout** (Gal & Ghahramani, 2016) để ước lượng bất định nhận thức (epistemic uncertainty) mà không cần ensemble nhiều mô hình.
 
 ### 3.1. MC Dropout (Monte Carlo Dropout)
 
@@ -382,19 +406,26 @@ trong đó `mode_count` là số lần lớp phổ biến nhất được dự �
 
 #### (d) Điểm Bất định Tổng hợp
 
-$$U = 0.3 \cdot \hat{H} + 0.3 \cdot \hat{I} + 0.2 \cdot VR + 0.2 \cdot (1 - \bar{p}_{\max})$$
+Kết hợp 4 metric thành điểm duy nhất $U \in [0, 1]$ (khớp code `_compute_combined_score`):
 
-Kết hợp 4 metric thành điểm duy nhất $U \in [0, 1]$.
+$$U = 0.3 \cdot \hat{H} + 0.3 \cdot \hat{I} + 0.2 \cdot VR + 0.2 \cdot (1 - \bar{c})$$
+
+trong đó $\bar{c}$ là confidence trung bình trên tất cả predictions.
 
 ### 3.3. Theo dõi Giảm Bất định
 
-Hệ thống so sánh uncertainty giữa các epoch:
+Hệ thống so sánh uncertainty giữa các epoch bằng **relative reduction** (khớp code `compute_uncertainty_reduction`):
 
-$$\Delta U_i = U_i^{(t-1)} - U_i^{(t)}$$
+$$\text{reduction}_k = \frac{U_{\text{prev},k} - U_{\text{current},k}}{U_{\text{prev},k}} \quad \text{(chỉ với } U_{\text{prev},k} > 0\text{)}$$
 
-$$\overline{\Delta U} = \frac{1}{|M|} \sum_{i \in M} \Delta U_i$$
+$$\rho = \frac{1}{|\mathcal{K}|} \sum_{k \in \mathcal{K}} \text{reduction}_k$$
 
-trong đó $M$ là tập các mẫu có mặt ở cả hai epoch. $\overline{\Delta U} > 0$ → mô hình đang học (uncertainty giảm).
+trong đó $\mathcal{K}$ là tập các mẫu có mặt ở cả hai epoch.
+- $\rho > 0$ → mô hình đang học (uncertainty giảm)
+- $\rho < 0$ → uncertainty tăng (cần điều chỉnh)
+- $\rho = 0$ → không đổi hoặc lần đầu (chưa có cache)
+
+Sau khi tính, cache được cập nhật: `_previous_uncertainties ← current_uncertainties`.
 
 ---
 
@@ -449,7 +480,7 @@ $$\text{for } i = 1 \text{ to } B: \quad s^* = \arg\max_{s \in \mathcal{P} \setm
 
 **Đảm bảo xấp xỉ**: $f(S) \geq (1 - 1/e) \cdot f(S^*) \approx 0.632 \cdot \text{OPT}$
 
-**Dừng sớm**: Nếu marginal gain < $10^{-6}$ và đã chọn > 50% budget → tính chất diminishing returns.
+**Dừng sớm**: Nếu marginal gain $< 10^{-6}$ và đã chọn > 50% budget → tính chất diminishing returns.
 
 ### 5.2. Hàm Mục tiêu Submodular
 
@@ -638,18 +669,6 @@ File `experience_manager.py` quản lý replay buffer có lưu trữ persistent:
 2. `_sanitize_experience()`: Loại bỏ dữ liệu không serialize được (PIL images, pixel_values)
 3. Khi restart, `_load_main_buffer()` tự động load kinh nghiệm cũ
 
-**Cấu trúc mỗi Experience**:
-```json
-{
-  "state": {"epoch", "step", "epsilon", "relationship": {...}},
-  "action": "train_relationship_models",
-  "reward": 0.15,
-  "next_state": {...},
-  "done": false,
-  "metadata": {"prompt", "detection_loss", "relationship_loss", "long_tail_loss"}
-}
-```
-
 ### 8.3. ModelManager
 
 File `model_manager.py` quản lý checkpoint:
@@ -718,7 +737,7 @@ sequenceDiagram
     participant Reward as Reward Calculator
     participant EM as Experience Manager
 
-    App->>DQN: build_state_vector()
+    App->>DQN: build_state_vector() [9 chiều]
     DQN->>DQN: ε-greedy → action (num_variations)
     App->>UE: estimate_batch() [MC Dropout × 10]
     UE-->>AL: uncertainty scores
@@ -745,14 +764,14 @@ sequenceDiagram
 
     App->>Reward: evaluate_detection_metrics()
     App->>Reward: evaluate_relationship_metrics() + mR@K
-    App->>UE: estimate_batch() → uncertainty_reduction
+    App->>UE: estimate_batch() → uncertainty_reduction (ρ)
     Reward->>Reward: S_det, S_rel, S_div, S_cons, S_imp, S_unc
-    Reward->>Reward: dynamic_weights → σ(k·(R_raw - 0.5))
+    Reward->>Reward: softmax_weights → σ(k·(R_raw - 0.5))
     Reward-->>DQN: reward signal
 
     DQN->>DQN: store (s, a, r, s', done) in memory
-    DQN->>DQN: sample batch → SmoothL1 loss → update Q-network
-    DQN->>DQN: periodic target network sync
+    DQN->>DQN: sample batch → MSE loss → update Q-network
+    DQN->>DQN: periodic target network sync (mỗi 20 bước)
 
     App->>EM: record_epoch_batch(experiences)
 
@@ -776,4 +795,4 @@ sequenceDiagram
 
 ---
 
-*Tài liệu được tạo tự động từ phân tích mã nguồn module RL. Phiên bản: 2026-03-11.*
+*Tài liệu được tạo từ phân tích mã nguồn module RL, khớp với README và code. Phiên bản: 2026-03-12.*

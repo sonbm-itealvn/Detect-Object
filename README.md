@@ -989,11 +989,20 @@ Do contraction mapping: $\|\gamma\max_{a'} Q(s', a') - \gamma\max_{a'} Q^*(s', a
 
 ### 12.1 Tổng quan
 
-Hàm phần thưởng được chuẩn hóa qua **sigmoid** để tránh bùng nổ giá trị và đưa reward vào khoảng $(0, 1)$:
+Hàm phần thưởng được chuẩn hóa qua **sigmoid** để đưa reward vào khoảng $(0, 1)$:
 
 $$R = \sigma\big(k \cdot (R_{\text{raw}} - 0.5)\big) = \frac{1}{1 + e^{-k(R_{\text{raw}} - 0.5)}}$$
 
-trong đó $k$ là **scaling factor** (phụ thuộc độ ổn định gần đây của reward). Điểm thô:
+**Hệ số $k$ tường minh** (phụ thuộc độ ổn định của $R_{\text{raw}}$ gần đây):
+
+$$k = k_{\min} + (k_{\max} - k_{\min}) \cdot \frac{1}{1 + \sigma_{\text{recent}}}$$
+
+- $\sigma_{\text{recent}}$: độ lệch chuẩn của $R_{\text{raw}}$ trên $M$ bước gần nhất (ví dụ $M = 10$).
+- $k_{\min} = 3$, $k_{\max} = 10$ (cấu hình: `reward_sigmoid_k_min`, `reward_sigmoid_k_max`, `reward_sigmoid_M`).
+- Khi reward **ổn định** ($\sigma_{\text{recent}} \to 0$): $k \to k_{\max}$ → sigmoid dốc hơn, tín hiệu rõ.
+- Khi reward **bất ổn** ($\sigma_{\text{recent}}$ lớn): $k$ nhỏ → sigmoid mềm hơn, ổn định huấn luyện.
+
+Điểm thô:
 
 $$R_{\text{raw}} = W_{\text{det}} S_{\text{det}} + W_{\text{rel}} S_{\text{rel}} + W_{\text{div}} S_{\text{div}} + W_{\text{cons}} S_{\text{cons}} + W_{\text{imp}} S_{\text{imp}} + W_{\text{unc}} S_{\text{unc}}$$
 
@@ -1016,20 +1025,25 @@ $$S_{\text{det}} = F1_{\text{det}} \cdot C_n \cdot B_{PR}$$
 
 $$C_n = \tanh\big(\alpha \cdot \ln(n + 1)\big)$$
 
-- **Hệ số cân bằng Precision–Recall** $B_{PR}$ (trừng phạt lệch P/R):
+- **Hệ số cân bằng Precision–Recall** $B_{PR}$ — dùng **tỷ lệ geometric/arithmetic** thay cho $1 - |P - R|$ để phân biệt chất lượng tốt hơn (khi một trong hai rất nhỏ thì $B_{PR}$ nhỏ):
 
-$$B_{PR} = 1 - |P - R|, \quad B_{PR} \in [0, 1]$$
+$$B_{PR} = \frac{2\sqrt{P \cdot R}}{P + R} = \frac{\text{GM}}{\text{AM}}, \quad B_{PR} \in (0, 1], \quad B_{PR} = 1 \Leftrightarrow P = R$$
 
-**Implementation:** `_calculate_detection_score(detection_metrics)` — lấy `f1`, `precision`, `recall`, `num_samples` từ `detection_metrics`.
+Ví dụ $P = 0.01$, $R = 0.99$ cho $B_{PR} \approx 0.2$ (bị phạt nặng).
+
+**Implementation:** `_calculate_detection_score(detection_metrics)`; $B_{PR}$ qua `_calculate_b_pr(P, R)`.
 
 ---
 
 ### 12.3 Điểm quan hệ — $S_{\text{rel}}$
 
+Công thức cũ $\big(F1_{\text{rel}} \cdot C_n \cdot B_{PR}\big) \times (1 + W_{\text{tail}})$ có thể làm $S_{\text{rel}} > 1$ khi quan hệ rất hiếm ($W_{\text{tail}}$ lớn). Để giữ **additive bonus có giới hạn** cho quan hệ hiếm mà vẫn đảm bảo $S_{\text{rel}} \in [0, 1]$:
 
-$$S_{\text{rel}} = \big(F1_{\text{rel}} \cdot C_n \cdot B_{PR}\big) \times (1 + W_{\text{tail}})$$
+$$S_{\text{rel}} = F1_{\text{rel}} \cdot C_n \cdot B_{PR} + \beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}, \quad \text{clip về } [0, 1]$$
 
-$C_n$ và $B_{PR}$ giống mục 12.2 (dùng metrics của relationship). **Trọng số đuôi dài** $W_{\text{tail}}$:
+với $\beta \in (0, 1)$ (ví dụ $\beta = 0.5$). Thành phần $\beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}$ là “thưởng thêm” cho quan hệ hiếm, bị chặn bởi $\beta \cdot F1_{\text{rel}} \leq \beta$, nên tổng vẫn nằm trong khoảng hợp lý trước khi clip.
+
+$C_n$ và $B_{PR}$ giống mục 12.2 (cùng công thức $B_{PR} = 2\sqrt{P\cdot R}/(P+R)$; metrics của relationship). **Trọng số đuôi dài** $W_{\text{tail}}$:
 
 - Trọng số thô theo nghịch đảo tần suất (49):
 
@@ -1041,7 +1055,7 @@ $$W_{\text{tail}}(r) = \frac{W_{\text{raw}}(r)}{\sum_{i=1}^{R} W_{\text{raw}}(i)
 
 Hệ thống duy trì từ điển `tail_weights` (đã chuẩn hóa). Khi đánh giá theo từng relation thì dùng $W_{\text{tail}}(r)$ tương ứng; khi đánh giá gộp thì dùng trung bình $W_{\text{tail}}$ trên các relation có trong batch.
 
-**Implementation:** `_calculate_relationship_score(relationship_metrics)` — F1, P, R, n từ `relationship_metrics`; $W_{\text{tail}}$ từ `self.tail_weights` (tính bằng `_recompute_tail_weights()`).
+**Implementation:** `_calculate_relationship_score(relationship_metrics)` — F1, P, R, n từ `relationship_metrics`; $W_{\text{tail}}$ từ `self.tail_weights`; $\beta$ từ `rel_tail_bonus_beta` (mặc định 0.5).
 
 ---
 
@@ -1081,31 +1095,31 @@ $p_i$ là tỷ lệ bbox rơi vào ô $i$; entropy được chuẩn hóa theo en
 
 ### 12.5 Điểm nhất quán — $S_{\text{cons}}$
 
-
-$$S_{\text{cons}} = 0.7\, S_{\text{std}} + 0.3\, S_{\text{trend}}$$
+$$S_{\text{cons}} = 0.7\, S_{\text{std}} + 0.3\, S_{\text{trend}}^{\text{cons}}$$
 
 - **$S_{\text{std}}$ (56):** Nghịch đảo độ lệch chuẩn F1 (ổn định qua các mẫu):
 
 $$S_{\text{std}} = \frac{1}{1 + \sigma_{F1}}$$
 
-- **$S_{\text{trend}}$ (57):** Hệ số góc hồi quy tuyến tính của chuỗi F1 (theo thời gian / theo mẫu). Slope được map vào $[0, 1]$ bằng hàm tanh để slope dương (cải thiện) cho điểm cao hơn.
+- **$S_{\text{trend}}^{\text{cons}}$:** Hệ số góc hồi quy tuyến tính của **chuỗi F1 dài hạn** (20 epoch gần nhất), map slope vào $[0, 1]$ bằng tanh. Dùng nguồn dài hạn để tách tín hiệu với $S_{\text{imp}}$ (giảm tương quan):
 
-**Implementation:** `_calculate_consistency_score(f1_scores, precomputed_std)` và `_calculate_trend_score(scores)`.
+$$S_{\text{trend}}^{\text{cons}} = \text{LinearSlope}\big(F1_{t-20:t}\big) \mapsto [0,1]$$
+
+**Implementation:** `_calculate_consistency_score(f1_scores, precomputed_std)`; trend lấy từ `performance_history['relationship_scores'][-cons_trend_window:]` (mặc định 20).
 
 ---
 
 ### 12.6 Điểm cải thiện — $S_{\text{imp}}$
 
+$$S_{\text{imp}} = 0.6 \cdot (0.5 + 0.5\tanh(F1_{\text{current}} - F1_{\text{base}})) + 0.4 \cdot S_{\text{trend}}^{\text{imp}}$$
 
-$$S_{\text{imp}} = 0.6 \cdot \tanh(F1_{\text{current}} - F1_{\text{base}}) + 0.4 \cdot S_{\text{trend}}$$
+- **$F1_{\text{current}}$:** Trung bình relationship score của **5 epoch gần nhất** (chuỗi ngắn hạn).
+- **$F1_{\text{base}}$:** Baseline từ `baseline_performance['relationship']` hoặc `overall`.
+- **$S_{\text{trend}}^{\text{imp}}$:** Hệ số góc hồi quy của **chuỗi F1 ngắn hạn** (5 epoch gần nhất), map vào $[0,1]$. Tách nguồn với $S_{\text{cons}}$ để giảm đa cộng tuyến:
 
-- **$F1_{\text{current}}$:** F1 (hoặc proxy: trung bình relationship score) gần đây.
-- **$F1_{\text{base}}$:** Baseline (ngưỡng mong muốn), lấy từ `baseline_performance['relationship']` hoặc `overall`.
-- **$S_{\text{trend}}$:** Cùng định nghĩa xu hướng như trong $S_{\text{cons}}$ (chuỗi relationship scores gần đây).
+$$S_{\text{trend}}^{\text{imp}} = \text{LinearSlope}\big(F1_{t-5:t}\big) \mapsto [0,1]$$
 
-Trong code, $\tanh(F1_{\text{current}} - F1_{\text{base}})$ được map về $[0,1]$ dạng $0.5 + 0.5\tanh(\cdot)$ rồi nhân 0.6.
-
-**Implementation:** `_calculate_improvement_score()` — dùng `performance_history['relationship_scores']` và `baseline_performance`.
+**Implementation:** `_calculate_improvement_score()` — dùng `relationship_scores[-imp_trend_window:]` (mặc định 5) cho cả F1 hiện tại và trend.
 
 ---
 
@@ -1138,25 +1152,27 @@ Module **UncertaintyEstimator** lưu cache `_previous_uncertainties` (uncertaint
 
 $$\text{reduction}_k = \frac{U_{\text{prev},k} - U_{\text{current},k}}{U_{\text{prev},k}} \quad \text{(chỉ với } U_{\text{prev},k} > 0\text{)}$$
 
-$$\rho = \frac{1}{|\mathcal{K}|}\sum_{k \in \mathcal{K}} \text{reduction}_k, \quad \rho \in [-1, 1]$$
+$$\rho = \frac{1}{|\mathcal{K}|}\sum_{k \in \mathcal{K}} \text{reduction}_k$$
 
 - $\rho > 0$: uncertainty giảm trung bình (tốt)
-- $\rho < 0$: uncertainty tăng (xấu)
+- $\rho < 0$: uncertainty tăng (xấu); $\rho$ có thể rất âm khi uncertainty tăng mạnh
 - $\rho = 0$: không đổi hoặc lần đầu (chưa có cache)
 
 Sau khi tính xong, cache được cập nhật: `_previous_uncertainties ← current_uncertainties` cho epoch tiếp theo.
 
-#### Bước 3: Map sang $S_{\text{unc}} \in [0, 1]$
+#### Bước 3: Map sang $S_{\text{unc}} \in (0, 1)$
 
-Trong **calculate_reward**, giá trị $\rho \in [-1, 1]$ được đưa về khoảng $[0, 1]$ để dùng làm thành phần reward:
+Công thức cũ $S_{\text{unc}} = 0.5 + 0.5\,\rho$ với clip không chặn được khi $\rho \to -\infty$. Để **bị chặn dưới/t trên tự nhiên** và giữ thông tin mức tăng/giảm uncertainty, dùng **tanh**:
 
-$$S_{\text{unc}} = 0.5 + 0.5\,\rho, \quad \text{clip về } [0, 1]$$
+$$S_{\text{unc}} = 0.5 + 0.5 \cdot \tanh(\lambda \cdot \rho)$$
 
-- $S_{\text{unc}} = 0.5$: không thay đổi uncertainty (trung tính) hoặc lỗi/không có estimator
-- $S_{\text{unc}} = 1$: giảm mạnh uncertainty
-- $S_{\text{unc}} = 0$: uncertainty tăng mạnh (bị clip)
+với $\lambda$ là hệ số scale (ví dụ $\lambda = 2$) điều khiển độ nhạy. Khi đó $S_{\text{unc}} \in (0, 1)$ luôn, không cần clip cứng.
 
-**Implementation:** `RL/uncertainty_estimator.py` — `estimate_batch`, `compute_uncertainty_reduction`, `_compute_combined_score`; `reinforcement_learning.py` — trong `calculate_reward` gọi `estimate_batch` → `compute_uncertainty_reduction` → map bằng `0.5 + 0.5 * reduction`. Khi không có `uncertainty_estimator` hoặc ngoại lệ: $S_{\text{unc}} = 0.5$.
+- $S_{\text{unc}} \to 0.5$: $\rho \approx 0$ (trung tính) hoặc lỗi/không có estimator
+- $S_{\text{unc}} \to 1$: $\rho \gg 0$ (giảm mạnh uncertainty)
+- $S_{\text{unc}} \to 0$: $\rho \ll 0$ (tăng mạnh uncertainty), bị chặn mượt bởi tanh
+
+**Implementation:** `RL/uncertainty_estimator.py` — `estimate_batch`, `compute_uncertainty_reduction`; `reinforcement_learning.py` — trong `calculate_reward` lấy $\rho$ từ `compute_uncertainty_reduction` rồi map bằng `0.5 + 0.5 * tanh(λ * ρ)` (tham số `unc_rho_lambda`, mặc định 2). Khi không có `uncertainty_estimator` hoặc ngoại lệ: $S_{\text{unc}} = 0.5$.
 
 **Trọng số $W_{\text{unc}}$** tham gia công thức trọng số thích nghi (mục 12.8): trọng số cơ bản $W_{\text{unc}}^0 = 0.10$, sau đó điều chỉnh theo độ lệch so với baseline và chuẩn hóa cùng 5 thành phần còn lại (tổng 6 trọng số bằng 1).
 
@@ -1164,16 +1180,18 @@ $$S_{\text{unc}} = 0.5 + 0.5\,\rho, \quad \text{clip về } [0, 1]$$
 
 ### 12.8 Trọng số thích nghi (Adaptive Weights)
 
-Trọng số $W_k$ cho thành phần $k$ được cập nhật theo độ lệch so với baseline:
+Công thức cũ $W_k = \big(W_k^0 + \alpha(b_k - S_k)\big) / Z$ có thể làm **tử số âm** khi $S_k \gg b_k$, dẫn đến trọng số âm hoặc không ổn định. Để đảm bảo $W_k > 0$ luôn và $\sum_k W_k = 1$, dùng **trọng số dạng softmax kết hợp prior**:
 
-$$W_k = \frac{W_k^0 + \alpha\, (b_k - S_k)}{\sum_j \big(W_j^0 + \alpha\, (b_j - S_j)\big)}$$
+$$W_k = \frac{W_k^0 \cdot \exp\!\big(\alpha\,(b_k - S_k)\big)}{\sum_j W_j^0 \cdot \exp\!\big(\alpha\,(b_j - S_j)\big)}$$
 
-- $W_k^0$: trọng số khởi tạo (detection 0.25, relationship 0.45, diversity 0.15, consistency 0.10, improvement 0.05, **uncertainty_reduction 0.10**).
+- $W_k^0$: trọng số prior (detection 0.25, relationship 0.45, diversity 0.15, consistency 0.10, improvement 0.05, uncertainty_reduction 0.10).
 - $S_k$: điểm hiện tại của thành phần $k$ (gồm cả $S_{\text{unc}}$).
 - $b_k$: baseline của thành phần $k$ (baseline cho uncertainty_reduction cũng được cập nhật theo lịch sử).
 - $\alpha$: hệ số điều chỉnh độ nhạy (ví dụ 0.2).
 
-Thành phần nào **điểm thấp hơn baseline** ($S_k < b_k$) thì nhận trọng số cao hơn, giúp tập trung cải thiện các mục tiêu còn yếu. **Implementation:** `_calculate_dynamic_weights(..., improvement_score=..., uncertainty_reduction_score=...)` tính cả 6 trọng số trong một lần và chuẩn hóa tổng bằng 1; trọng số $S_{\text{unc}}$ cũng tham gia thích nghi, không còn cố định 10%.
+**Tính chất:** $\exp(\alpha(b_k - S_k))$ lớn khi $S_k < b_k$ (thành phần yếu) → $W_k$ cao hơn; tổng luôn bằng 1; mọi $W_k > 0$. Prior $W_k^0$ vẫn tham gia nên phân bố ban đầu được tôn trọng.
+
+**Implementation:** `_calculate_dynamic_weights(...)` tính 6 trọng số theo công thức trên; trong code dùng trừ $\max_j \alpha(b_j - S_j)$ trước khi `exp` để ổn định số học.
 
 ---
 
@@ -1181,12 +1199,12 @@ Thành phần nào **điểm thấp hơn baseline** ($S_k < b_k$) thì nhận tr
 
 | Thành phần | Công thức chính | Input chính |
 |---|---|---|
-| $S_{\text{det}}$ | $F1_{\text{det}} \cdot C_n \cdot B_{PR}$ | detection_metrics (f1, P, R, n) |
-| $S_{\text{rel}}$ | $(F1_{\text{rel}} \cdot C_n \cdot B_{PR})(1 + W_{\text{tail}})$ | relationship_metrics + tail_weights |
+| $S_{\text{det}}$ | $F1_{\text{det}} \cdot C_n \cdot B_{PR}$, $B_{PR} = 2\sqrt{P\cdot R}/(P+R)$ | detection_metrics (f1, P, R, n) |
+| $S_{\text{rel}}$ | $F1_{\text{rel}} \cdot C_n \cdot B_{PR} + \beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}$, clip $[0,1]$ | relationship_metrics + tail_weights |
 | $S_{\text{div}}$ | $0.4 D_{\text{type}} + 0.4 D_{\text{class}} + 0.2 S_{\text{spatial}}$ | synthetic_data (relations, classes, bbox) |
-| $S_{\text{cons}}$ | $0.7/(1+\sigma_{F1}) + 0.3\, S_{\text{trend}}$ | per-sample F1, $\sigma_{F1}$ |
-| $S_{\text{imp}}$ | $0.6\tanh(F1_{\text{curr}}-F1_{\text{base}}) + 0.4 S_{\text{trend}}$ | relationship_scores, baseline |
-| $S_{\text{unc}}$ | $0.5 + 0.5\,\rho$, $\rho = \text{mean}_k\big((U_{\text{prev},k}-U_{\text{curr},k})/U_{\text{prev},k}\big)$ | estimate_batch → compute_uncertainty_reduction, cache $U_{\text{prev}}$ |
+| $S_{\text{cons}}$ | $0.7/(1+\sigma_{F1}) + 0.3\, S_{\text{trend}}^{\text{cons}}$, trend từ $F1_{t-20:t}$ | per-sample F1, $\sigma_{F1}$, relationship_scores[-20:] |
+| $S_{\text{imp}}$ | $0.6\cdot(0.5+0.5\tanh(\Delta F1)) + 0.4 S_{\text{trend}}^{\text{imp}}$, trend từ $F1_{t-5:t}$ | relationship_scores[-5:], baseline |
+| $S_{\text{unc}}$ | $0.5 + 0.5\tanh(\lambda \cdot \rho)$, $\rho = \text{mean}_k\big((U_{\text{prev},k}-U_{\text{curr},k})/U_{\text{prev},k}\big)$, $\lambda = 2$ | estimate_batch → compute_uncertainty_reduction, cache $U_{\text{prev}}$ |
 
 
 ## 13. MC Dropout Uncertainty Estimation

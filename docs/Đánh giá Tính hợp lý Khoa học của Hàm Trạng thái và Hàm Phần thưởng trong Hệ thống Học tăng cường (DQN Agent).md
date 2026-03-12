@@ -46,15 +46,17 @@ Các thành phần điểm ($S_*$) và trọng số thích nghi ($W_*$) được
 | Thành phần điểm | Mô tả | Công thức chính | Tính hợp lý khoa học |
 |---|---|---|---|
 | $S_{\text{det}}$ (Detection Score) | Đo hiệu suất phát hiện đối tượng. | $F1_{\text{det}} \cdot C_n \cdot B_{PR}$ | Sử dụng F1-score là chuẩn mực, $C_n$ (hệ số tin cậy mẫu) giúp ổn định khi dữ liệu ít, $B_{PR}$ (cân bằng Precision-Recall) khuyến khích sự cân bằng giữa P và R, tránh lệch [4]. |
-| $S_{\text{rel}}$ (Relationship Score) | Đo hiệu suất suy luận quan hệ. | $(F1_{\text{rel}} \cdot C_n \cdot B_{PR}) \times (1 + W_{\text{tail}})$ | Tương tự $S_{\text{det}}$, bổ sung $W_{\text{tail}}$ (trọng số đuôi dài) để ưu tiên các quan hệ hiếm, giải quyết vấn đề mất cân bằng lớp [5]. |
+| $S_{\text{rel}}$ (Relationship Score) | Đo hiệu suất suy luận quan hệ. | $F1_{\text{rel}} \cdot C_n \cdot B_{PR} + \beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}$, clip $[0,1]$ ($\beta = 0.5$) | Tương tự $S_{\text{det}}$, bổ sung additive bonus $\beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}$ (trọng số đuôi dài) để ưu tiên quan hệ hiếm mà không làm $S_{\text{rel}} > 1$ [5]. |
 | $S_{\text{div}}$ (Diversity Score) | Khuyến khích sự đa dạng trong dữ liệu được tạo ra. | $0.4 D_{\text{type}} + 0.4 D_{\text{class}} + 0.2 S_{\text{spatial}}$ | Đa dạng loại quan hệ, lớp đối tượng và phân bố không gian (vị trí, kích thước, độ phủ) là các yếu tố quan trọng để tạo ra dữ liệu huấn luyện phong phú, tránh overfitting và cải thiện khả năng tổng quát hóa của mô hình [6]. Việc sử dụng entropy để đo độ phủ không gian là một phương pháp chuẩn mực.
 | $S_{\text{cons}}$ (Consistency Score) | Đo sự ổn định và xu hướng cải thiện của hiệu suất. | $0.7/(1+\sigma_{F1}) + 0.3\, S_{\text{trend}}$ | Khuyến khích sự ổn định (nghịch đảo độ lệch chuẩn F1) và xu hướng tăng trưởng (hệ số góc hồi quy tuyến tính của F1), giúp tác nhân tìm kiếm các chiến lược bền vững [7]. |
 | $S_{\text{imp}}$ (Improvement Score) | Đo mức độ cải thiện so với baseline. | $0.6\tanh(F1_{\text{curr}}-F1_{\text{base}}) + 0.4 S_{\text{trend}}$ | Trực tiếp thưởng cho việc vượt qua baseline, với hàm $\tanh$ giúp làm mượt phần thưởng và $S_{\text{trend}}$ củng cố xu hướng cải thiện. |
-| $S_{\text{unc}}$ (Uncertainty Reduction Score) | Đo mức độ giảm độ bất định của mô hình. | $0.5 + 0.5\,\rho$, với $\rho$ là mức giảm độ bất định trung bình. | Đây là một dạng phần thưởng nội tại (intrinsic reward) quan trọng, khuyến khích tác nhân chọn các hành động tạo ra dữ liệu giúp giảm sự không chắc chắn của mô hình, đặc biệt hữu ích trong Active Learning [3]. | 
+| $S_{\text{unc}}$ (Uncertainty Reduction Score) | Đo mức độ giảm độ bất định của mô hình. | $0.5 + 0.5 \cdot \tanh(\lambda \cdot \rho)$, $\lambda = 2$, $S_{\text{unc}} \in (0,1)$ | Phần thưởng nội tại; tanh đảm bảo bị chặn khi $\rho \to -\infty$, hữu ích trong Active Learning [3]. | 
 
 **Trọng số thích nghi ($W_k$):**
 
-$$W_k = \frac{W_k^0 + \alpha\, (b_k - S_k)}{\sum_j \big(W_j^0 + \alpha\, (b_j - S_j)\big)}$$
+$$W_k = \frac{W_k^0 \cdot \exp\!\big(\alpha\,(b_k - S_k)\big)}{\sum_j W_j^0 \cdot \exp\!\big(\alpha\,(b_j - S_j)\big)}$$
+
+(Đảm bảo $W_k > 0$ và $\sum_k W_k = 1$; công thức cũ dùng $W_k^0 + \alpha(b_k - S_k)$ có thể âm khi $S_k \gg b_k$, nên đã thay bằng dạng softmax kết hợp prior.)
 
 Đây là một cơ chế **Reward Shaping** rất tiên tiến và hợp lý. Thay vì sử dụng trọng số cố định, hệ thống điều chỉnh trọng số của từng thành phần dựa trên sự chênh lệch giữa điểm hiện tại ($S_k$) và baseline ($b_k$) của thành phần đó. Nếu một thành phần có hiệu suất thấp hơn baseline, trọng số của nó sẽ được tăng lên, khuyến khích tác nhân tập trung vào việc cải thiện khía cạnh đó. Điều này tạo ra một hệ thống phần thưởng động, tự điều chỉnh, giúp tác nhân học hỏi hiệu quả hơn trong môi trường đa mục tiêu [8].
 

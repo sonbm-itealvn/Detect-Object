@@ -492,11 +492,11 @@ $$R_{\text{raw}} = W_{\text{det}} S_{\text{det}} + W_{\text{rel}} S_{\text{rel}}
 $$S_{\text{det}} = F1_{\text{det}} \cdot C_n \cdot B_{PR}$$
 
 - $C_n = \tanh(\alpha \cdot \ln(n + 1))$: Hệ số tin cậy mẫu — khi $n$ (số mẫu) ít, $C_n$ nhỏ → giảm tác động (cold-start protection)
-- $B_{PR} = 1 - |P - R|$: Phạt khi Precision và Recall chênh lệch lớn
+- $B_{PR} = 2\sqrt{P\cdot R}/(P+R)$ (GM/AM): Phạt nặng khi P hoặc R rất nhỏ; $B_{PR}=1$ khi $P=R$
 
 ### 11.3 Điểm quan hệ — $S_{\text{rel}}$
 
-$$S_{\text{rel}} = (F1_{\text{rel}} \cdot C_n \cdot B_{PR}) \times (1 + W_{\text{tail}})$$
+$$S_{\text{rel}} = F1_{\text{rel}} \cdot C_n \cdot B_{PR} + \beta \cdot W_{\text{tail}} \cdot F1_{\text{rel}}, \quad \text{clip } [0,1] \quad (\beta = 0.5)$$
 
 $$W_{\text{raw}}(r) = \frac{1}{\sqrt{\text{freq}(r) + \epsilon}}, \quad W_{\text{tail}}(r) = \frac{W_{\text{raw}}(r)}{\sum_{i} W_{\text{raw}}(i)}$$
 
@@ -529,18 +529,18 @@ $$S_{\text{imp}} = 0.6 \cdot \tanh(F1_{\text{current}} - F1_{\text{base}}) + 0.4
 
 $$\rho = \frac{1}{|\mathcal{K}|}\sum_{k \in \mathcal{K}} \frac{U_{\text{prev},k} - U_{\text{current},k}}{U_{\text{prev},k}}$$
 
-$$S_{\text{unc}} = 0.5 + 0.5\,\rho, \quad \text{clip về } [0, 1]$$
+$$S_{\text{unc}} = 0.5 + 0.5 \cdot \tanh(\lambda \cdot \rho), \quad \lambda = 2 \text{ (scaling)}, \; S_{\text{unc}} \in (0, 1)$$
 
 - $\rho > 0$: Uncertainty giảm (tốt) → $S_{\text{unc}} > 0.5$
 - $\rho < 0$: Uncertainty tăng (xấu) → $S_{\text{unc}} < 0.5$
 
 ### 11.8 Trọng số thích nghi (Adaptive Weights)
 
-$$W_k = \frac{W_k^0 + \alpha\, (b_k - S_k)}{\sum_j (W_j^0 + \alpha\, (b_j - S_j))}$$
+$$W_k = \frac{W_k^0 \cdot \exp\!\big(\alpha\,(b_k - S_k)\big)}{\sum_j W_j^0 \cdot \exp\!\big(\alpha\,(b_j - S_j)\big)}$$
 
-- $W_k^0$: Trọng số khởi tạo (det: 0.25, rel: 0.45, div: 0.15, cons: 0.10, imp: 0.05, unc: 0.10)
-- $b_k - S_k$: Chênh lệch so với baseline — thành phần kém hơn baseline nhận trọng số cao hơn
-- Mẫu số: Chuẩn hóa tổng trọng số = 1
+- $W_k^0$: Trọng số prior (det: 0.25, rel: 0.45, div: 0.15, cons: 0.10, imp: 0.05, unc: 0.10)
+- $b_k - S_k$: Chênh lệch so với baseline — thành phần yếu ($S_k < b_k$) có $\exp(\alpha(b_k - S_k))$ lớn hơn → trọng số cao hơn
+- Đảm bảo $W_k > 0$ và $\sum_k W_k = 1$ (công thức cũ $W_k^0 + \alpha(b_k - S_k)$ có thể âm, đã thay bằng softmax + prior)
 
 ---
 

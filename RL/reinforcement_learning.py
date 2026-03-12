@@ -92,14 +92,15 @@ class RelationshipReinforcementLearning:
         
         # Performance tracking for adaptive scoring
         self.performance_history = {
-            'rewards': deque(maxlen=50),  # Last 50 rewards
+            'rewards': deque(maxlen=50),  # Scaled rewards (sau sigmoid)
+            'raw_rewards': deque(maxlen=50),  # R_raw trước sigmoid (để tính σ_recent cho k)
             'detection_scores': deque(maxlen=50),
             'relationship_scores': deque(maxlen=50),
             'diversity_scores': deque(maxlen=50),
             'consistency_scores': deque(maxlen=50),
             'uncertainty_reduction_scores': deque(maxlen=50),
-            'improvement_trend': deque(maxlen=20),  # Last 20 improvement scores
-            'weight_history': deque(maxlen=20),  # Track weight changes
+            'improvement_trend': deque(maxlen=20),
+            'weight_history': deque(maxlen=20),
         }
         # Long-tail handling: tail_weights được tính từ tần suất quan hệ hiếm
         self.tail_weights: Dict[str, float] = {}
@@ -2112,8 +2113,9 @@ class RelationshipReinforcementLearning:
                     uncertainty_reduction_score = self.uncertainty_estimator.compute_uncertainty_reduction(
                         current_uncertainties
                     )
-                    # Map [-1, 1] → [0, 1]: 0.5 = no change, 1.0 = full reduction, 0.0 = doubled
-                    uncertainty_reduction_score = max(0.0, min(1.0, 0.5 + uncertainty_reduction_score * 0.5))
+                    # ρ có thể rất âm khi uncertainty tăng mạnh → bọc tanh để S_unc ∈ (0,1) (README §12.7)
+                    lam = getattr(self, 'unc_rho_lambda', 2.0)
+                    uncertainty_reduction_score = 0.5 + 0.5 * math.tanh(lam * uncertainty_reduction_score)
                     print(f"    🔍 Debug - Uncertainty reduction score: {uncertainty_reduction_score:.4f}")
         except Exception as e:
             print(f"    ⚠️ Uncertainty estimation in reward failed: {e}")
@@ -2140,7 +2142,7 @@ class RelationshipReinforcementLearning:
         )
 
         # 4. Tính điểm tổng hợp với trọng số thích ứng
-        total_reward = (
+        total_reward_raw = (
             dynamic_weights['detection'] * detection_score +
             dynamic_weights['relationship'] * relationship_score +
             dynamic_weights['diversity'] * diversity_score +
@@ -2148,9 +2150,9 @@ class RelationshipReinforcementLearning:
             dynamic_weights['improvement'] * improvement_score +
             dynamic_weights['uncertainty_reduction'] * uncertainty_reduction_score
         )
-        
-        # 5. Áp dụng hàm điều chỉnh để đảm bảo điểm trong khoảng hợp lý
-        total_reward = self._apply_reward_scaling(total_reward)
+        # 5. Cập nhật k từ σ_recent (R_raw) rồi áp dụng sigmoid (README §12.1)
+        self.scaling_factor = self._get_current_scaling_factor()
+        total_reward = self._apply_reward_scaling(total_reward_raw)
         
         # 6. Lưu trữ thông tin để phân tích
         self.latest_detection_metrics = detection_metrics
@@ -2167,7 +2169,7 @@ class RelationshipReinforcementLearning:
             'scaling_factor': self._get_current_scaling_factor(),
         }
         
-        # 7. Cập nhật lịch sử để học từ kinh nghiệm
+        # 7. Cập nhật lịch sử (gồm R_raw để lần sau tính k)
         self._update_performance_history(
             total_reward,
             dynamic_weights,
@@ -2177,6 +2179,7 @@ class RelationshipReinforcementLearning:
             consistency_score,
             improvement_score=improvement_score,
             uncertainty_reduction_score=uncertainty_reduction_score,
+            raw_reward=total_reward_raw,
         )
         
         return total_reward
@@ -2396,23 +2399,32 @@ class RelationshipReinforcementLearning:
             image_size=pil_image.size,
         )
     
+    def _calculate_b_pr(self, precision: float, recall: float) -> float:
+        """
+        B_PR = 2√(P·R)/(P+R) = GM/AM (README §12.2). Luôn ∈ (0, 1], bằng 1 khi P=R.
+        Phạt nặng hơn khi một trong hai rất nhỏ (phản ánh chất lượng thực tế).
+        """
+        p, r = float(precision), float(recall)
+        if p <= 0 and r <= 0:
+            return 0.0
+        denom = p + r
+        if denom <= 0:
+            return 0.0
+        return (2.0 * math.sqrt(p * r)) / denom
+
     def _calculate_detection_score(self, detection_metrics: Dict[str, float]) -> float:
         """
         S_det = F1_det * C_n * B_PR
-        C_n = tanh(α * ln(n+1))  — hệ số tin cậy mẫu
-        B_PR = 1 - |P - R|      — hệ số cân bằng Precision-Recall
+        C_n = tanh(α * ln(n+1)); B_PR = 2√(P·R)/(P+R) (geometric ratio, README §12.2).
         """
         f1 = detection_metrics.get('f1', 0.0)
         precision = detection_metrics.get('precision', 0.0)
         recall = detection_metrics.get('recall', 0.0)
         n = detection_metrics.get('num_samples', 0)
 
-        # C_n: hệ số tin cậy mẫu, giảm tác động khi n ít (cold-start)
         alpha = getattr(self, 'reward_alpha', 0.5)
         c_n = math.tanh(alpha * math.log(n + 1)) if n >= 0 else 0.0
-
-        # B_PR: hệ số cân bằng, trừng phạt lệch P-R
-        b_pr = 1.0 - abs(precision - recall)
+        b_pr = self._calculate_b_pr(precision, recall)
         b_pr = max(0.0, min(b_pr, 1.0))
 
         s_det = f1 * c_n * b_pr
@@ -2420,8 +2432,9 @@ class RelationshipReinforcementLearning:
     
     def _calculate_relationship_score(self, relationship_metrics: Dict[str, Any]) -> float:
         """
-        S_rel = (F1_rel * C_n * B_PR) × (1 + W_tail)
-        W_tail từ trọng số nghịch đảo tần suất: W_raw(r) = 1/sqrt(freq(r)+ε), chuẩn hóa (tail_weights).
+        S_rel = F1_rel · C_n · B_PR + β · W_tail · F1_rel, rồi clip về [0, 1].
+        Additive bonus cho quan hệ hiếm (W_tail) tránh S_rel > 1 khi dùng (1+W_tail) nhân trực tiếp.
+        β ∈ (0, 1), ví dụ 0.5 (README §12.3).
         """
         f1 = relationship_metrics.get('f1', 0.0)
         precision = relationship_metrics.get('precision', 0.0)
@@ -2432,22 +2445,25 @@ class RelationshipReinforcementLearning:
         alpha = getattr(self, 'reward_alpha', 0.5)
         c_n = math.tanh(alpha * math.log(n + 1)) if n >= 0 else 0.0
 
-        # B_PR: hệ số cân bằng 
-        b_pr = 1.0 - abs(precision - recall)
+        # B_PR: geometric ratio 2√(P·R)/(P+R) (README §12.2)
+        b_pr = self._calculate_b_pr(precision, recall)
         b_pr = max(0.0, min(b_pr, 1.0))
 
-        # (1 + W_tail): Long-tail boost , W_tail từ tail_weights (đã chuẩn hóa từ 1/sqrt(freq+ε))
+        # W_tail: long-tail weight (đã chuẩn hóa từ 1/sqrt(freq+ε))
         w_tail = 0.0
         rel_name = self._normalize_label(
             relationship_metrics.get('relation_name', '') or relationship_metrics.get('relation', '')
         )
         if rel_name and self.tail_weights:
             w_tail = self.tail_weights.get(rel_name, 0.0)
-        # Nếu không có relation cụ thể, dùng trung bình tail weight trên dataset (đánh giá aggregate)
         if not rel_name and self.tail_weights:
             w_tail = sum(self.tail_weights.values()) / len(self.tail_weights) if self.tail_weights else 0.0
 
-        s_rel = (f1 * c_n * b_pr) * (1.0 + w_tail)
+        # Additive bonus bounded: S_rel = F1·Cn·B_PR + β·W_tail·F1, clip [0,1]
+        beta = getattr(self, 'rel_tail_bonus_beta', 0.5)
+        base = f1 * c_n * b_pr
+        bonus = beta * w_tail * f1
+        s_rel = base + bonus
         return max(0.0, min(s_rel, 1.0))
     
     def _calculate_diversity_score(self, synthetic_data: List[Dict[str, Any]]) -> float:
@@ -2629,10 +2645,8 @@ class RelationshipReinforcementLearning:
     
     def _calculate_consistency_score(self, f1_scores: List[float], precomputed_std: Optional[float] = None) -> float:
         """
-        S_cons theo báo cáo 4.2.2 (55)(56)(57):
-        S_cons = 0.7*S_std + 0.3*S_trend
-        S_std = 1/(1+σ_F1) — nghịch đảo độ lệch chuẩn F1
-        S_trend — hệ số góc hồi quy tuyến tính của chuỗi F1 (57)
+        S_cons = 0.7*S_std + 0.3*S_trend^cons (README §12.5).
+        S_trend^cons = LinearSlope(F1_{t-20:t}) — chuỗi dài hạn để tách với S_imp (giảm tương quan).
         """
         if not f1_scores and (precomputed_std is None or precomputed_std == 0.0):
             return 0.0
@@ -2646,11 +2660,12 @@ class RelationshipReinforcementLearning:
             variance = sum((s - mean_score) ** 2 for s in f1_scores) / len(f1_scores)
             sigma_f1 = math.sqrt(variance)
 
-        # S_std (56): nghịch đảo độ lệch chuẩn
         s_std = 1.0 / (1.0 + sigma_f1)
 
-        # S_trend (57): slope chuỗi F1, map về [0,1]
-        s_trend = self._calculate_trend_score(f1_scores)
+        # S_trend^cons: dùng lịch sử dài hạn (20 epoch gần nhất) để tách tín hiệu với S_imp
+        window = getattr(self, 'cons_trend_window', 20)
+        long_series = list(self.performance_history['relationship_scores'])[-window:]
+        s_trend = self._calculate_trend_score(long_series)
 
         s_cons = 0.7 * s_std + 0.3 * s_trend
         return max(0.0, min(s_cons, 1.0))
@@ -2680,20 +2695,20 @@ class RelationshipReinforcementLearning:
     
     def _calculate_improvement_score(self) -> float:
         """
-        S_imp = 0.6*tanh(F1_current - F1_base) + 0.4*S_trend
-        Khuyến khích sự tăng trưởng so với baseline.
+        S_imp = 0.6*(0.5+0.5*tanh(F1_curr-F1_base)) + 0.4*S_trend^imp (README §12.6).
+        S_trend^imp = LinearSlope(F1_{t-5:t}) — chuỗi ngắn hạn (5 epoch) để tách với S_cons.
         """
         if len(self.performance_history['rewards']) < 3:
             return 0.5
 
-        # F1_current: dùng trung bình relationship_scores gần đây (proxy cho F1)
-        rel_scores = list(self.performance_history['relationship_scores'])[-10:]
+        window = getattr(self, 'imp_trend_window', 5)
+        rel_scores = list(self.performance_history['relationship_scores'])[-window:]
         if not rel_scores:
             return 0.5
         f1_current = sum(rel_scores) / len(rel_scores)
         f1_base = self.baseline_performance.get('relationship', self.baseline_performance.get('overall', 0.5))
 
-        # S_trend: xu hướng chuỗi F1 (relationship_scores)
+        # S_trend^imp: chỉ chuỗi 5 epoch gần nhất (tách nguồn với S_cons)
         s_trend = self._calculate_trend_score(rel_scores)
 
         s_imp = 0.6 * (0.5 + 0.5 * math.tanh(f1_current - f1_base)) + 0.4 * s_trend
@@ -2704,12 +2719,10 @@ class RelationshipReinforcementLearning:
                                   improvement_score: float = 0.5,
                                   uncertainty_reduction_score: float = 0.5) -> Dict[str, float]:
         """
-        Tính trọng số động theo công thức tài liệu (README §12.8):
-        W_k = (W_k^0 + α * (b_k - S_k)) / Z
-        Thành phần nào điểm thấp hơn baseline (S_k < b_k) thì trọng số tăng;
-        điểm cao hơn baseline (S_k > b_k) thì trọng số giảm.
+        Trọng số thích nghi dạng softmax (README §12.8): đảm bảo W_k > 0 và tổng = 1.
+        W_k = (W_k^0 * exp(α(b_k - S_k))) / Σ_j (W_j^0 * exp(α(b_j - S_j)))
+        Thành phần yếu (S_k < b_k) nhận trọng số cao hơn; prior W_k^0 được giữ.
         """
-        # Trọng số cơ bản (gồm cả uncertainty_reduction)
         base_weights = {
             'detection': 0.25,
             'relationship': 0.45,
@@ -2720,57 +2733,55 @@ class RelationshipReinforcementLearning:
         }
 
         baseline = self.baseline_performance
-        b_det = baseline.get('detection', 0.3)
-        b_rel = baseline.get('relationship', 0.7)
-        b_div = baseline.get('diversity', 0.3)
-        b_cons = baseline.get('consistency', 0.5)
-        b_imp = baseline.get('improvement', 0.5)
-        b_unc = baseline.get('uncertainty_reduction', 0.5)
-
-        # α: hệ số điều chỉnh độ nhạy (README §12.8, ví dụ 0.2)
-        adjustment_factor = 0.2
-
-        # W_k^0 + α * (b_k - S_k): điểm thấp hơn baseline → trọng số tăng
-        adjusted_weights = {
-            'detection': base_weights['detection'] + adjustment_factor * (b_det - detection_score),
-            'relationship': base_weights['relationship'] + adjustment_factor * (b_rel - relationship_score),
-            'diversity': base_weights['diversity'] + adjustment_factor * (b_div - diversity_score),
-            'consistency': base_weights['consistency'] + adjustment_factor * (b_cons - consistency_score),
-            'improvement': base_weights['improvement'] + adjustment_factor * (b_imp - improvement_score),
-            'uncertainty_reduction': base_weights['uncertainty_reduction'] + adjustment_factor * (b_unc - uncertainty_reduction_score),
+        scores = {
+            'detection': detection_score,
+            'relationship': relationship_score,
+            'diversity': diversity_score,
+            'consistency': consistency_score,
+            'improvement': improvement_score,
+            'uncertainty_reduction': uncertainty_reduction_score,
+        }
+        baselines = {
+            'detection': baseline.get('detection', 0.3),
+            'relationship': baseline.get('relationship', 0.7),
+            'diversity': baseline.get('diversity', 0.3),
+            'consistency': baseline.get('consistency', 0.5),
+            'improvement': baseline.get('improvement', 0.5),
+            'uncertainty_reduction': baseline.get('uncertainty_reduction', 0.5),
         }
 
-        # Đảm bảo tử số không âm (tránh trọng số âm khi S_k >> b_k)
-        for k in adjusted_weights:
-            adjusted_weights[k] = max(1e-6, adjusted_weights[k])
-
-        # Chuẩn hóa tổng = 1.0
-        total_weight = sum(adjusted_weights.values())
-        normalized_weights = {k: v / total_weight for k, v in adjusted_weights.items()}
+        alpha = 0.2
+        # logits_k = α(b_k - S_k); trừ max để ổn định số học
+        logits = {k: alpha * (baselines[k] - scores[k]) for k in base_weights}
+        logits_max = max(logits.values())
+        unnorm = {k: base_weights[k] * math.exp(logits[k] - logits_max) for k in base_weights}
+        total = sum(unnorm.values())
+        normalized_weights = {k: unnorm[k] / total for k in base_weights}
         return normalized_weights
     
     def _apply_reward_scaling(self, raw_reward: float) -> float:
         """
-        Áp dụng hàm điều chỉnh để đảm bảo điểm trong khoảng hợp lý.
-        Sử dụng sigmoid function để normalize.
+        R = σ(k·(R_raw - 0.5)) với k tường minh (README §12.1).
+        k phụ thuộc độ ổn định σ_recent của R_raw gần đây.
         """
-        # Sử dụng sigmoid để đưa điểm về khoảng [0, 1]
         scaled_reward = 1.0 / (1.0 + math.exp(-self.scaling_factor * (raw_reward - 0.5)))
-        
         return scaled_reward
     
     def _get_current_scaling_factor(self) -> float:
-        """Lấy scaling factor hiện tại dựa trên lịch sử performance."""
-        if len(self.performance_history['rewards']) < 5:
-            return 1.0
-        
-        recent_rewards = list(self.performance_history['rewards'])[-10:]
-        reward_variance = np.var(recent_rewards) if recent_rewards else 0.0
-        
-        # Scaling factor cao hơn khi variance thấp (performance ổn định)
-        scaling_factor = 1.0 + (1.0 - min(reward_variance, 1.0))
-        
-        return scaling_factor
+        """
+        k = k_min + (k_max - k_min) · 1/(1 + σ_recent) (README §12.1).
+        σ_recent = độ lệch chuẩn của R_raw trên M bước gần nhất.
+        Reward ổn định (σ→0) → k→k_max (sigmoid dốc); bất ổn → k nhỏ (tín hiệu mềm).
+        """
+        k_min = getattr(self, 'reward_sigmoid_k_min', 3.0)
+        k_max = getattr(self, 'reward_sigmoid_k_max', 10.0)
+        M = getattr(self, 'reward_sigmoid_M', 10)
+        raw_rewards = list(self.performance_history.get('raw_rewards', []))[-M:]
+        if len(raw_rewards) < 2:
+            return (k_min + k_max) / 2.0
+        sigma_recent = float(np.std(raw_rewards))
+        k = k_min + (k_max - k_min) * (1.0 / (1.0 + sigma_recent))
+        return max(k_min, min(k_max, k))
     
     def _update_performance_history(
         self,
@@ -2782,10 +2793,12 @@ class RelationshipReinforcementLearning:
         consistency_score: float,
         improvement_score: Optional[float] = None,
         uncertainty_reduction_score: Optional[float] = None,
+        raw_reward: Optional[float] = None,
     ) -> None:
-        """Cập nhật lịch sử performance để học từ kinh nghiệm và cập nhật baseline động."""
-        # Lưu history phần thưởng và trọng số
+        """Cập nhật lịch sử performance; raw_reward (R_raw) dùng cho tính k lần sau."""
         self.performance_history['rewards'].append(reward)
+        if raw_reward is not None:
+            self.performance_history.setdefault('raw_rewards', deque(maxlen=50)).append(raw_reward)
         self.performance_history['weight_history'].append(weights)
 
         # Lưu history các thành phần điểm
