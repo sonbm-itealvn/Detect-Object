@@ -121,7 +121,9 @@ class RelationshipReinforcementLearning:
         self.rl_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # Mở rộng action space để bao gồm nhiều số lượng variations
         self.action_space = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        self.state_dim = 5
+        # State dimension: khớp README §11.2 (Detection 2, Relationship 2, Training 3, Uncertainty 2; bỏ histogram R để cố định)
+        self.state_dim = 9
+        self.total_training_epochs = 100  # T trong t/T (episode progress)
         self.q_network = self._build_q_network(self.state_dim, len(self.action_space)).to(self.rl_device)
         self.target_network = self._build_q_network(self.state_dim, len(self.action_space)).to(self.rl_device)
         self.target_network.load_state_dict(self.q_network.state_dict())
@@ -159,6 +161,8 @@ class RelationshipReinforcementLearning:
             representativeness_weight=0.2,
         )
         self._previous_epoch_uncertainties: Dict[str, float] = {}  # Track uncertainty reduction
+        self.latest_uncertainty_mean: float = 0.5
+        self.latest_uncertainty_max: float = 0.5
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -226,41 +230,70 @@ class RelationshipReinforcementLearning:
             scale = 1.0
         return math.tanh(value / scale)
 
-    def _build_state_vector(self, metrics: Optional[Dict[str, float]] = None) -> torch.Tensor:
+    def _build_state_vector(self, metrics: Optional[Dict[str, Any]] = None) -> torch.Tensor:
         """
-        Build state vector for DQN agent.
+        Build state vector for DQN agent — khớp README §11.2 và tài liệu đánh giá.
         
-        IMPROVED: Now uses evaluation metrics (F1 scores) instead of training losses
-        for better representation of actual model performance.
+        s_t = [ F_det (2), F_rel (2), r_{t-1}, ε_t, t/T, U_mean, U_max ] → 9 chiều.
+        (Bỏ histogram phân phối loại quan hệ R chiều để state cố định.)
         
-        State components:
-        - detection_f1: Detection model evaluation F1 score (higher = better)
-        - relationship_f1: Relationship model evaluation F1 score (higher = better)
-        - reward_value: Latest reward signal
-        - dataset_size: Current dataset size (normalized)
-        - epsilon: Current exploration rate
+        Thành phần:
+        1. Avg detection confidence (proxy: F1_det)
+        2. Detection count (normalized) N/100
+        3. Avg relationship confidence (proxy: F1_rel)
+        4. Relationship count (normalized) |R|/200
+        5. Previous reward r_{t-1}
+        6. Epsilon ε_t
+        7. Episode progress t/T
+        8. Mean uncertainty U_mean
+        9. Max uncertainty U_max
         """
         metrics = metrics or self.last_metrics
         
-        # Use evaluation F1 scores instead of training losses for better signal
-        # F1 scores range [0, 1] so we use them directly
+        # Detection: F1 (proxy cho avg confidence), N/100 với N = tổng đối tượng phát hiện (README §11.2)
         detection_f1 = float(metrics.get('detection_f1', 0.0))
-        relationship_f1 = float(metrics.get('relationship_f1', 0.0))
-        
-        # Fallback to inverted loss if F1 not available (for backward compatibility)
         if detection_f1 == 0.0 and 'detection_loss' in metrics:
-            # Convert loss to pseudo-F1 (higher is better)
             detection_f1 = max(0.0, 1.0 - self._normalize_scalar(float(metrics['detection_loss']), scale=5.0))
+        detection_count = float(metrics.get('detection_count', metrics.get('num_samples', len(self.dataset_samples))))
+        if detection_count == 0 and getattr(self, 'latest_detection_metrics', None):
+            det = self.latest_detection_metrics
+            detection_count = float(det.get('tp', 0) + det.get('fp', 0))
+        detection_count_norm = min(1.0, detection_count / 100.0)
+        
+        # Relationship: F1 (proxy cho avg confidence), |R|/200 với |R| = tổng quan hệ GT (README §11.2)
+        relationship_f1 = float(metrics.get('relationship_f1', 0.0))
         if relationship_f1 == 0.0 and 'relationship_loss' in metrics:
             relationship_f1 = max(0.0, 1.0 - self._normalize_scalar(float(metrics['relationship_loss']), scale=5.0))
+        relationship_count = float(metrics.get('relationship_count', metrics.get('num_samples', 0)))
+        if relationship_count == 0 and self.latest_relationship_metrics:
+            rel_tp = self.latest_relationship_metrics.get('tp', 0)
+            rel_fn = self.latest_relationship_metrics.get('fn', 0)
+            relationship_count = float(rel_tp + rel_fn)
+        relationship_count_norm = min(1.0, relationship_count / 200.0)
         
+        # Training state: r_{t-1}, ε_t, t/T
         reward_value = self._normalize_scalar(float(metrics.get('reward', 0.0)), scale=1.0)
-        dataset_size = metrics.get('dataset_size', len(self.dataset_samples))
-        dataset_norm = self._normalize_scalar(float(dataset_size), scale=50.0)
         epsilon_value = self._normalize_scalar(float(self.epsilon), scale=1.0)
+        current_epoch = len(self.training_history['epochs'])
+        total_epochs = max(1, getattr(self, 'total_training_epochs', 100))
+        progress_t_T = min(1.0, current_epoch / total_epochs)
+        
+        # Uncertainty: U_mean, U_max (từ MC Dropout, mặc định 0.5 nếu chưa có)
+        u_mean = float(getattr(self, 'latest_uncertainty_mean', 0.5))
+        u_max = float(getattr(self, 'latest_uncertainty_max', 0.5))
         
         state = torch.tensor(
-            [detection_f1, relationship_f1, reward_value, dataset_norm, epsilon_value],
+            [
+                detection_f1,
+                detection_count_norm,
+                relationship_f1,
+                relationship_count_norm,
+                reward_value,
+                epsilon_value,
+                progress_t_T,
+                u_mean,
+                u_max,
+            ],
             dtype=torch.float32,
             device=self.rl_device,
         )
@@ -1430,8 +1463,12 @@ class RelationshipReinforcementLearning:
         # Add evaluation F1 scores if available (preferred for state building)
         if detection_metrics:
             metrics['detection_f1'] = detection_metrics.get('f1', 0.0)
+            # N = số lượng đối tượng phát hiện (README §11.2): tổng dự đoán = tp + fp
+            metrics['detection_count'] = detection_metrics.get('tp', 0) + detection_metrics.get('fp', 0)
         if relationship_metrics:
             metrics['relationship_f1'] = relationship_metrics.get('f1', 0.0)
+            # |R| = số lượng quan hệ (README §11.2): tổng GT = tp + fn
+            metrics['relationship_count'] = relationship_metrics.get('tp', 0) + relationship_metrics.get('fn', 0)
         
         next_state = self._build_state_vector(metrics)
         self._remember(state, action_index, reward, next_state, done)
@@ -2064,6 +2101,14 @@ class RelationshipReinforcementLearning:
                     current_uncertainties = {
                         str(k): v.get('uncertainty_score', 0.5) for k, v in batch_unc.items()
                     }
+                    # Lưu U_mean, U_max cho state vector (README §11.2)
+                    unc_vals = list(current_uncertainties.values())
+                    if unc_vals:
+                        self.latest_uncertainty_mean = sum(unc_vals) / len(unc_vals)
+                        self.latest_uncertainty_max = max(unc_vals)
+                    else:
+                        self.latest_uncertainty_mean = 0.5
+                        self.latest_uncertainty_max = 0.5
                     uncertainty_reduction_score = self.uncertainty_estimator.compute_uncertainty_reduction(
                         current_uncertainties
                     )
@@ -2073,6 +2118,8 @@ class RelationshipReinforcementLearning:
         except Exception as e:
             print(f"    ⚠️ Uncertainty estimation in reward failed: {e}")
             uncertainty_reduction_score = 0.5  # Neutral on failure
+            self.latest_uncertainty_mean = 0.5
+            self.latest_uncertainty_max = 0.5
         
         # Debug scores
         print(f"    🔍 Debug - Detection score: {detection_score:.4f}")
@@ -2657,8 +2704,10 @@ class RelationshipReinforcementLearning:
                                   improvement_score: float = 0.5,
                                   uncertainty_reduction_score: float = 0.5) -> Dict[str, float]:
         """
-        Tính trọng số động dựa trên hiệu suất hiện tại và lịch sử (công thức 59 báo cáo).
-        Bao gồm cả S_unc: trọng số uncertainty_reduction cũng tham gia thích nghi.
+        Tính trọng số động theo công thức tài liệu (README §12.8):
+        W_k = (W_k^0 + α * (b_k - S_k)) / Z
+        Thành phần nào điểm thấp hơn baseline (S_k < b_k) thì trọng số tăng;
+        điểm cao hơn baseline (S_k > b_k) thì trọng số giảm.
         """
         # Trọng số cơ bản (gồm cả uncertainty_reduction)
         base_weights = {
@@ -2678,23 +2727,22 @@ class RelationshipReinforcementLearning:
         b_imp = baseline.get('improvement', 0.5)
         b_unc = baseline.get('uncertainty_reduction', 0.5)
 
-        # Độ lệch so với baseline (thành phần nào kém → trọng số cao hơn)
+        # α: hệ số điều chỉnh độ nhạy (README §12.8, ví dụ 0.2)
         adjustment_factor = 0.2
-        detection_deviation = abs(detection_score - b_det)
-        relationship_deviation = abs(relationship_score - b_rel)
-        diversity_deviation = abs(diversity_score - b_div)
-        consistency_deviation = abs(consistency_score - b_cons)
-        improvement_deviation = abs(improvement_score - b_imp)
-        uncertainty_deviation = abs(uncertainty_reduction_score - b_unc)
 
+        # W_k^0 + α * (b_k - S_k): điểm thấp hơn baseline → trọng số tăng
         adjusted_weights = {
-            'detection': base_weights['detection'] + adjustment_factor * detection_deviation,
-            'relationship': base_weights['relationship'] + adjustment_factor * relationship_deviation,
-            'diversity': base_weights['diversity'] + adjustment_factor * diversity_deviation,
-            'consistency': base_weights['consistency'] + adjustment_factor * consistency_deviation,
-            'improvement': base_weights['improvement'] + adjustment_factor * improvement_deviation,
-            'uncertainty_reduction': base_weights['uncertainty_reduction'] + adjustment_factor * uncertainty_deviation,
+            'detection': base_weights['detection'] + adjustment_factor * (b_det - detection_score),
+            'relationship': base_weights['relationship'] + adjustment_factor * (b_rel - relationship_score),
+            'diversity': base_weights['diversity'] + adjustment_factor * (b_div - diversity_score),
+            'consistency': base_weights['consistency'] + adjustment_factor * (b_cons - consistency_score),
+            'improvement': base_weights['improvement'] + adjustment_factor * (b_imp - improvement_score),
+            'uncertainty_reduction': base_weights['uncertainty_reduction'] + adjustment_factor * (b_unc - uncertainty_reduction_score),
         }
+
+        # Đảm bảo tử số không âm (tránh trọng số âm khi S_k >> b_k)
+        for k in adjusted_weights:
+            adjusted_weights[k] = max(1e-6, adjusted_weights[k])
 
         # Chuẩn hóa tổng = 1.0
         total_weight = sum(adjusted_weights.values())

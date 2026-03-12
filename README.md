@@ -893,31 +893,32 @@ Context-specific rules (giao thông, công nghiệp, giáo dục, ...).
 
 ### 11.2 State Representation
 
-$$\mathbf{s}_t = [\underbrace{F_1^{\text{det}}, \ldots, F_K^{\text{det}}}_{\text{Detection features}}, \underbrace{N_{\text{rel}}, F_1^{\text{rel}}, \ldots}_{\text{Relationship features}}, \underbrace{r_{t-1}, \varepsilon_t, t/T}_{\text{Training state}}, \underbrace{U_{\text{mean}}, U_{\text{max}}}_{\text{Uncertainty}}] \in \mathbb{R}^{D_s}$$
+$$\mathbf{s}_t = [\underbrace{F_1^{\text{det}}, F_2^{\text{det}}}_{\text{Detection}}, \underbrace{F_1^{\text{rel}}, F_2^{\text{rel}}}_{\text{Relationship}}, \underbrace{r_{t-1}, \varepsilon_t, t/T}_{\text{Training state}}, \underbrace{U_{\text{mean}}, U_{\text{max}}}_{\text{Uncertainty}}] \in \mathbb{R}^{9}$$
 
-**Components chi tiết:**
+**Implementation** (`RL/reinforcement_learning.py` → `_build_state_vector`): vector 9 chiều cố định (bỏ histogram phân phối loại quan hệ $R$ chiều để tránh kích thước biến đổi).
 
-| Component | Source | Dimension |
-|---|---|---|
-| Avg detection confidence | $\frac{1}{N}\sum s_i$ | 1 |
-| Detection count (normalized) | $N / 100$ | 1 |
-| Avg relationship confidence | $\frac{1}{|\mathcal{R}|}\sum \sigma_k$ | 1 |
-| Relationship count (normalized) | $|\mathcal{R}| / 200$ | 1 |
-| Relationship type distribution | histogram over types | $R$ |
-| Previous reward | $r_{t-1}$ | 1 |
-| Epsilon | $\varepsilon_t$ | 1 |
-| Episode progress | $t/T$ | 1 |
-| Mean uncertainty | $\bar{U}$ | 1 |
-| Max uncertainty | $U_{\max}$ | 1 |
+| Thành phần | Công thức / Nguồn | Chiều | Biến trong code |
+|---|---|---|---|
+| **$F_1^{\text{det}}$** — Độ tin cậy phát hiện (proxy) | $\frac{1}{N}\sum s_i$ được proxy bằng $F1_{\text{det}}$ từ đánh giá; nếu không có: $1 - \tanh(\text{loss}_{\text{det}}/5)$ | 1 | `detection_f1` |
+| **$F_2^{\text{det}}$** — Số lượng phát hiện (chuẩn hóa) | $N / 100$, clip $\leq 1$, với $N = \text{TP} + \text{FP}$ (tổng số đối tượng dự đoán) | 1 | `detection_count_norm` |
+| **$F_1^{\text{rel}}$** — Độ tin cậy quan hệ (proxy) | $\frac{1}{|\mathcal{R}|}\sum \sigma_k$ được proxy bằng $F1_{\text{rel}}$; nếu không có: từ loss | 1 | `relationship_f1` |
+| **$F_2^{\text{rel}}$** — Số lượng quan hệ (chuẩn hóa) | $|\mathcal{R}| / 200$, clip $\leq 1$, với $|\mathcal{R}| = \text{TP} + \text{FN}$ (tổng quan hệ ground truth) | 1 | `relationship_count_norm` |
+| **$r_{t-1}$** — Phần thưởng bước trước | Chuẩn hóa: $\tanh(r/1)$ | 1 | `reward_value` |
+| **$\varepsilon_t$** — Tỷ lệ khám phá | $\varepsilon_t \in [0,1]$, chuẩn hóa tanh khi đưa vào state | 1 | `epsilon_value` |
+| **$t/T$** — Tiến độ epoch | $\text{current\_epoch} / \text{total\_training\_epochs}$, clip $\leq 1$ | 1 | `progress_t_T` |
+| **$\bar{U}$** — Độ bất định trung bình | Trung bình combined uncertainty (MC Dropout) trên batch đánh giá; mặc định $0{,}5$ nếu chưa có | 1 | `u_mean` |
+| **$U_{\max}$** — Độ bất định tối đa | Max combined uncertainty trên batch; mặc định $0{,}5$ nếu chưa có | 1 | `u_max` |
+
+*Mở rộng (chưa implement):* có thể thêm histogram phân phối loại quan hệ ($R$ chiều) → state $D_s = 9 + R$.
 
 ### 11.3 Q-Network Architecture
 
 ```
-Q-Network: ℝ^{Ds} → ℝ^{|A|}
+Q-Network: ℝ^9 → ℝ^{|A|}
 
-Input(Ds) → Linear(Ds, 128) → ReLU → Dropout(0.1)
+Input(9) → Linear(9, 128) → ReLU → Dropout(0.1)
           → Linear(128, 64) → ReLU → Dropout(0.1)
-          → Linear(64, |A|) → Output ∈ ℝ^5
+          → Linear(64, |A|) → Output
 ```
 
 **Target network:** $\theta^- \leftarrow \theta$ (hard copy) mỗi $C = 10$ steps.
